@@ -2,8 +2,18 @@ services:
   backend:
     build: .
     container_name: openshorts-backend
-    ports:
-      - "8000:8000"
+    network_mode: host
+    environment:
+      MAX_CONCURRENT_JOBS: "${MAX_CONCURRENT_JOBS:-1}"
+      JOB_NICE_LEVEL: "${JOB_NICE_LEVEL:-10}"
+      FFMPEG_THREADS: "${FFMPEG_THREADS:-2}"
+      FFMPEG_FILTER_THREADS: "${FFMPEG_FILTER_THREADS:-1}"
+      FFMPEG_PRESET: "${FFMPEG_PRESET:-fast}"
+      WHISPER_CPU_THREADS: "${WHISPER_CPU_THREADS:-4}"
+      OMP_NUM_THREADS: "${OMP_NUM_THREADS:-4}"
+      OPENBLAS_NUM_THREADS: "${OPENBLAS_NUM_THREADS:-1}"
+      MKL_NUM_THREADS: "${MKL_NUM_THREADS:-1}"
+      NUMEXPR_NUM_THREADS: "${NUMEXPR_NUM_THREADS:-1}"
     volumes:
       - .:/app
       - /app/__pycache__
@@ -17,6 +27,8 @@ services:
     volumes:
       - ./dashboard:/app
       - /app/node_modules
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     depends_on:
       - backend

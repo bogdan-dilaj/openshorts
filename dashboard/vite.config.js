@@ -11,15 +11,15 @@ export default defineConfig({
     ],
     proxy: {
       '/api': {
-        target: 'http://backend:8000',
+        target: 'http://host.docker.internal:8000',
         changeOrigin: true,
       },
       '/videos': {
-        target: 'http://backend:8000',
+        target: 'http://host.docker.internal:8000',
         changeOrigin: true,
       },
       '/thumbnails': {
-        target: 'http://backend:8000',
+        target: 'http://host.docker.internal:8000',
         changeOrigin: true,
       }
     }

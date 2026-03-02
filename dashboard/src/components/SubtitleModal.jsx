@@ -1,11 +1,76 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { X, Type, Loader2 } from 'lucide-react';
+import { BACKGROUND_OPTIONS, DEFAULT_SUBTITLE_STYLE, FONT_OPTIONS } from '../overlayOptions';
 
-export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessing, videoUrl }) {
-    const [position, setPosition] = useState('bottom'); // bottom, middle, top
-    const [fontSize, setFontSize] = useState(24);
+export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessing, videoUrl, defaultSettings = DEFAULT_SUBTITLE_STYLE }) {
+    const [yPosition, setYPosition] = useState(defaultSettings.yPosition ?? 86);
+    const [fontSize, setFontSize] = useState(defaultSettings.fontSize || 24);
+    const [fontFamily, setFontFamily] = useState(defaultSettings.fontFamily || DEFAULT_SUBTITLE_STYLE.fontFamily);
+    const [backgroundStyle, setBackgroundStyle] = useState(defaultSettings.backgroundStyle || DEFAULT_SUBTITLE_STYLE.backgroundStyle);
+    const [previewTop, setPreviewTop] = useState(0);
+    const previewFrameRef = useRef(null);
+    const previewBoxRef = useRef(null);
+
+    const presetPositions = {
+        top: 14,
+        middle: 50,
+        bottom: 86,
+    };
+
+    useEffect(() => {
+        if (!isOpen) return;
+        setYPosition(defaultSettings.yPosition ?? presetPositions[defaultSettings.position || 'bottom'] ?? 86);
+        setFontSize(defaultSettings.fontSize || 24);
+        setFontFamily(defaultSettings.fontFamily || DEFAULT_SUBTITLE_STYLE.fontFamily);
+        setBackgroundStyle(defaultSettings.backgroundStyle || DEFAULT_SUBTITLE_STYLE.backgroundStyle);
+    }, [isOpen, defaultSettings]);
+
+    useEffect(() => {
+        if (!isOpen) return undefined;
+
+        const updatePlacement = () => {
+            const frame = previewFrameRef.current;
+            const box = previewBoxRef.current;
+            if (!frame || !box) {
+                return;
+            }
+
+            const frameRect = frame.getBoundingClientRect();
+            const boxRect = box.getBoundingClientRect();
+            const desiredCenterY = (Math.max(0, Math.min(100, Number(yPosition) || 0)) / 100) * frameRect.height;
+            const maxTop = Math.max(0, frameRect.height - boxRect.height);
+            const nextTop = Math.min(Math.max(0, desiredCenterY - (boxRect.height / 2)), maxTop);
+            setPreviewTop(nextTop);
+        };
+
+        updatePlacement();
+
+        const resizeObserver = new ResizeObserver(updatePlacement);
+        if (previewFrameRef.current) resizeObserver.observe(previewFrameRef.current);
+        if (previewBoxRef.current) resizeObserver.observe(previewBoxRef.current);
+        window.addEventListener('resize', updatePlacement);
+
+        return () => {
+            resizeObserver.disconnect();
+            window.removeEventListener('resize', updatePlacement);
+        };
+    }, [isOpen, yPosition, fontSize, fontFamily, backgroundStyle]);
 
     if (!isOpen) return null;
+
+    const position = Object.entries(presetPositions).reduce((closestKey, [key, value]) => {
+        const currentDistance = Math.abs(value - yPosition);
+        const closestDistance = Math.abs(presetPositions[closestKey] - yPosition);
+        return currentDistance < closestDistance ? key : closestKey;
+    }, 'bottom');
+
+    const previewStyle = backgroundStyle === 'light-box'
+        ? { backgroundColor: 'rgba(255,255,255,0.86)', color: '#111' }
+        : backgroundStyle === 'yellow-box'
+            ? { backgroundColor: 'rgba(255,228,92,0.92)', color: '#111' }
+            : backgroundStyle === 'transparent'
+                ? { backgroundColor: 'transparent', color: '#fff', textShadow: '0 0 12px rgba(0,0,0,0.9), 0 2px 4px rgba(0,0,0,0.9)' }
+            : { backgroundColor: 'rgba(0,0,0,0.62)', color: '#fff' };
 
     return (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
@@ -18,20 +83,28 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                 </button>
 
                 {/* Left: Preview */}
-                <div className="flex-1 flex flex-col items-center justify-center bg-black rounded-lg border border-white/5 overflow-hidden relative aspect-[9/16] max-h-[600px]">
+                <div
+                    ref={previewFrameRef}
+                    className="flex-1 flex flex-col items-center justify-center bg-black rounded-lg border border-white/5 overflow-hidden relative aspect-[9/16] max-h-[600px]"
+                >
                      <video src={videoUrl} className="w-full h-full object-contain opacity-50" muted playsInline />
                      
                      {/* Subtitle Overlay Preview */}
-                     <div className={`absolute w-full px-8 text-center transition-all duration-300 pointer-events-none flex flex-col items-center justify-center
-                        ${position === 'top' ? 'top-20' : ''}
-                        ${position === 'middle' ? 'top-0 bottom-0' : ''}
-                        ${position === 'bottom' ? 'bottom-20' : ''}
-                     `}>
+                     <div
+                        className="absolute left-1/2 -translate-x-1/2 transition-all duration-200 pointer-events-none flex justify-center text-center"
+                        style={{ top: `${previewTop}px`, width: '100%' }}
+                     >
                         <span 
-                            className="bg-black/50 text-white font-bold px-2 py-1 rounded shadow-lg backdrop-blur-sm border border-white/10 text-center"
+                            ref={previewBoxRef}
+                            className="font-bold px-2 py-1 rounded shadow-lg backdrop-blur-sm border border-white/10 text-center"
                             style={{ 
-                                fontSize: '14px', 
-                                maxWidth: '80%' 
+                                fontSize: `${Math.max(14, Math.round(fontSize * 0.6))}px`,
+                                maxWidth: '80%',
+                                display: 'inline-block',
+                                margin: '0 auto',
+                                textAlign: 'center',
+                                fontFamily,
+                                ...previewStyle,
                             }} 
                         >
                             This is how your subtitles<br/>will appear on the video
@@ -48,11 +121,11 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                     <div className="space-y-6 flex-1">
                         {/* Position Selector */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Position</label>
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Quick Position</label>
                             <div className="grid grid-cols-1 gap-2">
                                 <button 
-                                    onClick={() => setPosition('top')}
-                                    className={`p-3 rounded-xl border flex items-center gap-3 transition-all ${position === 'top' ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
+                                    onClick={() => setYPosition(presetPositions.top)}
+                                    className={`p-3 rounded-xl border flex items-center gap-3 transition-all ${Math.abs(yPosition - presetPositions.top) < 1 ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
                                 >
                                     <div className="w-8 h-8 rounded-lg bg-black/50 border border-white/10 flex items-start justify-center pt-1">
                                         <div className="w-4 h-0.5 bg-white/50 rounded-full"></div>
@@ -61,8 +134,8 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                 </button>
                                 
                                 <button 
-                                    onClick={() => setPosition('middle')}
-                                    className={`p-3 rounded-xl border flex items-center gap-3 transition-all ${position === 'middle' ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
+                                    onClick={() => setYPosition(presetPositions.middle)}
+                                    className={`p-3 rounded-xl border flex items-center gap-3 transition-all ${Math.abs(yPosition - presetPositions.middle) < 1 ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
                                 >
                                     <div className="w-8 h-8 rounded-lg bg-black/50 border border-white/10 flex items-center justify-center">
                                         <div className="w-4 h-0.5 bg-white/50 rounded-full"></div>
@@ -71,8 +144,8 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                 </button>
                                 
                                 <button 
-                                    onClick={() => setPosition('bottom')}
-                                    className={`p-3 rounded-xl border flex items-center gap-3 transition-all ${position === 'bottom' ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
+                                    onClick={() => setYPosition(presetPositions.bottom)}
+                                    className={`p-3 rounded-xl border flex items-center gap-3 transition-all ${Math.abs(yPosition - presetPositions.bottom) < 1 ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
                                 >
                                     <div className="w-8 h-8 rounded-lg bg-black/50 border border-white/10 flex items-end justify-center pb-1">
                                         <div className="w-4 h-0.5 bg-white/50 rounded-full"></div>
@@ -81,10 +154,67 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                 </button>
                             </div>
                         </div>
+
+                        <div>
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Y Position</label>
+                            <input
+                                type="range"
+                                min="0"
+                                max="100"
+                                step="1"
+                                value={yPosition}
+                                onChange={(e) => setYPosition(Number(e.target.value))}
+                                className="w-full accent-yellow-500"
+                            />
+                            <div className="mt-2 flex justify-between text-[11px] text-zinc-500">
+                                <span>Top</span>
+                                <span>{yPosition}%</span>
+                                <span>Bottom</span>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Font</label>
+                            <select
+                                value={fontFamily}
+                                onChange={(e) => setFontFamily(e.target.value)}
+                                className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-white focus:outline-none focus:border-primary/50"
+                            >
+                                {FONT_OPTIONS.map((option) => (
+                                    <option key={option} value={option}>{option}</option>
+                                ))}
+                            </select>
+                        </div>
+
+                        <div>
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Background</label>
+                            <select
+                                value={backgroundStyle}
+                                onChange={(e) => setBackgroundStyle(e.target.value)}
+                                className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-white focus:outline-none focus:border-primary/50"
+                            >
+                                {BACKGROUND_OPTIONS.map((option) => (
+                                    <option key={option.value} value={option.value}>{option.label}</option>
+                                ))}
+                            </select>
+                        </div>
+
+                        <div>
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Size</label>
+                            <input
+                                type="range"
+                                min="18"
+                                max="44"
+                                value={fontSize}
+                                onChange={(e) => setFontSize(Number(e.target.value))}
+                                className="w-full"
+                            />
+                            <div className="text-xs text-zinc-500 mt-2">{fontSize}px</div>
+                        </div>
                     </div>
 
                     <button
-                        onClick={() => onGenerate({ position, fontSize })}
+                        onClick={() => onGenerate({ position, yPosition, fontSize, fontFamily, backgroundStyle })}
                         disabled={isProcessing}
                         className="w-full py-4 mt-6 bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-400 hover:to-orange-400 text-black font-bold rounded-xl shadow-lg shadow-orange-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2"
                     >
@@ -100,5 +230,3 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
         </div>
     );
 }
-
-

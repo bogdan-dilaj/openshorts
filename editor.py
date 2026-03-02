@@ -3,16 +3,27 @@ import json
 import re
 import subprocess
 import time
+import urllib.request
+import urllib.error
 from google import genai
 from google.genai import types
 
 class VideoEditor:
-    def __init__(self, api_key):
-        self.client = genai.Client(api_key=api_key)
-        self.model_name = "gemini-3-flash-preview" 
+    def __init__(self, provider="gemini", api_key=None, base_url=None, model_name=None):
+        self.provider = provider
+        self.api_key = api_key
+        self.base_url = (base_url or "http://127.0.0.1:11434").rstrip("/")
+        if provider == "gemini":
+            self.model_name = model_name if model_name and model_name.startswith("gemini") else "gemini-3-flash-preview"
+        else:
+            self.model_name = model_name or "llama3.1:8b"
+        self.client = genai.Client(api_key=api_key) if provider == "gemini" else None
 
     def upload_video(self, video_path):
         """Uploads video to Gemini File API."""
+        if self.provider != "gemini":
+            return video_path
+
         print(f"📤 Uploading {video_path} to Gemini...")
         
         # Ensure we are passing a path that exists
@@ -38,7 +49,7 @@ class VideoEditor:
             time.sleep(2)
 
     def get_ffmpeg_filter(self, video_file_obj, duration, fps=30, width=None, height=None, transcript=None):
-        """Asks Gemini for a raw FFmpeg filter string."""
+        """Asks the configured LLM for a raw FFmpeg filter string."""
         if width is None or height is None:
             # Keep prompt usable even if caller didn't pass dimensions.
             width, height = 1080, 1920
@@ -111,20 +122,25 @@ class VideoEditor:
         }}
         """
 
-        print("🤖 Asking Gemini for FFmpeg filter...")
-        response = self.client.models.generate_content(
-            model=self.model_name,
-            contents=[video_file_obj, prompt],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
+        if self.provider == "gemini":
+            print("🤖 Asking Gemini for FFmpeg filter...")
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=[video_file_obj, prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                )
             )
-        )
-        
-        print(f"🔍 DEBUG: Gemini Raw Response:\n{response.text}")
+            response_text = response.text
+            print(f"🔍 DEBUG: Gemini Raw Response:\n{response_text}")
+        else:
+            print(f"🦙 Asking Ollama for FFmpeg filter with {self.model_name}...")
+            response_text = self._generate_ollama_response(prompt)
+            print(f"🔍 DEBUG: Ollama Raw Response:\n{response_text}")
 
         try:
             # Clean response text (remove potential markdown blocks)
-            text = response.text
+            text = response_text
             if text.startswith("```json"):
                 text = text[7:]
             elif text.startswith("```"):
@@ -147,8 +163,29 @@ class VideoEditor:
                 
             return json.loads(text)
         except json.JSONDecodeError:
-            print(f"❌ Failed to parse JSON: {response.text}")
+            print(f"❌ Failed to parse JSON: {response_text}")
             return None
+
+    def _generate_ollama_response(self, prompt: str) -> str:
+        req = urllib.request.Request(
+            f"{self.base_url}/api/generate",
+            data=json.dumps({
+                "model": self.model_name,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+                "options": {"temperature": 0.2}
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=600) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            return (payload.get("response") or "").strip()
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"Ollama request failed: {e.code} {body}") from e
 
     @staticmethod
     def _split_filter_chain(filter_string: str) -> list[str]:

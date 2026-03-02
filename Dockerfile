@@ -36,6 +36,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
+ENV HOME=/tmp
+ENV MPLCONFIGDIR=/tmp/matplotlib
+ENV XDG_CONFIG_HOME=/tmp/.config
+ENV XDG_CACHE_HOME=/tmp/.cache
+ENV HF_HOME=/tmp/.cache/huggingface
+ENV HUGGINGFACE_HUB_CACHE=/tmp/.cache/huggingface/hub
+ENV TRANSFORMERS_CACHE=/tmp/.cache/huggingface/transformers
+ENV NUMBA_CACHE_DIR=/tmp/.cache/numba
+ENV YOLO_MODEL_PATH=/tmp/Ultralytics/yolov8n.pt
 
 # Always upgrade yt-dlp to latest (YouTube bot-detection changes frequently)
 RUN pip install --upgrade --no-cache-dir yt-dlp
@@ -46,16 +55,16 @@ COPY . .
 # Create a non-root user (Moved up)
 RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser
 
-# Create directories including Ultralytics cache config
-RUN mkdir -p /app/uploads /app/output /tmp/Ultralytics
-# Fix permissions: /app for code/uploads, /tmp/Ultralytics for AI cache
-RUN chown -R appuser:appuser /app /tmp/Ultralytics
+# Create writable runtime/cache directories outside the bind mount
+RUN mkdir -p /app/uploads /app/output /tmp/Ultralytics /tmp/matplotlib /tmp/.config /tmp/.cache/huggingface /tmp/.cache/numba
+# Fix permissions for app data and all runtime caches
+RUN chown -R appuser:appuser /app /tmp/Ultralytics /tmp/matplotlib /tmp/.config /tmp/.cache
 
 # Switch to non-root user
 USER appuser
 
-# Pre-download YOLO model on build (now running as appuser)
-RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+# Pre-download YOLO model into a writable runtime path that is not hidden by the /app bind mount
+RUN python -c "from ultralytics import YOLO; YOLO('/tmp/Ultralytics/yolov8n.pt')"
 
 # Expose FastAPI port
 EXPOSE 8000

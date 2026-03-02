@@ -6,7 +6,10 @@ import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
 // import Gallery from './components/Gallery';
 import ThumbnailStudio from './components/ThumbnailStudio';
+import JobHistory from './components/JobHistory';
 import { getApiUrl } from './config';
+import { BACKGROUND_OPTIONS, DEFAULT_HOOK_STYLE, DEFAULT_SUBTITLE_STYLE, FONT_OPTIONS } from './overlayOptions';
+import { DEFAULT_SOCIAL_POST_SETTINGS, INSTAGRAM_SHARE_MODES, SOCIAL_PLATFORM_OPTIONS, TIKTOK_POST_MODES } from './socialOptions';
 
 // Enhanced "Encryption" using XOR + Base64 with a Salt
 // This is better than plain Base64 but still client-side.
@@ -127,8 +130,68 @@ const pollJob = async (jobId) => {
   return res.json();
 };
 
+const readErrorMessage = async (res) => {
+  const text = await res.text();
+  try {
+    const json = JSON.parse(text);
+    return json.detail || text;
+  } catch (e) {
+    return text;
+  }
+};
+
+const readStoredJson = (key, fallback) => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? { ...fallback, ...JSON.parse(raw) } : fallback;
+  } catch (e) {
+    return fallback;
+  }
+};
+
+const readStoredSocialPostSettings = () => {
+  try {
+    const raw = localStorage.getItem('social_post_settings_v1');
+    if (!raw) return DEFAULT_SOCIAL_POST_SETTINGS;
+    const parsed = JSON.parse(raw);
+    return {
+      ...DEFAULT_SOCIAL_POST_SETTINGS,
+      ...parsed,
+      platforms: {
+        ...DEFAULT_SOCIAL_POST_SETTINGS.platforms,
+        ...(parsed.platforms || {}),
+      },
+    };
+  } catch (e) {
+    return DEFAULT_SOCIAL_POST_SETTINGS;
+  }
+};
+
+const normalizeOllamaModelName = (value) => {
+  const trimmed = (value || '').trim();
+  if (!trimmed) return '';
+  const aliasMap = {
+    'gemma-3-12b': 'gemma3:12b',
+    'gemma-3-12b:latest': 'gemma3:12b',
+    'gemma3-12b': 'gemma3:12b',
+    'gemma3-12b:latest': 'gemma3:12b',
+  };
+  return aliasMap[trimmed.toLowerCase()] || trimmed;
+};
+
 function App() {
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
+  const [llmProvider, setLlmProvider] = useState(localStorage.getItem('llm_provider') || 'gemini');
+  const [ollamaBaseUrl, setOllamaBaseUrl] = useState(() => {
+    const stored = localStorage.getItem('ollama_base_url');
+    if (!stored || stored === 'http://host.docker.internal:11434') {
+      return 'http://127.0.0.1:11434';
+    }
+    return stored;
+  });
+  const [ollamaModel, setOllamaModelState] = useState(
+    normalizeOllamaModelName(localStorage.getItem('ollama_model') || 'llama3.1:8b')
+  );
   // Social API State - Load encrypted or plain
   const [uploadPostKey, setUploadPostKey] = useState(() => {
     const stored = localStorage.getItem('uploadPostKey_v3');
@@ -146,11 +209,20 @@ function App() {
   const [userProfiles, setUserProfiles] = useState([]); // List of {username, connected: []}
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState('idle'); // idle, processing, complete, error
+  const [jobState, setJobState] = useState('idle'); // queued, processing, partial, completed, failed
   const [results, setResults] = useState(null);
   const [logs, setLogs] = useState([]);
   const [logsVisible, setLogsVisible] = useState(true);
   const [processingMedia, setProcessingMedia] = useState(null);
-  const [activeTab, setActiveTab] = useState('dashboard'); // dashboard, settings
+  const [activeTab, setActiveTab] = useState('dashboard'); // dashboard, history, settings
+  const [historyJobs, setHistoryJobs] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState('');
+  const [cancelingJobId, setCancelingJobId] = useState(null);
+  const [subtitleStyle, setSubtitleStyle] = useState(() => readStoredJson('subtitle_style_v1', DEFAULT_SUBTITLE_STYLE));
+  const [hookStyle, setHookStyle] = useState(() => readStoredJson('hook_style_v1', DEFAULT_HOOK_STYLE));
+  const [socialPostSettings, setSocialPostSettings] = useState(() => readStoredSocialPostSettings());
+  const [clipVideoOverrides, setClipVideoOverrides] = useState({});
 
   // Sync state for original video playback
   const [syncedTime, setSyncedTime] = useState(0);
@@ -167,11 +239,102 @@ function App() {
     setIsSyncedPlaying(false);
   };
 
+  const setOllamaModel = (value) => {
+    setOllamaModelState(normalizeOllamaModelName(value));
+  };
+
+  const getClipVariantKey = (activeJobId, clip, fallbackIndex) => `${activeJobId}:${clip.clip_index ?? fallbackIndex}`;
+
+  const updateClipVideoOverride = (activeJobId, clip, fallbackIndex, videoUrl) => {
+    const key = getClipVariantKey(activeJobId, clip, fallbackIndex);
+    setClipVideoOverrides((prev) => {
+      if (!videoUrl) {
+        if (!(key in prev)) {
+          return prev;
+        }
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      }
+      return { ...prev, [key]: videoUrl };
+    });
+  };
+
+  const updateClipResult = (activeJobId, updatedClip) => {
+    if (!updatedClip) return;
+    setResults((prev) => {
+      if (!prev?.clips?.length) return prev;
+      return {
+        ...prev,
+        clips: prev.clips.map((clip, index) => (
+          (clip.clip_index ?? index) === (updatedClip.clip_index ?? index)
+            ? updatedClip
+            : clip
+        )),
+      };
+    });
+    updateClipVideoOverride(activeJobId, updatedClip, updatedClip.clip_index ?? 0, null);
+  };
+
+  const buildProviderHeaders = (includeJson = false) => {
+    const headers = {
+      'X-LLM-Provider': llmProvider
+    };
+
+    if (llmProvider === 'gemini' && apiKey) {
+      headers['X-Gemini-Key'] = apiKey;
+    }
+
+    if (llmProvider === 'ollama') {
+      headers['X-Ollama-Base-Url'] = ollamaBaseUrl;
+      headers['X-Ollama-Model'] = ollamaModel;
+    }
+
+    if (includeJson) {
+      headers['Content-Type'] = 'application/json';
+    }
+
+    return headers;
+  };
+
+  const deriveProcessingMedia = (job) => {
+    const request = job?.request;
+    if (request?.type === 'url' && request?.url) {
+      return { type: 'url', payload: request.url };
+    }
+    return null;
+  };
+
+  const mapApiStatusToUi = (apiStatus) => {
+    if (apiStatus === 'cancelled') return 'error';
+    if (apiStatus === 'failed') return 'error';
+    if (apiStatus === 'completed') return 'complete';
+    return 'processing';
+  };
+
   useEffect(() => {
     // Encrypt Gemini Key too for consistency if desired, but user asked specifically about Social integration not saving well.
     // For now keeping gemini plain for compatibility unless requested.
     if (apiKey) localStorage.setItem('gemini_key', apiKey);
   }, [apiKey]);
+
+  useEffect(() => {
+    localStorage.setItem('llm_provider', llmProvider);
+    localStorage.setItem('ollama_base_url', ollamaBaseUrl);
+    localStorage.setItem('ollama_model', ollamaModel);
+  }, [llmProvider, ollamaBaseUrl, ollamaModel]);
+
+  useEffect(() => {
+    localStorage.setItem('subtitle_style_v1', JSON.stringify(subtitleStyle));
+  }, [subtitleStyle]);
+
+  useEffect(() => {
+    localStorage.setItem('hook_style_v1', JSON.stringify(hookStyle));
+  }, [hookStyle]);
+
+  useEffect(() => {
+    localStorage.setItem('social_post_settings_v1', JSON.stringify(socialPostSettings));
+  }, [socialPostSettings]);
 
   useEffect(() => {
     if (uploadPostKey) {
@@ -196,7 +359,7 @@ function App() {
 
   useEffect(() => {
     let interval;
-    if ((status === 'processing' || status === 'completed') && jobId) {
+    if (status === 'processing' && jobId) {
       interval = setInterval(async () => {
         try {
           const data = await pollJob(jobId);
@@ -206,18 +369,25 @@ function App() {
           if (data.result) {
             setResults(data.result);
           }
+          if (data.logs) {
+            setLogs(data.logs);
+          }
+          if (data.job_state) {
+            setJobState(data.job_state);
+          }
 
           if (data.status === 'completed') {
             setStatus('complete');
+            if (data.job_state) {
+              setJobState(data.job_state);
+            }
             clearInterval(interval);
-          } else if (data.status === 'failed') {
+          } else if (data.status === 'failed' || data.status === 'cancelled') {
             setStatus('error');
             const errorMsg = data.error || (data.logs && data.logs.length > 0 ? data.logs[data.logs.length - 1] : "Process failed");
             setLogs(prev => [...prev, "Error: " + errorMsg]);
+            setJobState(data.job_state || data.status || 'failed');
             clearInterval(interval);
-          } else {
-            // Update logs if available
-            if (data.logs) setLogs(data.logs);
           }
         } catch (e) {
           console.error("Polling error", e);
@@ -227,6 +397,29 @@ function App() {
     return () => clearInterval(interval);
   }, [status, jobId]);
 
+  const fetchJobHistory = async () => {
+    setHistoryLoading(true);
+    setHistoryError('');
+    try {
+      const res = await fetch(getApiUrl('/api/jobs/history'));
+      if (!res.ok) {
+        throw new Error('Failed to load job history');
+      }
+      const data = await res.json();
+      setHistoryJobs(data.jobs || []);
+    } catch (e) {
+      setHistoryError(e.message || 'Failed to load job history');
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'history') {
+      fetchJobHistory();
+    }
+  }, [activeTab]);
+
 
   const fetchUserProfiles = async () => {
     if (!uploadPostKey) return;
@@ -234,64 +427,151 @@ function App() {
       const res = await fetch(getApiUrl('/api/social/user'), {
         headers: { 'X-Upload-Post-Key': uploadPostKey }
       });
-      if (!res.ok) throw new Error("Failed to fetch");
+      if (!res.ok) throw new Error(await readErrorMessage(res));
       const data = await res.json();
       if (data.profiles && data.profiles.length > 0) {
         setUserProfiles(data.profiles);
         // Auto select first if none selected
-        if (!uploadUserId) {
+        if (!uploadUserId || !data.profiles.some((profile) => profile.username === uploadUserId)) {
           setUploadUserId(data.profiles[0].username);
         }
       } else {
-        alert("No profiles found for this API Key.");
+        setUserProfiles([]);
+        alert(data.error || "No profiles found for this API Key.");
       }
     } catch (e) {
-      alert("Error fetching User Profiles. Please check key.");
+      alert(`Error fetching User Profiles: ${e.message}`);
       console.error(e);
     }
   };
 
   const handleProcess = async (data) => {
     setStatus('processing');
+    setJobState('queued');
     setLogs(["Starting process..."]);
     setResults(null);
+    setClipVideoOverrides({});
     setProcessingMedia(data);
 
     try {
       let body;
-      const headers = { 'X-Gemini-Key': apiKey };
+      const headers = buildProviderHeaders(data.type === 'url');
 
       if (data.type === 'url') {
-        headers['Content-Type'] = 'application/json';
-        body = JSON.stringify({ url: data.payload });
+        body = JSON.stringify({
+          url: data.payload,
+          interview_mode: !!data.options?.interviewMode,
+          allow_long_clips: !!data.options?.allowLongClips,
+          max_clips: Number(data.options?.maxClips) || 10,
+        });
       } else {
         const formData = new FormData();
         formData.append('file', data.payload);
+        formData.append('interview_mode', data.options?.interviewMode ? 'true' : 'false');
+        formData.append('allow_long_clips', data.options?.allowLongClips ? 'true' : 'false');
+        formData.append('max_clips', String(Number(data.options?.maxClips) || 10));
         body = formData;
       }
 
       const res = await fetch(getApiUrl('/api/process'), {
         method: 'POST',
-        headers: data.type === 'url' ? headers : { 'X-Gemini-Key': apiKey },
+        headers: data.type === 'url' ? headers : { ...headers },
         body
       });
 
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) throw new Error(await readErrorMessage(res));
       const resData = await res.json();
       setJobId(resData.job_id);
+      fetchJobHistory();
 
     } catch (e) {
       setStatus('error');
+      setJobState('failed');
       setLogs(l => [...l, `Error starting job: ${e.message}`]);
     }
   };
 
   const handleReset = () => {
     setStatus('idle');
+    setJobState('idle');
     setJobId(null);
     setResults(null);
+    setClipVideoOverrides({});
     setLogs([]);
     setProcessingMedia(null);
+  };
+
+  const handleOpenJob = async (job) => {
+    try {
+      const data = await pollJob(job.job_id);
+      setJobId(job.job_id);
+      setResults(data.result || job.result || null);
+      setLogs(data.logs || job.logs || []);
+      setProcessingMedia(deriveProcessingMedia(job));
+      setJobState(data.job_state || job.status || 'completed');
+      setStatus(mapApiStatusToUi(data.status));
+      setActiveTab('dashboard');
+    } catch (e) {
+      alert(`Failed to open job: ${e.message}`);
+    }
+  };
+
+  const handleResumeJob = async (job) => {
+    try {
+      const res = await fetch(getApiUrl(`/api/jobs/${job.job_id}/resume`), {
+        method: 'POST',
+        headers: buildProviderHeaders(true),
+        body: JSON.stringify({
+          provider: llmProvider,
+          ollama_base_url: ollamaBaseUrl,
+          ollama_model: ollamaModel
+        })
+      });
+
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res));
+      }
+
+      const data = await res.json();
+      setJobId(data.job_id);
+      setStatus('processing');
+      setJobState('queued');
+      setResults(job.result || null);
+      setLogs((job.logs || []).concat([`Job ${job.job_id} resumed and queued.`]));
+      setProcessingMedia(deriveProcessingMedia(job));
+      setActiveTab('dashboard');
+      fetchJobHistory();
+    } catch (e) {
+      alert(`Failed to resume job: ${e.message}`);
+    }
+  };
+
+  const handleCancelJob = async (job) => {
+    setCancelingJobId(job.job_id);
+    try {
+      const res = await fetch(getApiUrl(`/api/jobs/${job.job_id}/cancel`), {
+        method: 'POST',
+      });
+
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res));
+      }
+
+      const data = await res.json();
+      if (job.job_id === jobId) {
+        setLogs(data.logs || []);
+        setResults(data.result || results);
+        if (data.status === 'cancelled') {
+          setStatus('error');
+          setJobState('cancelled');
+        }
+      }
+      fetchJobHistory();
+    } catch (e) {
+      alert(`Failed to cancel job: ${e.message}`);
+    } finally {
+      setCancelingJobId(null);
+    }
   };
 
   // --- UI Components ---
@@ -322,13 +602,13 @@ function App() {
           <span className="font-medium hidden lg:block">YouTube Studio</span>
         </button>
 
-        {/* <button
-          onClick={() => setActiveTab('gallery')}
-          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'gallery' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
+        <button
+          onClick={() => setActiveTab('history')}
+          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'history' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
         >
-          <LayoutGrid size={20} />
-          <span className="font-medium hidden lg:block">Gallery</span>
-        </button> */}
+          <History size={20} />
+          <span className="font-medium hidden lg:block">History</span>
+        </button>
 
         <button
           onClick={() => setActiveTab('settings')}
@@ -404,7 +684,7 @@ function App() {
               />
             )}
 
-            {!apiKey && (
+            {llmProvider === 'gemini' && !apiKey && (
               <span className="text-xs text-amber-500 bg-amber-500/10 px-3 py-1 rounded-full border border-amber-500/20">
                 API Key Missing
               </span>
@@ -415,6 +695,20 @@ function App() {
         {/* Main Workspace */}
         <div className="flex-1 overflow-hidden relative">
 
+          {activeTab === 'history' && (
+            <JobHistory
+              jobs={historyJobs}
+              loading={historyLoading}
+              error={historyError}
+              currentJobId={jobId}
+              cancelingJobId={cancelingJobId}
+              onRefresh={fetchJobHistory}
+              onOpenJob={handleOpenJob}
+              onResumeJob={handleResumeJob}
+              onCancelJob={handleCancelJob}
+            />
+          )}
+
           {/* View: Settings */}
           {activeTab === 'settings' && (
             <div className="h-full overflow-y-auto p-8 max-w-2xl mx-auto animate-[fadeIn_0.3s_ease-out]">
@@ -424,7 +718,134 @@ function App() {
                   <Shield size={12} /> Privacy: keys only live in your browser (sent to backend just to process)
                 </div>
               </div>
-              <KeyInput onKeySet={setApiKey} savedKey={apiKey} />
+              <div className="glass-panel p-6 mb-8">
+                <label className="block text-sm text-zinc-400 mb-3">AI Provider</label>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={() => setLlmProvider('gemini')}
+                    className={`rounded-xl border px-4 py-3 text-sm text-left transition-colors ${llmProvider === 'gemini' ? 'border-primary bg-primary/10 text-white' : 'border-white/10 text-zinc-400 hover:bg-white/5'}`}
+                  >
+                    Gemini
+                  </button>
+                  <button
+                    onClick={() => setLlmProvider('ollama')}
+                    className={`rounded-xl border px-4 py-3 text-sm text-left transition-colors ${llmProvider === 'ollama' ? 'border-primary bg-primary/10 text-white' : 'border-white/10 text-zinc-400 hover:bg-white/5'}`}
+                  >
+                    Ollama
+                  </button>
+                </div>
+              </div>
+              <KeyInput
+                provider={llmProvider}
+                onKeySet={setApiKey}
+                savedKey={apiKey}
+                ollamaBaseUrl={ollamaBaseUrl}
+                onOllamaBaseUrlSet={setOllamaBaseUrl}
+                ollamaModel={ollamaModel}
+                onOllamaModelSet={setOllamaModel}
+              />
+
+              <div className="glass-panel p-6 mt-8">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-semibold">YouTube Download Quality</h2>
+                  <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Local setup</span>
+                </div>
+                <p className="text-xs text-zinc-500 leading-relaxed">
+                  The downloader now aborts if YouTube only exposes a low-quality source. For locked formats, place a Netscape
+                  <strong> cookies.txt</strong> in the project root or set <strong>YOUTUBE_VISITOR_DATA</strong> and optional
+                  <strong> YOUTUBE_PO_TOKEN_WEB</strong>, <strong>YOUTUBE_PO_TOKEN_MWEB</strong>, <strong>YOUTUBE_PO_TOKEN_ANDROID</strong>
+                  in your backend environment.
+                </p>
+              </div>
+
+              <div className="glass-panel p-6 mt-8">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-semibold">Subtitle Defaults</h2>
+                  <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Global</span>
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-sm text-zinc-400 mb-2">Font</label>
+                    <select
+                      value={subtitleStyle.fontFamily}
+                      onChange={(e) => setSubtitleStyle((prev) => ({ ...prev, fontFamily: e.target.value }))}
+                      className="input-field"
+                    >
+                      {FONT_OPTIONS.map((option) => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm text-zinc-400 mb-2">Background</label>
+                    <select
+                      value={subtitleStyle.backgroundStyle}
+                      onChange={(e) => setSubtitleStyle((prev) => ({ ...prev, backgroundStyle: e.target.value }))}
+                      className="input-field"
+                    >
+                      {BACKGROUND_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <div className="mt-4">
+                  <label className="block text-sm text-zinc-400 mb-2">Default Subtitle Y Position</label>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={subtitleStyle.yPosition ?? 86}
+                    onChange={(e) => setSubtitleStyle((prev) => ({ ...prev, yPosition: Number(e.target.value) }))}
+                    className="w-full accent-yellow-500"
+                  />
+                  <div className="mt-2 flex justify-between text-xs text-zinc-500">
+                    <span>Top</span>
+                    <span>{subtitleStyle.yPosition ?? 86}%</span>
+                    <span>Bottom</span>
+                  </div>
+                </div>
+                <p className="text-xs text-zinc-500 mt-4">
+                  These defaults prefill the per-short subtitle dialog and can still be changed there.
+                </p>
+              </div>
+
+              <div className="glass-panel p-6 mt-8">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-semibold">Hook Defaults</h2>
+                  <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Global</span>
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-sm text-zinc-400 mb-2">Font</label>
+                    <select
+                      value={hookStyle.fontFamily}
+                      onChange={(e) => setHookStyle((prev) => ({ ...prev, fontFamily: e.target.value }))}
+                      className="input-field"
+                    >
+                      {FONT_OPTIONS.map((option) => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm text-zinc-400 mb-2">Background</label>
+                    <select
+                      value={hookStyle.backgroundStyle}
+                      onChange={(e) => setHookStyle((prev) => ({ ...prev, backgroundStyle: e.target.value }))}
+                      className="input-field"
+                    >
+                      {BACKGROUND_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <p className="text-xs text-zinc-500 mt-4">
+                  These defaults prefill the per-short hook dialog and can still be overridden per clip.
+                </p>
+              </div>
 
               <div className="glass-panel p-6 mt-8">
                 <div className="flex items-center justify-between mb-4">
@@ -432,7 +853,7 @@ function App() {
                   <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Optional</span>
                 </div>
                 <p className="text-xs text-zinc-500 mb-6 leading-relaxed">
-                  Automatically publish your clips to TikTok, Instagram Reels, and YouTube Shorts via <strong>Upload-Post</strong>.
+                  Automatically publish your clips to TikTok, Instagram Reels, YouTube Shorts, Facebook, X, Threads and Pinterest via <strong>Upload-Post</strong>.
                   Includes a <strong>free tier</strong> (no credit card required).
                   If you prefer, you can skip this and manually download/upload your videos.
                 </p>
@@ -449,6 +870,107 @@ function App() {
                     <button onClick={fetchUserProfiles} className="btn-primary py-2 px-4 text-sm">
                       Connect
                     </button>
+                  </div>
+                  <div>
+                    <label className="block text-sm text-zinc-400 mb-2">Default Upload-Post Profile</label>
+                    <select
+                      value={uploadUserId}
+                      onChange={(e) => setUploadUserId(e.target.value)}
+                      className="input-field"
+                      disabled={userProfiles.length === 0}
+                    >
+                      <option value="">{userProfiles.length === 0 ? 'Load profiles first' : 'Select profile'}</option>
+                      {userProfiles.map((profile) => (
+                        <option key={profile.username} value={profile.username}>{profile.username}</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-zinc-500 mt-2">
+                      This is the global Upload-Post profile used for publishing. Individual clip dialogs only show the currently active profile.
+                    </p>
+                  </div>
+                  <div className="border border-white/5 rounded-xl p-4 space-y-4 bg-black/10">
+                    <div>
+                      <label className="block text-sm text-zinc-400 mb-2">Default Active Platforms</label>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                        {SOCIAL_PLATFORM_OPTIONS.map((platform) => (
+                          <label key={platform.key} className="flex items-center gap-2 text-sm text-zinc-300 p-2 rounded-lg border border-white/5 bg-white/5">
+                            <input
+                              type="checkbox"
+                              checked={!!socialPostSettings.platforms[platform.key]}
+                              onChange={(e) => setSocialPostSettings((prev) => ({
+                                ...prev,
+                                platforms: {
+                                  ...prev.platforms,
+                                  [platform.key]: e.target.checked,
+                                },
+                              }))}
+                              className="w-4 h-4 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary"
+                            />
+                            {platform.label}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div>
+                        <label className="block text-sm text-zinc-400 mb-2">Default Instagram Mode</label>
+                        <select
+                          value={socialPostSettings.instagramShareMode}
+                          onChange={(e) => setSocialPostSettings((prev) => ({ ...prev, instagramShareMode: e.target.value }))}
+                          className="input-field"
+                        >
+                          {INSTAGRAM_SHARE_MODES.map((mode) => (
+                            <option key={mode.value} value={mode.value}>{mode.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-sm text-zinc-400 mb-2">Default TikTok Post Mode</label>
+                        <select
+                          value={socialPostSettings.tiktokPostMode}
+                          onChange={(e) => setSocialPostSettings((prev) => ({ ...prev, tiktokPostMode: e.target.value }))}
+                          className="input-field"
+                        >
+                          {TIKTOK_POST_MODES.map((mode) => (
+                            <option key={mode.value} value={mode.value}>{mode.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                    <label className="flex items-center gap-3 text-sm text-zinc-300">
+                      <input
+                        type="checkbox"
+                        checked={!!socialPostSettings.tiktokIsAigc}
+                        onChange={(e) => setSocialPostSettings((prev) => ({ ...prev, tiktokIsAigc: e.target.checked }))}
+                        className="w-4 h-4 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary"
+                      />
+                      Mark TikTok uploads as AI-generated by default
+                    </label>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div>
+                        <label className="block text-sm text-zinc-400 mb-2">Default Facebook Page ID</label>
+                        <input
+                          type="text"
+                          value={socialPostSettings.facebookPageId}
+                          onChange={(e) => setSocialPostSettings((prev) => ({ ...prev, facebookPageId: e.target.value }))}
+                          className="input-field"
+                          placeholder="Optional"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm text-zinc-400 mb-2">Default Pinterest Board ID</label>
+                        <input
+                          type="text"
+                          value={socialPostSettings.pinterestBoardId}
+                          onChange={(e) => setSocialPostSettings((prev) => ({ ...prev, pinterestBoardId: e.target.value }))}
+                          className="input-field"
+                          placeholder="Required for Pinterest posts"
+                        />
+                      </div>
+                    </div>
+                    <p className="text-xs text-zinc-500 leading-relaxed">
+                      The detected transcript language is forwarded where Upload-Post currently supports language fields. In the current upload docs that is YouTube, not TikTok.
+                    </p>
                   </div>
                   <p className="text-xs text-zinc-500 leading-relaxed">
                     Connect your Upload-Post account to enable one-click publishing.
@@ -576,7 +1098,12 @@ function App() {
                     status === 'complete' ? 'bg-green-500/10 border-green-500/20 text-green-400' :
                       'bg-red-500/10 border-red-500/20 text-red-400'
                     }`}>
-                    {status.toUpperCase()}
+                    {(status === 'processing'
+                      ? jobState
+                      : (status === 'complete' && jobState === 'partial') || (status === 'error' && jobState === 'cancelled')
+                        ? jobState
+                        : status
+                    ).toUpperCase()}
                   </span>
                 </div>
 
@@ -639,14 +1166,24 @@ function App() {
                     <div className={`grid gap-4 pb-10 ${status === 'complete' ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1'}`}>
                       {results.clips.map((clip, i) => (
                         <ResultCard
-                          key={i}
+                          key={`${jobId || 'job'}:${clip.clip_index ?? i}`}
                           clip={clip}
                           index={i}
                           jobId={jobId}
                           uploadPostKey={uploadPostKey}
                           uploadUserId={uploadUserId}
                           geminiApiKey={apiKey}
+                          llmProvider={llmProvider}
+                          ollamaBaseUrl={ollamaBaseUrl}
+                          ollamaModel={ollamaModel}
                           elevenLabsKey={elevenLabsKey}
+                          subtitleStyle={subtitleStyle}
+                          hookStyle={hookStyle}
+                          socialPostSettings={socialPostSettings}
+                          activeUploadProfile={uploadUserId}
+                          currentVideoOverride={clipVideoOverrides[getClipVariantKey(jobId, clip, i)]}
+                          onVideoVariantChange={(videoUrl) => updateClipVideoOverride(jobId, clip, i, videoUrl)}
+                          onClipUpdated={(updatedClip) => updateClipResult(jobId, updatedClip)}
                           onPlay={(time) => handleClipPlay(time)}
                           onPause={handleClipPause}
                         />

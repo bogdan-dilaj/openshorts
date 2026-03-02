@@ -5,13 +5,17 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [mode, setMode] = useState('url'); // 'url' | 'file'
     const [url, setUrl] = useState('');
     const [file, setFile] = useState(null);
+    const [interviewMode, setInterviewMode] = useState(false);
+    const [allowLongClips, setAllowLongClips] = useState(false);
+    const [maxClips, setMaxClips] = useState(10);
 
     const handleSubmit = (e) => {
         e.preventDefault();
+        const normalizedMaxClips = Math.max(1, Math.min(50, Number(maxClips) || 10));
         if (mode === 'url' && url) {
-            onProcess({ type: 'url', payload: url });
+            onProcess({ type: 'url', payload: url, options: { interviewMode, allowLongClips, maxClips: normalizedMaxClips } });
         } else if (mode === 'file' && file) {
-            onProcess({ type: 'file', payload: file });
+            onProcess({ type: 'file', payload: file, options: { interviewMode, allowLongClips, maxClips: normalizedMaxClips } });
         }
     };
 
@@ -94,6 +98,52 @@ export default function MediaInput({ onProcess, isProcessing }) {
                         )}
                     </div>
                 )}
+
+                <label className="mt-4 flex items-start gap-3 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-left">
+                    <input
+                        type="checkbox"
+                        checked={interviewMode}
+                        onChange={(e) => setInterviewMode(e.target.checked)}
+                        className="mt-1 h-4 w-4 rounded border-white/20 bg-transparent text-primary focus:ring-primary"
+                    />
+                    <span>
+                        <span className="block text-sm font-medium text-white">Interview-Modus</span>
+                        <span className="block text-xs text-zinc-500">
+                            Fuer zwei Personen im Bild: links/rechts erkannte Gesichter werden als Split-Screen oben und unten gerendert.
+                        </span>
+                    </span>
+                </label>
+
+                <label className="mt-3 flex items-start gap-3 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-left">
+                    <input
+                        type="checkbox"
+                        checked={allowLongClips}
+                        onChange={(e) => setAllowLongClips(e.target.checked)}
+                        className="mt-1 h-4 w-4 rounded border-white/20 bg-transparent text-primary focus:ring-primary"
+                    />
+                    <span>
+                        <span className="block text-sm font-medium text-white">Clips ueber 1 Minute erlauben</span>
+                        <span className="block text-xs text-zinc-500">
+                            Laesst bei starken Momenten auch laengere Clips zu. Ueber 60 Sekunden werden sie auf 1:01 bis maximal 1:15 begrenzt.
+                        </span>
+                    </span>
+                </label>
+
+                <div className="mt-3 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-left">
+                    <label className="block text-sm font-medium text-white mb-2">Maximale Clip-Anzahl</label>
+                    <input
+                        type="number"
+                        min="1"
+                        max="50"
+                        step="1"
+                        value={maxClips}
+                        onChange={(e) => setMaxClips(e.target.value)}
+                        className="input-field"
+                    />
+                    <span className="mt-2 block text-xs text-zinc-500">
+                        Standard ist 10. Erhoehe den Wert nur, wenn du bewusst mehr Vorschlaege erzeugen willst.
+                    </span>
+                </div>
 
                 <button
                     type="submit"
