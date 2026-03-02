@@ -1,143 +1,355 @@
-# OpenShorts.app 🚀🎬
+# OpenShorts
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Open Source](https://badges.frapsoft.com/os/v1/open-source.svg?v=103)](https://opensource.org/)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
+OpenShorts is a local-first pipeline for turning long videos into vertical short-form clips, editing them, versioning them, and publishing them to social platforms from a web dashboard.
 
-OpenShorts is an all-in-one open-source solution to automate the creation and distribution of viral vertical content. It transforms long YouTube videos or local files into high-potential short clips optimized for **TikTok**, **Instagram Reels**, and **YouTube Shorts**.
+It supports:
+- YouTube URLs and local uploads
+- Gemini or local Ollama models for clip selection and AI edit flows
+- Vertical reframing for single-speaker, group, and interview footage
+- Subtitle, hook, dub, trim, and auto-edit post-processing
+- Job history, resume, cancel, and partial recovery
+- Direct posting via Upload-Post
 
-![OpenShorts Demo](https://github.com/kamilstanuch/Autocrop-vertical/blob/main/churchil_queen_vertical_short.gif?raw=true)
+## Features
 
-### 📺 Video Tutorial: How it works
-[![OpenShorts Tutorial](https://img.youtube.com/vi/xlyjD1qCaX0/maxresdefault.jpg)](https://www.youtube.com/watch?v=xlyjD1qCaX0 "Click to watch the video on YouTube")
+### Clip generation
+- Faster-Whisper transcription with word timestamps
+- AI clip selection with `gemini` or `ollama`
+- Configurable maximum clip count in the form
+- Default short clip mode up to `60s`
+- Optional long-clip mode that allows clips up to `75s`
+- Language-aware metadata generation for titles, hooks, and descriptions
 
-*Click the image above to watch the full walkthrough.*
+### Vertical video processing
+- Smart reframing for 9:16 output
+- 1080x1920 export target for TikTok, Reels, and Shorts
+- Interview mode for two-person footage
+- Scene analysis and speaker-focused cropping
 
----
+### Post-processing
+- Auto Edit
+- Subtitle burn-in with configurable font, size, background, and Y position
+- Hook overlay with free X/Y positioning, width presets, alignment, and styling
+- Voice dubbing via ElevenLabs
+- Manual trim with preview, scrub bar, start/end controls, and new version creation
+- Non-destructive clip version chain per short
 
-## ✨ Key Features
+### Workflow and reliability
+- Job history tab
+- Resume failed or partial jobs
+- Stop queued or running jobs
+- Disk-backed job state and metadata persistence
+- Fallback handling for partial runs
 
-OpenShorts leverages state-of-the-art AI to handle the entire content lifecycle:
+### Publishing
+- Upload-Post integration
+- Multi-profile support
+- Posting to TikTok, Instagram, YouTube, Facebook, X, Pinterest, and Threads
+- Instagram Trial Reels support
+- TikTok `post_mode` and `is_aigc`
+- Language forwarding where supported by Upload-Post
 
-1.  **🧠 Viral Moment Detection:**
-    *   **Faster-Whisper**: High-speed, CPU-optimized transcription and word-level timestamps.
-    *   **Google Gemini 2.0 Flash**: Advanced AI analysis to identify the 3-15 most viral moments based on hooks and engagement potential.
-    *   **Automatic Copywriting**: Generates SEO-optimized titles and descriptions for all platforms.
+## Requirements
 
-2.  **✂️ Smart AI Cropping & Tracking (New V2 Engine):**
-    *   **Dual-Mode Strategy**: Automatically detects scene composition to apply the best framing strategy.
-        *   **TRACK Mode (Single Subject)**: Uses **MediaPipe Face Detection** + **YOLOv8** fallback for ultra-fast, robust subject tracking. Features a **"Heavy Tripod" stabilization engine** that eliminates jitter and unnatural movements, providing smooth, cinematic reframing. Includes **Speaker Identification** to stick to the active speaker and avoid erratic switching.
-        *   **GENERAL Mode (Groups/Landscapes)**: For scenes with multiple people or no clear subject, it automatically switches to a professional **blurred-background layout**, preserving the full width of the original shot while filling the 9:16 vertical space.
-    *   **Intelligent Scene Analysis**: Pre-scans every scene to determine the optimal strategy before processing.
+- Docker and Docker Compose
+- For Gemini mode: a Gemini API key
+- For Ollama mode: a local Ollama instance and at least one pulled model
+- Optional: Upload-Post API key for posting
+- Optional: ElevenLabs API key for dubbing
 
-3.  **☁️ Automated S3 Backup:**
-    *   **Silent Background Upload**: Once clips are generated, they are automatically uploaded to an AWS S3 bucket.
-    *   **Seamless Integration**: Operates in the background without affecting processing logs or UI performance.
+## Quick start
 
-4.  **📲 Direct Social Posting:**
-    *   **Upload-Post Integration**: Share your generated clips directly to TikTok, Instagram, and YouTube with a single click.
-    *   **Profile Selector**: Manage multiple social accounts easily through the dashboard.
-
-5.  **🎙️ AI Voice Dubbing:**
-    *   **ElevenLabs Integration**: Translate your clips to 30+ languages with AI-powered voice dubbing.
-    *   **Voice Cloning**: Preserves the original speaker's voice characteristics in the new language.
-    *   **Auto-Subtitles**: Automatically generates subtitles in the dubbed language.
-
-6.  **🎨 Modern Web Dashboard:**
-    *   **Real-time Progress**: Watch clips appear as they are generated with a live results feed.
-    *   **Log Streaming**: Follow the technical process with real-time log updates.
-    *   **Responsive Design**: A premium, dark-mode glassmorphism interface.
-
-7.  **📺 YouTube Studio (Full Publishing Pipeline):**
-    *   **AI Title Generation**: Upload a video and let Gemini analyze the transcript to suggest viral, SEO-optimized titles with AI-ranked top picks.
-    *   **Title Refinement Chat**: Iteratively refine suggested titles via a built-in chat interface — ask for more clickbait, different tone, etc.
-    *   **AI Thumbnail Generation**: Generate professional thumbnails with optional face overlay, custom background, and extra creative instructions.
-    *   **AI Description with Chapters**: Automatically generates a YouTube description with chapter timestamps derived from the Whisper transcript.
-    *   **One-Click YouTube Publishing**: Publish the final video with its title, thumbnail, and description directly to YouTube via Upload-Post integration.
-    *   **Manual Mode**: Skip video analysis and enter your own title to jump straight to thumbnail generation.
-
----
-
-## 🛠️ Requirements
-
-*   **Docker & Docker Compose**.
-*   **Google Gemini API Key** ([Get it for free here](https://aistudio.google.com/app/apikey)).
-*   **Upload-Post API Key** (Optional, for direct social posting. **Free tier available, no credit card required**).
-*   **ElevenLabs API Key** (Optional, for AI voice dubbing. [Get it here](https://elevenlabs.io)).
-
-### 📲 Social Media Setup (Upload-Post)
-To enable direct posting, follow these steps:
-1.  **Login/Register**: [app.upload-post.com/login](https://app.upload-post.com/login)
-2.  **Create Profile**: Go to [Manage Users](https://app.upload-post.com/manage-users) and create a user profile.
-3.  **Connect Accounts**: In the same section, connect your TikTok, Instagram, or YouTube accounts to that profile.
-4.  **Get API Key**: Navigate to [API Keys](https://app.upload-post.com/api-keys) and generate your key.
-5.  **Use in OpenShorts**: Paste the API Key and select your Profile in the dashboard.
-    
-
-### ☁️ AWS S3 Setup (Optional)
-To enable automatic backup of your clips to S3:
-1. **Environment Variables**: Set the following in your `.env` file or system environment:
-    * `AWS_ACCESS_KEY_ID`: Your AWS access key.
-    * `AWS_SECRET_ACCESS_KEY`: Your AWS secret key.
-    * `AWS_REGION`: (Optional) Defaults to `us-east-1`.
-    * `AWS_S3_BUCKET`: (Optional) Defaults to `openshorts.app-clips`.
-2. **Bucket**: Clips are uploaded to the specified bucket automatically after generation.
-
-
----
-
-## 🚀 Getting Started
-
-The easiest way to run OpenShorts is using Docker Compose.
-
-### 1. Setup
+### 1. Clone
 ```bash
-git clone https://github.com/your-username/OpenShorts.git
-cd OpenShorts
+git clone <your-repo-url>
+cd openshorts
 ```
 
-### 2. Launch the Application
+### 2. Optional local Ollama setup
 ```bash
-docker compose up --build
+ollama serve
+ollama pull gemma3:12b
 ```
 
-### 3. Access the Dashboard
-Open your browser and navigate to:
-**`http://localhost:5173`**
+Other reasonable local models for this project are for example:
+- `qwen2.5:7b`
+- `llama3.1:8b`
+- `gemma3:12b`
 
-1.  Enter your **Gemini API Key**.
-2.  (Optional) Enter your **Upload-Post API Key** to enable social sharing.
-3.  Paste a **YouTube URL** or **Upload a Video**.
-4.  Click **"Generate Clips"** and watch the magic happen!
+### 3. Start the stack
+```bash
+docker compose up --build -d
+```
 
----
+### 4. Open the dashboard
+- Frontend: `http://localhost:5175`
+- Backend: `http://localhost:8000`
 
-## 🏗️ Technical Pipeline
+## First use
 
-1.  **Ingestion**: Downloads YouTube videos via `yt-dlp` or handles local uploads.
-2.  **Transcription**: `faster-whisper` converts audio to text in seconds.
-3.  **AI Intelligence**: Gemini reads the transcript and selects periods of high interest.
-4.  **Extraction**: FFmpeg precisely cuts the selected segments.
-5.  **Reframing**: AI-powered visual tracking crops clips to vertical format.
-6.  **Backup**: Automated silent upload of clips and metadata to AWS S3.
-7.  **Distribution**: One-click posting via Upload-Post API.
-8.  **YouTube Studio**: Full publishing pipeline — AI titles, thumbnails, descriptions with chapters, and direct YouTube upload.
+1. Open `Settings`.
+2. Choose `Gemini` or `Ollama`.
+3. If using Ollama, set:
+   - Base URL: `http://127.0.0.1:11434`
+   - Model: for example `gemma3:12b`
+4. Optionally add:
+   - Upload-Post API key
+   - ElevenLabs API key
+5. Start a job from a YouTube URL or a local file.
 
----
+## Input form options
 
-## 🔒 Security & Performance
+The main form supports:
+- YouTube URL or local file upload
+- `Interview mode`
+- `Allow clips over 1 minute`
+- `Maximum clip count`
 
-*   **Non-Root Execution**: Containers run as a dedicated `appuser` for security.
-*   **Concurrency Control**: Configurable job queue (`MAX_CONCURRENT_JOBS`).
-*   **Auto-Cleanup**: Automatic purging of old jobs and temporary files.
-*   **File Limits**: Built-in protection against oversized uploads.
+Long-clip behavior:
+- Normal clips can always be shorter than one minute
+- If a generated clip goes above 60 seconds, it is limited to a maximum of 75 seconds
 
----
+## AI providers
 
-## 🤝 Contributions
+### Gemini
+- Used for clip selection and AI editing
+- Requires a Gemini API key in Settings
 
-Contributions are welcome! Whether it's adding new AI models or improving the cropping engine, feel free to open a PR.
+### Ollama
+- Local LLM option
+- Used for clip selection and AI editing
+- Requires:
+  - running Ollama daemon
+  - valid local model name
 
-## 📄 License
+Configured defaults:
+- Base URL: `http://127.0.0.1:11434`
 
-MIT License. OpenShorts is yours to use, modify, and scale.
+## YouTube downloads and cookies
+
+YouTube can restrict high-quality formats. OpenShorts supports a local `cookies.txt` file in the project root.
+
+Expected file:
+- `cookies.txt` in the project root
+
+Notes:
+- Use Netscape `cookies.txt` format
+- A logged-in browser export often helps unlock better formats
+- If YouTube still only exposes low-quality formats, the job now fails clearly instead of silently producing poor vertical output
+
+## Job history, stop, and resume
+
+OpenShorts stores job metadata on disk and exposes a `History` tab in the dashboard.
+
+You can:
+- reopen completed jobs
+- resume partial or failed jobs
+- stop queued or running jobs
+
+The backend keeps:
+- job manifest
+- job log
+- persisted result metadata
+
+## Clip versioning
+
+Each generated short now has an explicit version chain.
+
+Examples:
+- `V0 Original`
+- `V1 Hook`
+- `V2 Subtitles`
+- `V3 Trim`
+
+Rules:
+- Every editing step creates a new version
+- The selected active version is used for the next step
+- `Original wiederherstellen` switches back to the original version
+
+Current version-producing actions:
+- Auto Edit
+- Subtitles
+- Hook
+- Dub Voice
+- Trim
+
+## Trim workflow
+
+Each short can be manually trimmed from the dashboard.
+
+Trim UI includes:
+- preview video
+- scrub bar
+- current time display
+- start slider and numeric input
+- end slider and numeric input
+- `Use Current` for start and end
+
+Trimming creates a new clip version instead of overwriting the current one.
+
+## Subtitle options
+
+Subtitle styling can be configured globally and per render.
+
+Supported options:
+- font family
+- font size
+- background style
+- free Y-axis positioning
+
+Background styles:
+- `dark-box`
+- `light-box`
+- `yellow-box`
+- `transparent`
+
+## Hook options
+
+Hook overlays support:
+- free X/Y positioning
+- width presets
+- text alignment
+- font family
+- background style
+- size presets
+- manual line breaks
+
+Background styles:
+- `dark-box`
+- `light-box`
+- `yellow-box`
+- `transparent`
+
+## Social posting
+
+Upload-Post integration can be configured in `Settings`.
+
+Supported platforms:
+- TikTok
+- Instagram
+- YouTube
+- Facebook
+- X
+- Pinterest
+- Threads
+
+### Global social defaults
+
+Settings allow defaults for:
+- active Upload-Post profile
+- enabled platforms
+- Instagram share mode
+- TikTok post mode
+- TikTok `is_aigc`
+- Facebook page ID
+- Pinterest board ID
+
+### Per-short posting options
+
+Each generated short can override:
+- title
+- description
+- selected platforms
+- schedule date
+- Instagram share mode
+- TikTok post mode
+- TikTok `is_aigc`
+- Facebook page ID
+- Pinterest board ID
+
+### Instagram share modes
+- `CUSTOM`
+- `TRIAL_REELS_SHARE_TO_FOLLOWERS_IF_LIKED`
+- `TRIAL_REELS_DONT_SHARE_TO_FOLLOWERS`
+
+### TikTok options
+- `DIRECT_POST`
+- `MEDIA_UPLOAD`
+- `is_aigc`
+
+## Upload-Post setup
+
+1. Create an Upload-Post account.
+2. Create at least one user profile.
+3. Connect your social accounts to that profile.
+4. Generate an API key.
+5. Paste the key into `Settings`.
+6. Load profiles and select the active one.
+
+## ElevenLabs dubbing
+
+Dub Voice uses ElevenLabs.
+
+Requirements:
+- valid ElevenLabs API key
+
+Behavior:
+- creates a new version
+- dubbed clips can be further processed like other versions
+
+## Runtime limits
+
+The backend currently uses conservative defaults to avoid freezing the machine during heavy processing.
+
+Notable runtime controls:
+- `MAX_CONCURRENT_JOBS`
+- `FFMPEG_THREADS`
+- `FFMPEG_FILTER_THREADS`
+- `FFMPEG_PRESET`
+- `OVERLAY_FFMPEG_PRESET`
+- `WHISPER_CPU_THREADS`
+
+Current defaults are tuned for desktop responsiveness rather than maximum throughput.
+
+## Security and execution model
+
+- Containers run non-root
+- Writable caches are redirected away from `/app`
+- Job data is stored under `output/<job_id>/`
+- Large temporary processing artifacts are created under `/tmp`
+
+## Output structure
+
+Typical output layout:
+```text
+output/<job_id>/
+  *_metadata.json
+  job_manifest.json
+  job.log
+  <clip>.mp4
+  hook_<timestamp>_<clip>.mp4
+  subtitled_<timestamp>_<clip>.mp4
+  trimmed_<timestamp>_<clip>.mp4
+  translated_<timestamp>_<lang>_<clip>.mp4
+```
+
+## Development notes
+
+Useful commands:
+```bash
+docker compose ps
+docker compose logs -f backend
+docker compose restart backend
+```
+
+Stop the stack:
+```bash
+docker compose down
+```
+
+## Current dashboard areas
+
+- Dashboard
+- History
+- Settings
+- YouTube Studio
+
+## Known practical constraints
+
+- Some YouTube videos still require cookies or additional YouTube-side session data to access high-quality formats
+- Local Ollama performance depends heavily on the chosen model and available VRAM/RAM
+- Subtitle and hook rendering are CPU-heavy compared to plain transcoding, even with reduced thread limits
+
+## License
+
+MIT
