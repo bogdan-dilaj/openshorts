@@ -204,6 +204,20 @@ def _build_ass_content(
     margin_l = int(video_width * 0.10)
     margin_r = int(video_width * 0.10)
     margin_v = max(24, int(video_height * 0.03))
+    border_style = style.get("border_style", 3)
+    if border_style == 3:
+        outline_width = max(8, int(round(font_size * 0.28)))
+        outline_color = _rgba_to_ass_color(style["subtitle_box"])
+        back_color = _rgba_to_ass_color(style.get("subtitle_shadow") or (0, 0, 0, 0))
+    else:
+        outline_width = max(2, int(round(font_size * 0.10)))
+        outline_color = _rgba_to_ass_color(
+            style.get("subtitle_text_stroke_fill")
+            or style.get("subtitle_border")
+            or style.get("subtitle_shadow")
+            or (0, 0, 0, 255)
+        )
+        back_color = _rgba_to_ass_color(style.get("subtitle_shadow") or (0, 0, 0, 0))
 
     dialogue_lines = []
     for block in blocks:
@@ -235,10 +249,10 @@ def _build_ass_content(
             font_size=font_size,
             primary=_rgba_to_ass_color(style["subtitle_text"]),
             secondary=_rgba_to_ass_color(style["subtitle_text"]),
-            outline=_rgba_to_ass_color(style.get("subtitle_border") or style.get("subtitle_shadow") or (0, 0, 0, 255)),
-            back=_rgba_to_ass_color(style["subtitle_box"]),
-            border_style=style.get("border_style", 3),
-            outline_width=style.get("outline_width", 2),
+            outline=outline_color,
+            back=back_color,
+            border_style=border_style,
+            outline_width=outline_width,
             shadow=style.get("shadow", 0),
             margin_l=margin_l,
             margin_r=margin_r,

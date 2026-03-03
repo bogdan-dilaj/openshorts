@@ -31,6 +31,12 @@ from job_store import (
     update_job_manifest,
 )
 from runtime_limits import MAX_CONCURRENT_JOBS, ffmpeg_thread_args, subprocess_priority_kwargs
+from tight_edit import (
+    DEFAULT_TIGHT_EDIT_PRESET,
+    normalize_tight_edit_preset,
+    plan_manual_keep_segments,
+    render_keep_segments,
+)
 
 load_dotenv()
 
@@ -276,7 +282,8 @@ def _normalize_clip_version(
         return None
 
     operation = version.get("operation") or _infer_version_operation(filename)
-    transcript_source = version.get("transcript_source") or _default_transcript_source(operation)
+    clip_default_transcript_source = clip.get("transcript_source") if operation == "original" else None
+    transcript_source = version.get("transcript_source") or clip_default_transcript_source or _default_transcript_source(operation)
     normalized = dict(version)
     normalized["id"] = str(version.get("id") or f"v{version_number}")
     normalized["version"] = int(version.get("version", version_number))
@@ -624,6 +631,10 @@ def _coerce_max_clips(value, default: int = 10, minimum: int = 1, maximum: int =
     return max(minimum, min(maximum, parsed))
 
 
+def _coerce_tight_edit_preset(value, default: str = DEFAULT_TIGHT_EDIT_PRESET) -> str:
+    return normalize_tight_edit_preset(value, default)
+
+
 def _normalize_ollama_base_url(base_url: Optional[str]) -> str:
     return (base_url or "http://127.0.0.1:11434").strip().rstrip("/")
 
@@ -884,6 +895,7 @@ class ResumeJobRequest(BaseModel):
     provider: Optional[str] = None
     ollama_base_url: Optional[str] = None
     ollama_model: Optional[str] = None
+    tight_edit_preset: Optional[str] = None
 
 def enqueue_output(out, job_id, output_dir):
     """Reads output from a subprocess and appends it to jobs logs."""
@@ -1048,6 +1060,7 @@ async def process_endpoint(
     interview_mode: Optional[str] = Form(None),
     allow_long_clips: Optional[str] = Form(None),
     max_clips: Optional[str] = Form(None),
+    tight_edit_preset: Optional[str] = Form(None),
 ):
     provider = (request.headers.get("X-LLM-Provider") or "gemini").strip().lower()
     api_key = request.headers.get("X-Gemini-Key")
@@ -1067,10 +1080,12 @@ async def process_endpoint(
         interview_mode = body.get("interview_mode")
         allow_long_clips = body.get("allow_long_clips")
         max_clips = body.get("max_clips")
+        tight_edit_preset = body.get("tight_edit_preset")
 
     interview_mode_enabled = _coerce_bool(interview_mode)
     allow_long_clips_enabled = _coerce_bool(allow_long_clips)
     max_clips_value = _coerce_max_clips(max_clips)
+    tight_edit_preset_value = _coerce_tight_edit_preset(tight_edit_preset)
     
     if not url and not file:
         raise HTTPException(status_code=400, detail="Must provide URL or File")
@@ -1086,6 +1101,7 @@ async def process_endpoint(
         "interview_mode": interview_mode_enabled,
         "allow_long_clips": allow_long_clips_enabled,
         "max_clips": max_clips_value,
+        "tight_edit_preset": tight_edit_preset_value,
     }
     
     # Prepare Command
@@ -1129,6 +1145,7 @@ async def process_endpoint(
     if allow_long_clips_enabled:
         cmd.append("--allow-long-clips")
     cmd.extend(["--max-clips", str(max_clips_value)])
+    cmd.extend(["--tight-edit-preset", tight_edit_preset_value])
     append_job_log(job_output_dir, f"Job {job_id} queued.")
     update_job_manifest(job_output_dir, {
         "job_id": job_id,
@@ -1246,6 +1263,7 @@ async def resume_job(
     provider = (req.provider or manifest.get("provider", {}).get("name") or "gemini").strip().lower()
     ollama_base_url = req.ollama_base_url or manifest.get("provider", {}).get("ollama_base_url")
     ollama_model = req.ollama_model or manifest.get("provider", {}).get("ollama_model")
+    tight_edit_preset = _coerce_tight_edit_preset(req.tight_edit_preset or request_meta.get("tight_edit_preset"))
 
     if provider == "gemini" and not x_gemini_key:
         raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
@@ -1279,6 +1297,7 @@ async def resume_job(
     if request_meta.get("allow_long_clips"):
         cmd.append("--allow-long-clips")
     cmd.extend(["--max-clips", str(_coerce_max_clips(request_meta.get("max_clips")))])
+    cmd.extend(["--tight-edit-preset", tight_edit_preset])
 
     jobs[job_id] = {
         "status": "queued",
@@ -1297,6 +1316,10 @@ async def resume_job(
         "status": "queued",
         "error": None,
         "can_resume": True,
+        "request": {
+            **request_meta,
+            "tight_edit_preset": tight_edit_preset,
+        },
         "provider": {
             "name": provider,
             "ollama_base_url": ollama_base_url,
@@ -1689,6 +1712,7 @@ class TrimRequest(BaseModel):
     input_filename: Optional[str] = None
     trim_start: float = 0.0
     trim_end: Optional[float] = None
+    remove_ranges: Optional[List[List[float]]] = None
 
 
 @app.post("/api/trim")
@@ -1723,6 +1747,13 @@ async def trim_clip(req: TrimRequest):
     request_token = int(time.time() * 1000)
     output_filename = f"trimmed_{request_token}_{source_version['filename']}"
     output_path = os.path.join(output_dir, output_filename)
+    remove_ranges = []
+    for entry in req.remove_ranges or []:
+        if isinstance(entry, (list, tuple)) and len(entry) == 2:
+            remove_ranges.append((float(entry[0]), float(entry[1])))
+    keep_segments = plan_manual_keep_segments(trim_start, trim_end, remove_ranges, min_segment_duration=0.12)
+    if not keep_segments:
+        raise HTTPException(status_code=400, detail="All selected cuts would remove the full clip.")
 
     if metadata_changed:
         data["shorts"][req.clip_index] = clip_data
@@ -1730,38 +1761,15 @@ async def trim_clip(req: TrimRequest):
         _refresh_job_result(req.job_id)
 
     def run_trim():
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-i",
+        render_keep_segments(
             input_path,
-            "-ss",
-            f"{trim_start:.3f}",
-            "-to",
-            f"{trim_end:.3f}",
-            *ffmpeg_thread_args(),
-            "-c:v",
-            "libx264",
-            "-preset",
-            os.environ.get("OVERLAY_FFMPEG_PRESET", "veryfast").strip() or "veryfast",
-            "-crf",
-            "18",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-movflags",
-            "+faststart",
+            keep_segments,
             output_path,
-        ]
-        subprocess.run(
-            cmd,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            **subprocess_priority_kwargs(),
+            ffmpeg_preset=os.environ.get("OVERLAY_FFMPEG_PRESET", "veryfast").strip() or "veryfast",
+            crf="18",
+            audio_bitrate="192k",
+            thread_args=ffmpeg_thread_args(),
+            subprocess_kwargs=subprocess_priority_kwargs(),
         )
 
     try:
@@ -1774,15 +1782,18 @@ async def trim_clip(req: TrimRequest):
     transcript_source = source_version.get("transcript_source")
     transcript_start = source_version.get("transcript_start")
     transcript_end = source_version.get("transcript_end")
-    if transcript_source == "original":
+    if transcript_source == "original" and len(keep_segments) == 1:
         source_start = float(transcript_start or clip_data.get("start", 0.0))
-        transcript_start = source_start + trim_start
-        transcript_end = source_start + trim_end
+        transcript_start = source_start + keep_segments[0][0]
+        transcript_end = source_start + keep_segments[0][1]
     else:
+        transcript_source = "audio"
         transcript_start = None
         transcript_end = None
 
     label = f"Trim {_format_time_label(trim_start)}-{_format_time_label(trim_end)}"
+    if remove_ranges:
+        label += f" (-{len(remove_ranges)} cuts)"
     _append_clip_version(
         req.job_id,
         output_dir,
@@ -1802,7 +1813,7 @@ async def trim_clip(req: TrimRequest):
         "success": True,
         "new_video_url": _clip_video_url(req.job_id, output_filename),
         "clip": clip_data,
-        "duration": trim_end - trim_start,
+        "duration": round(sum(segment_end - segment_start for segment_start, segment_end in keep_segments), 3),
     }
 
 class TranslateRequest(BaseModel):
@@ -1913,6 +1924,7 @@ import httpx
 UPLOAD_POST_AUTH_SCHEMES = ("ApiKey", "Apikey")
 SOCIAL_PLATFORM_CANONICAL = {
 }
+UPLOAD_POST_STATUS_URL = "https://api.upload-post.com/api/uploadposts/status"
 UPLOAD_POST_AUDIO_LANGUAGE_MAP = {
     "ar": "ar-SA",
     "de": "de-DE",
@@ -1997,6 +2009,148 @@ def _resolve_upload_post_language_fields(language_code: Optional[str]) -> Dict[s
     return {
         "defaultLanguage": base_code,
         "defaultAudioLanguage": audio_language,
+    }
+
+
+def _normalize_upload_post_platform_name(value: Optional[str]) -> str:
+    return SOCIAL_PLATFORM_CANONICAL.get((value or "").strip().lower(), (value or "").strip().lower())
+
+
+def _normalize_upload_post_platform_result(platform: str, payload: Any) -> Dict[str, Any]:
+    normalized_platform = _normalize_upload_post_platform_name(platform)
+    if isinstance(payload, dict):
+        success = payload.get("success")
+        error_message = payload.get("error")
+        status = payload.get("status")
+        message = payload.get("message") or status or error_message
+        if success is None and error_message:
+            success = False
+        result = {
+            "platform": normalized_platform,
+            "success": success,
+            "status": status or ("failed" if success is False else None),
+            "message": message or "",
+            "error": error_message,
+        }
+        for key in ("publish_id", "post_id", "container_id", "url", "link", "upload_timestamp"):
+            if payload.get(key) not in (None, ""):
+                result[key] = payload.get(key)
+        return result
+
+    return {
+        "platform": normalized_platform,
+        "success": None,
+        "status": None,
+        "message": str(payload or ""),
+        "error": None,
+    }
+
+
+def _extract_upload_post_platform_results(payload: Dict[str, Any], requested_platforms: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    requested_platforms = [_normalize_upload_post_platform_name(item) for item in (requested_platforms or [])]
+    raw_results = payload.get("results")
+    normalized_results: List[Dict[str, Any]] = []
+    seen = set()
+
+    if isinstance(raw_results, dict):
+        for platform, item in raw_results.items():
+            normalized = _normalize_upload_post_platform_result(platform, item)
+            normalized_results.append(normalized)
+            seen.add(normalized["platform"])
+    elif isinstance(raw_results, list):
+        for item in raw_results:
+            if not isinstance(item, dict):
+                continue
+            platform = _normalize_upload_post_platform_name(item.get("platform"))
+            normalized = {
+                "platform": platform,
+                "success": item.get("success"),
+                "status": item.get("status"),
+                "message": item.get("message") or item.get("status") or item.get("error") or "",
+                "error": item.get("error"),
+            }
+            for key in ("publish_id", "post_id", "container_id", "url", "link", "upload_timestamp"):
+                if item.get(key) not in (None, ""):
+                    normalized[key] = item.get(key)
+            normalized_results.append(normalized)
+            seen.add(platform)
+
+    for platform in requested_platforms:
+        if platform in seen:
+            continue
+        normalized_results.append({
+            "platform": platform,
+            "success": None,
+            "status": "pending",
+            "message": "Noch keine Rueckmeldung von Upload-Post.",
+            "error": None,
+        })
+
+    return normalized_results
+
+
+def _build_upload_post_summary(
+    *,
+    requested_platforms: List[str],
+    platform_results: List[Dict[str, Any]],
+    status: str,
+    is_scheduled: bool,
+) -> str:
+    success_count = sum(1 for item in platform_results if item.get("success") is True)
+    failure_count = sum(1 for item in platform_results if item.get("success") is False)
+    pending_count = max(0, len(requested_platforms) - success_count - failure_count)
+
+    if status in {"pending", "in_progress"}:
+        action = "Scheduling" if is_scheduled else "Publishing"
+        return f"{action} started. {success_count} done, {failure_count} failed, {pending_count} pending."
+    if failure_count and success_count:
+        return f"Partial success. {success_count} succeeded, {failure_count} failed."
+    if failure_count and not success_count:
+        return f"Upload failed on {failure_count} platform{'s' if failure_count != 1 else ''}."
+    if success_count:
+        return f"Upload completed on {success_count} platform{'s' if success_count != 1 else ''}."
+    return "Upload accepted by vendor."
+
+
+def _normalize_upload_post_response(
+    payload: Dict[str, Any],
+    *,
+    requested_platforms: List[str],
+    is_scheduled: bool,
+) -> Dict[str, Any]:
+    requested_platforms = [_normalize_upload_post_platform_name(item) for item in requested_platforms]
+    platform_results = _extract_upload_post_platform_results(payload, requested_platforms)
+    status = (
+        payload.get("status")
+        or ("pending" if payload.get("request_id") or payload.get("job_id") else "completed")
+    )
+    success_count = sum(1 for item in platform_results if item.get("success") is True)
+    failure_count = sum(1 for item in platform_results if item.get("success") is False)
+    pending_count = sum(1 for item in platform_results if item.get("success") not in (True, False))
+    message = payload.get("message") or _build_upload_post_summary(
+        requested_platforms=requested_platforms,
+        platform_results=platform_results,
+        status=status,
+        is_scheduled=is_scheduled,
+    )
+
+    return {
+        "success": bool(payload.get("success", True)),
+        "status": status,
+        "message": message,
+        "scheduled": is_scheduled,
+        "request_id": payload.get("request_id"),
+        "job_id": payload.get("job_id"),
+        "requested_platforms": requested_platforms,
+        "platform_results": platform_results,
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "pending_count": pending_count,
+        "completed": payload.get("completed"),
+        "total": payload.get("total") or len(requested_platforms),
+        "last_update": payload.get("last_update"),
+        "usage": payload.get("usage"),
+        "raw": payload,
     }
 
 @app.post("/api/social/post")
@@ -2102,13 +2256,52 @@ async def post_to_socials(req: SocialPostRequest):
              print(f"❌ Upload-Post Error: {response.text}")
              raise HTTPException(status_code=response.status_code, detail=f"Vendor API Error: {response.text}")
 
-        return response.json()
+        vendor_payload = response.json()
+        return _normalize_upload_post_response(
+            vendor_payload if isinstance(vendor_payload, dict) else {"success": True, "results": vendor_payload},
+            requested_platforms=requested_platforms,
+            is_scheduled=bool(req.scheduled_date),
+        )
 
     except HTTPException:
         raise
     except Exception as e:
         print(f"❌ Social Post Exception: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/social/post/status")
+async def get_social_post_status(
+    api_key: str = Header(..., alias="X-Upload-Post-Key"),
+    request_id: Optional[str] = None,
+    vendor_job_id: Optional[str] = None,
+    platforms: Optional[str] = None,
+    scheduled: bool = False,
+):
+    if not request_id and not vendor_job_id:
+        raise HTTPException(status_code=400, detail="Missing request_id or vendor_job_id")
+
+    requested_platforms = _normalize_social_platforms((platforms or "").split(",")) if platforms else []
+    params: Dict[str, str] = {}
+    if request_id:
+        params["request_id"] = request_id
+    if vendor_job_id:
+        params["job_id"] = vendor_job_id
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await _upload_post_async_request(client, "GET", UPLOAD_POST_STATUS_URL, api_key, params=params)
+
+    if resp.status_code != 200:
+        print(f"❌ Upload-Post Status Error: {resp.text}")
+        raise HTTPException(status_code=resp.status_code, detail=f"Vendor API Error: {resp.text}")
+
+    payload = resp.json()
+    normalized_payload = payload if isinstance(payload, dict) else {"success": True, "results": payload}
+    return _normalize_upload_post_response(
+        normalized_payload,
+        requested_platforms=requested_platforms,
+        is_scheduled=scheduled,
+    )
 
 @app.get("/api/social/user")
 async def get_social_user(api_key: str = Header(..., alias="X-Upload-Post-Key")):

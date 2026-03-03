@@ -18,6 +18,7 @@ It supports:
 - Configurable maximum clip count in the form
 - Default short clip mode up to `60s`
 - Optional long-clip mode that allows clips up to `75s`
+- Automatic speech tightening for pauses and simple filler words
 - Language-aware metadata generation for titles, hooks, and descriptions
 
 ### Vertical video processing
@@ -109,6 +110,9 @@ Long-clip behavior:
 - Normal clips can always be shorter than one minute
 - If a generated clip goes above 60 seconds, it is limited to a maximum of 75 seconds
 
+Global settings also control:
+- automatic pause/filler-word removal preset for newly generated shorts
+
 ## AI providers
 
 ### Gemini
@@ -180,9 +184,11 @@ Each short can be manually trimmed from the dashboard.
 Trim UI includes:
 - preview video
 - scrub bar
+- play/pause and seek controls
 - current time display
 - start slider and numeric input
 - end slider and numeric input
+- stackable middle cut ranges
 - `Use Current` for start and end
 
 Trimming creates a new clip version instead of overwriting the current one.

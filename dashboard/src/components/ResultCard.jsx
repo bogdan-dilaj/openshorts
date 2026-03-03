@@ -12,6 +12,14 @@ const resolveVideoUrl = (value) => {
     return value.startsWith('http://') || value.startsWith('https://') ? value : getApiUrl(value);
 };
 
+const POST_STATUS_POLL_INTERVAL_MS = 4000;
+const PLATFORM_LABELS = SOCIAL_PLATFORM_OPTIONS.reduce((acc, item) => {
+    acc[item.key] = item.label;
+    return acc;
+}, {});
+
+const getPlatformLabel = (platform) => PLATFORM_LABELS[platform] || platform;
+
 export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, llmProvider, ollamaBaseUrl, ollamaModel, elevenLabsKey, subtitleStyle, hookStyle, socialPostSettings = DEFAULT_SOCIAL_POST_SETTINGS, activeUploadProfile, currentVideoOverride, onVideoVariantChange, onClipUpdated, onPlay, onPause }) {
     const [showModal, setShowModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
@@ -36,6 +44,8 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
     const [posting, setPosting] = useState(false);
     const [postResult, setPostResult] = useState(null);
+    const [isRefreshingPostStatus, setIsRefreshingPostStatus] = useState(false);
+    const postStatusTimeoutRef = React.useRef(null);
 
     const [isEditing, setIsEditing] = useState(false);
     const [isSubtitling, setIsSubtitling] = useState(false);
@@ -48,6 +58,9 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const [showTrimModal, setShowTrimModal] = useState(false);
     const [editError, setEditError] = useState(null);
     const isBusy = isEditing || isSubtitling || isHooking || isTranslating || isTrimming || isSelectingVersion;
+    const clipDuration = Number.isFinite(Number(clip.display_duration))
+        ? Number(clip.display_duration)
+        : Math.max(0, (clip.end || 0) - (clip.start || 0));
 
     // Initialize/Reset form when modal opens
     useEffect(() => {
@@ -71,6 +84,19 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             videoRef.current.load();
         }
     }, [currentVideoUrl]);
+
+    useEffect(() => () => {
+        if (postStatusTimeoutRef.current) {
+            clearTimeout(postStatusTimeoutRef.current);
+        }
+    }, []);
+
+    useEffect(() => {
+        if (!showModal && postStatusTimeoutRef.current) {
+            clearTimeout(postStatusTimeoutRef.current);
+            postStatusTimeoutRef.current = null;
+        }
+    }, [showModal]);
 
     const isModifiedVideo = activeVersionId ? activeVersionId !== originalVersionId : currentVideoUrl !== originalVideoUrl;
 
@@ -104,6 +130,70 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             'gemma3-12b:latest': 'gemma3:12b',
         };
         return aliasMap[trimmed.toLowerCase()] || trimmed;
+    };
+
+    const stopPostStatusPolling = () => {
+        if (postStatusTimeoutRef.current) {
+            clearTimeout(postStatusTimeoutRef.current);
+            postStatusTimeoutRef.current = null;
+        }
+    };
+
+    const refreshPostStatus = async (tracking = postResult, { silent = false } = {}) => {
+        if (!tracking || (!tracking.request_id && !tracking.job_id) || !uploadPostKey) {
+            return;
+        }
+
+        stopPostStatusPolling();
+
+        if (!silent) {
+            setIsRefreshingPostStatus(true);
+        }
+
+        try {
+            const params = new URLSearchParams();
+            if (tracking.request_id) params.set('request_id', tracking.request_id);
+            if (tracking.job_id) params.set('vendor_job_id', tracking.job_id);
+            if (tracking.requested_platforms?.length) params.set('platforms', tracking.requested_platforms.join(','));
+            if (tracking.scheduled) params.set('scheduled', 'true');
+
+            const res = await fetch(getApiUrl(`/api/social/post/status?${params.toString()}`), {
+                headers: {
+                    'X-Upload-Post-Key': uploadPostKey,
+                },
+            });
+
+            if (!res.ok) {
+                throw new Error(await readErrorText(res));
+            }
+
+            const data = await res.json();
+            setPostResult(data);
+
+            if (showModal && (data.status === 'pending' || data.status === 'in_progress' || data.pending_count > 0)) {
+                stopPostStatusPolling();
+                postStatusTimeoutRef.current = window.setTimeout(() => {
+                    refreshPostStatus(data, { silent: true });
+                }, POST_STATUS_POLL_INTERVAL_MS);
+            } else {
+                stopPostStatusPolling();
+            }
+        } catch (e) {
+            setPostResult((prev) => prev ? {
+                ...prev,
+                poll_error: e.message,
+            } : {
+                success: false,
+                status: 'failed',
+                message: e.message,
+                platform_results: [],
+            });
+            stopPostStatusPolling();
+        } finally {
+            if (!silent) {
+                setIsRefreshingPostStatus(false);
+            }
+        }
     };
 
     const handleAutoEdit = async () => {
@@ -335,7 +425,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         await handleVersionSelect(originalVersionId);
     };
 
-    const handleTrim = async ({ trimStart, trimEnd }) => {
+    const handleTrim = async ({ trimStart, trimEnd, removeRanges }) => {
         setIsTrimming(true);
         setEditError(null);
         try {
@@ -348,6 +438,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     input_filename: currentVideoUrl.split('/').pop(),
                     trim_start: trimStart,
                     trim_end: trimEnd,
+                    remove_ranges: removeRanges || [],
                 })
             });
 
@@ -368,33 +459,34 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
     const handlePost = async () => {
         if (!uploadPostKey || !uploadUserId) {
-            setPostResult({ success: false, msg: "Missing API Key or User ID." });
+            setPostResult({ success: false, status: 'failed', message: "Missing API Key or User ID.", platform_results: [] });
             return;
         }
 
         const selectedPlatforms = Object.keys(platforms).filter(k => platforms[k]);
         if (selectedPlatforms.length === 0) {
-            setPostResult({ success: false, msg: "Select at least one platform." });
+            setPostResult({ success: false, status: 'failed', message: "Select at least one platform.", platform_results: [] });
             return;
         }
 
         if (!activeUploadProfile && !uploadUserId) {
-            setPostResult({ success: false, msg: "No Upload-Post profile selected in Settings." });
+            setPostResult({ success: false, status: 'failed', message: "No Upload-Post profile selected in Settings.", platform_results: [] });
             return;
         }
 
         if (selectedPlatforms.includes('pinterest') && !pinterestBoardId.trim()) {
-            setPostResult({ success: false, msg: "Pinterest requires a board ID." });
+            setPostResult({ success: false, status: 'failed', message: "Pinterest requires a board ID.", platform_results: [] });
             return;
         }
 
         if (isScheduling && !scheduleDate) {
-            setPostResult({ success: false, msg: "Please select a date and time." });
+            setPostResult({ success: false, status: 'failed', message: "Please select a date and time.", platform_results: [] });
             return;
         }
 
         setPosting(true);
         setPostResult(null);
+        stopPostStatusPolling();
 
         try {
             const payload = {
@@ -426,23 +518,27 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             });
 
             if (!res.ok) {
-                const errText = await res.text();
-                try {
-                    const jsonErr = JSON.parse(errText);
-                    throw new Error(jsonErr.detail || errText);
-                } catch (e) {
-                    throw new Error(errText);
-                }
+                throw new Error(await readErrorText(res));
             }
 
-            setPostResult({ success: true, msg: isScheduling ? "Scheduled successfully!" : "Posted successfully!" });
-            setTimeout(() => {
-                setShowModal(false);
-                setPostResult(null);
-            }, 3000);
+            const data = await res.json();
+            setPostResult(data);
+
+            if (data.request_id || data.job_id) {
+                postStatusTimeoutRef.current = window.setTimeout(() => {
+                    refreshPostStatus(data, { silent: true });
+                }, POST_STATUS_POLL_INTERVAL_MS);
+            }
 
         } catch (e) {
-            setPostResult({ success: false, msg: `Failed: ${e.message}` });
+            setPostResult({
+                success: false,
+                status: 'failed',
+                message: `Failed: ${e.message}`,
+                platform_results: [],
+                requested_platforms: selectedPlatforms,
+                scheduled: isScheduling,
+            });
         } finally {
             setPosting(false);
         }
@@ -493,7 +589,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         {clip.video_title_for_youtube_short || "Viral Clip Generated"}
                     </h3>
                     <div className="flex flex-wrap gap-2 text-[10px] text-zinc-500 font-mono">
-                        <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">{Math.floor(clip.end - clip.start)}s</span>
+                        <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">{Math.round(clipDuration)}s</span>
                         <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">#shorts</span>
                         <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">#viral</span>
                     </div>
@@ -828,9 +924,101 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         </div>
 
                         {postResult && (
-                            <div className={`mb-4 p-3 rounded-lg text-xs flex items-start gap-2 ${postResult.success ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
-                                {postResult.success ? <CheckCircle size={14} className="mt-0.5 shrink-0" /> : <AlertCircle size={14} className="mt-0.5 shrink-0" />}
-                                <div>{postResult.msg}</div>
+                            <div className={`mb-4 rounded-xl border p-3 ${
+                                postResult.failure_count
+                                    ? 'border-amber-500/20 bg-amber-500/10'
+                                    : postResult.success === false
+                                        ? 'border-red-500/20 bg-red-500/10'
+                                        : postResult.pending_count
+                                            ? 'border-cyan-500/20 bg-cyan-500/10'
+                                            : 'border-green-500/20 bg-green-500/10'
+                            }`}>
+                                <div className="flex items-start gap-2 text-xs">
+                                    {postResult.failure_count ? (
+                                        <AlertCircle size={14} className="mt-0.5 shrink-0 text-amber-300" />
+                                    ) : postResult.success === false ? (
+                                        <AlertCircle size={14} className="mt-0.5 shrink-0 text-red-400" />
+                                    ) : postResult.pending_count ? (
+                                        <Loader2 size={14} className="mt-0.5 shrink-0 text-cyan-300 animate-spin" />
+                                    ) : (
+                                        <CheckCircle size={14} className="mt-0.5 shrink-0 text-green-400" />
+                                    )}
+                                    <div className="min-w-0 flex-1">
+                                        <div className="font-semibold text-white">{postResult.message}</div>
+                                        <div className="mt-1 text-[11px] text-zinc-300">
+                                            Status: <span className="uppercase tracking-wide">{postResult.status || 'unknown'}</span>
+                                            {' · '}
+                                            Success {postResult.success_count || 0}
+                                            {' · '}
+                                            Failed {postResult.failure_count || 0}
+                                            {' · '}
+                                            Pending {postResult.pending_count || 0}
+                                        </div>
+                                        {(postResult.request_id || postResult.job_id) && (
+                                            <div className="mt-1 text-[10px] text-zinc-400 break-all">
+                                                {postResult.request_id ? `Request ID: ${postResult.request_id}` : null}
+                                                {postResult.request_id && postResult.job_id ? ' · ' : null}
+                                                {postResult.job_id ? `Vendor Job ID: ${postResult.job_id}` : null}
+                                            </div>
+                                        )}
+                                        {postResult.poll_error && (
+                                            <div className="mt-1 text-[10px] text-red-300">{postResult.poll_error}</div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {!!postResult.platform_results?.length && (
+                                    <div className="mt-3 space-y-2">
+                                        {postResult.platform_results.map((item) => {
+                                            const isPending = item.success !== true && item.success !== false;
+                                            const rowClass = item.success === true
+                                                ? 'border-green-500/20 bg-green-500/10'
+                                                : item.success === false
+                                                    ? 'border-red-500/20 bg-red-500/10'
+                                                    : 'border-white/10 bg-white/5';
+                                            return (
+                                                <div key={`${item.platform}-${item.publish_id || item.post_id || item.message || 'pending'}`} className={`rounded-lg border px-3 py-2 ${rowClass}`}>
+                                                    <div className="flex items-center justify-between gap-3">
+                                                        <div className="text-xs font-semibold text-white">{getPlatformLabel(item.platform)}</div>
+                                                        <div className="flex items-center gap-2 text-[11px]">
+                                                            {item.success === true ? <CheckCircle size={13} className="text-green-400" /> : null}
+                                                            {item.success === false ? <AlertCircle size={13} className="text-red-400" /> : null}
+                                                            {isPending ? <Loader2 size={13} className="text-cyan-300 animate-spin" /> : null}
+                                                            <span className="uppercase tracking-wide text-zinc-300">{item.status || (isPending ? 'pending' : item.success ? 'success' : 'failed')}</span>
+                                                        </div>
+                                                    </div>
+                                                    <div className="mt-1 text-[11px] text-zinc-300">
+                                                        {item.message || item.error || (isPending ? 'Warte auf Rueckmeldung von Upload-Post.' : 'Completed')}
+                                                    </div>
+                                                    {(item.url || item.link) && (
+                                                        <a
+                                                            href={item.url || item.link}
+                                                            target="_blank"
+                                                            rel="noreferrer"
+                                                            className="mt-2 inline-flex text-[11px] text-cyan-300 hover:text-cyan-200"
+                                                        >
+                                                            Open post
+                                                        </a>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+
+                                {(postResult.request_id || postResult.job_id) && (
+                                    <div className="mt-3 flex gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => refreshPostStatus(postResult)}
+                                            disabled={isRefreshingPostStatus}
+                                            className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-[11px] text-white hover:bg-white/10 disabled:opacity-50"
+                                        >
+                                            {isRefreshingPostStatus ? <Loader2 size={12} className="animate-spin" /> : <Clock size={12} />}
+                                            Refresh Status
+                                        </button>
+                                    </div>
+                                )}
                             </div>
                         )}
 

@@ -179,6 +179,33 @@ const normalizeOllamaModelName = (value) => {
   return aliasMap[trimmed.toLowerCase()] || trimmed;
 };
 
+const TIGHT_EDIT_PRESET_OPTIONS = [
+  {
+    value: 'aggressive',
+    label: 'Aggressive',
+    description: 'Cuts pauses and filler words decisively. Best default for short-form.',
+  },
+  {
+    value: 'balanced',
+    label: 'Balanced',
+    description: 'Less jumpy, keeps a little more breathing room.',
+  },
+  {
+    value: 'very_aggressive',
+    label: 'Very Aggressive',
+    description: 'Removes even more silence and filler. Use when you want maximum pace.',
+  },
+  {
+    value: 'off',
+    label: 'Off',
+    description: 'Keeps the original speech rhythm.',
+  },
+];
+
+const DEFAULT_TIGHT_EDIT_SETTINGS = {
+  preset: 'aggressive',
+};
+
 function App() {
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
   const [llmProvider, setLlmProvider] = useState(localStorage.getItem('llm_provider') || 'gemini');
@@ -221,6 +248,7 @@ function App() {
   const [cancelingJobId, setCancelingJobId] = useState(null);
   const [subtitleStyle, setSubtitleStyle] = useState(() => readStoredJson('subtitle_style_v1', DEFAULT_SUBTITLE_STYLE));
   const [hookStyle, setHookStyle] = useState(() => readStoredJson('hook_style_v1', DEFAULT_HOOK_STYLE));
+  const [tightEditSettings, setTightEditSettings] = useState(() => readStoredJson('tight_edit_settings_v1', DEFAULT_TIGHT_EDIT_SETTINGS));
   const [socialPostSettings, setSocialPostSettings] = useState(() => readStoredSocialPostSettings());
   const [clipVideoOverrides, setClipVideoOverrides] = useState({});
 
@@ -331,6 +359,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem('hook_style_v1', JSON.stringify(hookStyle));
   }, [hookStyle]);
+
+  useEffect(() => {
+    localStorage.setItem('tight_edit_settings_v1', JSON.stringify(tightEditSettings));
+  }, [tightEditSettings]);
 
   useEffect(() => {
     localStorage.setItem('social_post_settings_v1', JSON.stringify(socialPostSettings));
@@ -463,6 +495,7 @@ function App() {
           interview_mode: !!data.options?.interviewMode,
           allow_long_clips: !!data.options?.allowLongClips,
           max_clips: Number(data.options?.maxClips) || 10,
+          tight_edit_preset: tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset,
         });
       } else {
         const formData = new FormData();
@@ -470,6 +503,7 @@ function App() {
         formData.append('interview_mode', data.options?.interviewMode ? 'true' : 'false');
         formData.append('allow_long_clips', data.options?.allowLongClips ? 'true' : 'false');
         formData.append('max_clips', String(Number(data.options?.maxClips) || 10));
+        formData.append('tight_edit_preset', tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset);
         body = formData;
       }
 
@@ -524,7 +558,8 @@ function App() {
         body: JSON.stringify({
           provider: llmProvider,
           ollama_base_url: ollamaBaseUrl,
-          ollama_model: ollamaModel
+          ollama_model: ollamaModel,
+          tight_edit_preset: tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset,
         })
       });
 
@@ -844,6 +879,31 @@ function App() {
                 </div>
                 <p className="text-xs text-zinc-500 mt-4">
                   These defaults prefill the per-short hook dialog and can still be overridden per clip.
+                </p>
+              </div>
+
+              <div className="glass-panel p-6 mt-8">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-semibold">Speech Tightening</h2>
+                  <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Global</span>
+                </div>
+                <p className="text-xs text-zinc-500 mb-4 leading-relaxed">
+                  Generated shorts can automatically cut long speech pauses and simple filler words like
+                  <strong> äh</strong>, <strong> ähm</strong>, <strong> um</strong> or <strong> uh</strong>.
+                  The default is intentionally aggressive for short-form pacing.
+                </p>
+                <label className="block text-sm text-zinc-400 mb-2">Preset</label>
+                <select
+                  value={tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset}
+                  onChange={(e) => setTightEditSettings({ preset: e.target.value })}
+                  className="input-field"
+                >
+                  {TIGHT_EDIT_PRESET_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+                <p className="text-xs text-zinc-500 mt-3">
+                  {TIGHT_EDIT_PRESET_OPTIONS.find((option) => option.value === (tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset))?.description}
                 </p>
               </div>
 

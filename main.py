@@ -23,6 +23,13 @@ from dotenv import load_dotenv
 import json
 from job_store import load_job_manifest, update_job_manifest
 from runtime_limits import FFMPEG_PRESET, WHISPER_CPU_THREADS, ffmpeg_thread_args, subprocess_priority_kwargs
+from tight_edit import (
+    DEFAULT_TIGHT_EDIT_PRESET,
+    TIGHT_EDIT_PRESETS,
+    build_tight_edit_plan,
+    normalize_tight_edit_preset,
+    render_keep_segments,
+)
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
@@ -51,6 +58,7 @@ OLLAMA_MAX_SEGMENT_LINES = int(os.environ.get("OLLAMA_MAX_SEGMENT_LINES", "90"))
 OLLAMA_MAX_PROMPT_CHARS = int(os.environ.get("OLLAMA_MAX_PROMPT_CHARS", "14000"))
 PREFERRED_DOWNLOAD_HEIGHT = int(os.environ.get("PREFERRED_DOWNLOAD_HEIGHT", "1080"))
 MIN_SOURCE_EDGE = int(os.environ.get("MIN_SOURCE_EDGE", "720"))
+DEFAULT_TIGHT_EDIT_PRESET_ENV = normalize_tight_edit_preset(os.environ.get("TIGHT_EDIT_PRESET", DEFAULT_TIGHT_EDIT_PRESET))
 DOWNLOADABLE_VIDEO_EXTENSIONS = (".mp4", ".mkv", ".webm", ".mov", ".m4v")
 
 
@@ -1785,9 +1793,11 @@ if __name__ == '__main__':
     parser.add_argument('--interview-mode', action='store_true', help="Render in two-person interview layout with one detected speaker on top and one on bottom.")
     parser.add_argument('--allow-long-clips', action='store_true', help="Allow generated clips to exceed 60 seconds.")
     parser.add_argument('--max-clips', type=int, default=MAX_GENERATED_CLIPS, help=f"Maximum number of generated clips to keep (default: {MAX_GENERATED_CLIPS}).")
+    parser.add_argument('--tight-edit-preset', type=str, default=DEFAULT_TIGHT_EDIT_PRESET_ENV, choices=sorted(TIGHT_EDIT_PRESETS.keys()), help=f"Automatically remove pauses and filler words using the selected preset (default: {DEFAULT_TIGHT_EDIT_PRESET_ENV}).")
     
     args = parser.parse_args()
     args.max_clips = max(1, min(50, args.max_clips or MAX_GENERATED_CLIPS))
+    args.tight_edit_preset = normalize_tight_edit_preset(args.tight_edit_preset, DEFAULT_TIGHT_EDIT_PRESET_ENV)
 
     script_start_time = time.time()
     target_max_clip_duration = MAX_LONG_CLIP_DURATION if args.allow_long_clips else MAX_CLIP_DURATION
@@ -1992,26 +2002,45 @@ if __name__ == '__main__':
                 print(f"\n🎬 Processing Clip {i+1}: {start}s - {end}s")
                 print(f"   Title: {clip.get('video_title_for_youtube_short', 'No Title')}")
 
-                cut_command = [
-                    'ffmpeg', '-y',
-                    '-ss', str(start),
-                    '-to', str(end),
-                    '-i', input_video,
-                    *ffmpeg_thread_args(),
-                    '-c:v', 'libx264', '-crf', '17', '-preset', FFMPEG_PRESET,
-                    '-c:a', 'aac', '-b:a', '192k',
-                    '-movflags', '+faststart',
-                    clip_temp_path
-                ]
-
                 try:
-                    subprocess.run(
-                        cut_command,
-                        check=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.PIPE,
-                        **subprocess_priority_kwargs(),
+                    tight_edit_plan = build_tight_edit_plan(transcript, start, end, args.tight_edit_preset)
+                    keep_segments = tight_edit_plan.get("keep_segments") or [(start, end)]
+                    if tight_edit_plan.get("compacted"):
+                        print(
+                            "   ✂️ Tight edit applied: "
+                            f"{len(keep_segments)} keep segment(s), preset={args.tight_edit_preset}, "
+                            f"new duration ≈ {tight_edit_plan.get('output_duration', end - start):.2f}s"
+                        )
+                    render_keep_segments(
+                        input_video,
+                        keep_segments,
+                        clip_temp_path,
+                        ffmpeg_preset=FFMPEG_PRESET,
+                        crf="17",
+                        audio_bitrate="192k",
+                        thread_args=ffmpeg_thread_args(),
+                        subprocess_kwargs=subprocess_priority_kwargs(),
                     )
+
+                    if tight_edit_plan.get("compacted"):
+                        clip["display_duration"] = tight_edit_plan.get("output_duration", round(end - start, 3))
+                        clip["tight_edit_preset"] = args.tight_edit_preset
+                        clip["tight_edit_removed_ranges"] = [
+                            {"start": round(range_start, 3), "end": round(range_end, 3)}
+                            for range_start, range_end in tight_edit_plan.get("remove_ranges", [])
+                        ]
+                        if len(keep_segments) == 1:
+                            clip["start"] = round(keep_segments[0][0], 3)
+                            clip["end"] = round(keep_segments[0][1], 3)
+                            clip.pop("transcript_source", None)
+                        else:
+                            clip["transcript_source"] = "audio"
+                    else:
+                        clip["display_duration"] = round(end - start, 3)
+                        clip.pop("tight_edit_preset", None)
+                        clip.pop("tight_edit_removed_ranges", None)
+                        clip.pop("transcript_source", None)
+
                     success = process_video_to_vertical(clip_temp_path, clip_final_path, interview_mode=args.interview_mode)
                     if success and os.path.exists(clip_final_path) and os.path.getsize(clip_final_path) > 0:
                         clip['status'] = 'completed'
