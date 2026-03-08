@@ -10,7 +10,8 @@ from overlay_styles import (
     get_background_preset,
     get_font_path,
 )
-from runtime_limits import FFMPEG_PRESET, WHISPER_CPU_THREADS, ffmpeg_thread_args, subprocess_priority_kwargs
+from runtime_limits import FFMPEG_PRESET, ffmpeg_thread_args, subprocess_priority_kwargs
+from whisper_runtime import transcribe_with_runtime
 
 OVERLAY_FFMPEG_PRESET = (os.environ.get("OVERLAY_FFMPEG_PRESET") or "veryfast").strip() or FFMPEG_PRESET
 
@@ -29,12 +30,14 @@ def transcribe_audio(video_path):
     Transcribe audio from a video file using faster-whisper.
     Returns transcript in the same format as main.py for compatibility.
     """
-    from faster_whisper import WhisperModel
-
     print(f"🎙️  Transcribing audio from: {video_path}")
-
-    model = WhisperModel("base", device="cpu", compute_type="int8", cpu_threads=WHISPER_CPU_THREADS, num_workers=1)
-    segments, info = model.transcribe(video_path, word_timestamps=True)
+    segments, info, runtime_meta = transcribe_with_runtime(video_path, word_timestamps=True)
+    print(
+        "🎙️  Whisper runtime: "
+        f"{runtime_meta.get('model')} on {runtime_meta.get('device')} ({runtime_meta.get('compute_type')}), "
+        f"beam={runtime_meta.get('beam_size')}, vad={runtime_meta.get('vad_filter')}, "
+        f"lang={runtime_meta.get('requested_language', 'auto')}"
+    )
 
     transcript = {
         "segments": [],

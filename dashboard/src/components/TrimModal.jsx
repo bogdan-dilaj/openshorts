@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Clock, Loader2, Pause, Play, Scissors, SkipBack, SkipForward, Trash2, X } from 'lucide-react';
 
 const MIN_TRIM_DURATION = 0.25;
@@ -148,9 +149,9 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
         });
     };
 
-    return (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
-            <div className="bg-[#121214] border border-white/10 p-6 rounded-2xl w-full max-w-6xl shadow-2xl relative flex flex-col md:flex-row gap-6 max-h-[90vh]">
+    return createPortal(
+        <div className="fixed inset-0 z-[1000] flex items-start md:items-center justify-center p-3 md:p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out] overflow-y-auto touch-scroll">
+            <div className="bg-[#121214] border border-white/10 p-6 rounded-2xl w-full max-w-6xl shadow-2xl relative flex flex-col md:flex-row gap-6 my-4 md:my-0 max-h-[calc(100dvh-1.5rem)] md:max-h-[90vh] overflow-y-auto md:overflow-hidden touch-scroll">
                 <button
                     onClick={onClose}
                     disabled={isProcessing}
@@ -159,7 +160,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                     <X size={20} />
                 </button>
 
-                <div className="flex-1 bg-black rounded-lg border border-white/5 overflow-hidden flex flex-col min-w-0">
+                <div className="flex-1 bg-black rounded-lg border border-white/5 overflow-hidden flex flex-col min-w-0 min-h-0">
                     <div className="px-4 pt-4 pb-2 border-b border-white/5 bg-[#0b0b0d]">
                         <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500">Preview</div>
                         <div className="mt-1 text-xs text-zinc-400">
@@ -167,7 +168,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                         </div>
                     </div>
 
-                    <div className="relative bg-black min-h-[360px] md:min-h-[520px] flex items-center justify-center">
+                    <div className="relative bg-black min-h-[280px] md:min-h-[520px] flex items-center justify-center">
                         <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(34,211,238,0.16),_transparent_38%),linear-gradient(180deg,_rgba(255,255,255,0.04),_rgba(255,255,255,0))]" />
 
                         {!videoUrl && (
@@ -312,12 +313,12 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                     </div>
                 </div>
 
-                <div className="w-full md:w-[360px] flex flex-col min-w-0">
+                <div className="w-full md:w-[360px] flex flex-col min-w-0 min-h-0">
                     <h3 className="text-xl font-bold text-white mb-6 flex items-center gap-2">
                         <Scissors className="text-cyan-400" /> Trim Clip
                     </h3>
 
-                    <div className="space-y-5 flex-1 overflow-y-auto custom-scrollbar pr-2">
+                    <div className="space-y-5 flex-1 overflow-y-auto custom-scrollbar touch-scroll pr-1 md:pr-2">
                         <div className="p-3 bg-white/5 rounded-xl border border-white/5 text-xs text-zinc-400">
                             Schneide vorne oder hinten weg und markiere optional mehrere Bereiche in der Mitte, die entfernt werden sollen.
                             Jede Speicherung erzeugt eine neue Version.
@@ -464,6 +465,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                     </button>
                 </div>
             </div>
-        </div>
+        </div>,
+        document.body
     );
 }

@@ -20,7 +20,7 @@ const formatTimestamp = (value) => {
 
 export default function JobHistory({ jobs, loading, error, currentJobId, cancelingJobId, onRefresh, onOpenJob, onResumeJob, onCancelJob }) {
     return (
-        <div className="h-full overflow-y-auto p-8 max-w-5xl mx-auto animate-[fadeIn_0.3s_ease-out]">
+        <div className="h-full overflow-y-auto touch-scroll p-5 md:p-8 max-w-5xl mx-auto animate-[fadeIn_0.3s_ease-out]">
             <div className="flex items-center justify-between mb-8 gap-4">
                 <div>
                     <h1 className="text-2xl font-bold text-white">Job History</h1>
@@ -60,7 +60,7 @@ export default function JobHistory({ jobs, loading, error, currentJobId, canceli
 
             <div className="space-y-4">
                 {jobs.map((job) => {
-                    const clipCount = job.result?.clips?.length || 0;
+                    const clipCount = Number.isFinite(job.clip_count) ? Number(job.clip_count) : (job.result?.clips?.length || 0);
                     const provider = job.provider?.name || 'gemini';
                     const statusClass = statusClasses[job.status] || statusClasses.failed;
                     const isCurrentJob = currentJobId === job.job_id;

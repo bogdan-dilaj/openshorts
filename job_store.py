@@ -154,7 +154,7 @@ def build_job_result(output_dir: str, job_id: str) -> Optional[Dict[str, Any]]:
         for i, clip in enumerate(clips):
             clip_copy = dict(clip)
             status = clip_copy.get("status", "completed")
-            if status in {"failed", "pending"}:
+            if status in {"failed", "pending", "draft"}:
                 resume_available = True
 
             versions = _enrich_clip_versions(output_dir, job_id, clip_copy)
@@ -171,6 +171,20 @@ def build_job_result(output_dir: str, job_id: str) -> Optional[Dict[str, Any]]:
                 clip_copy["clip_index"] = i
                 clip_copy["video_url"] = video_url
                 clip_copy["video_filename"] = filename
+                ready_clips.append(clip_copy)
+                continue
+
+            source_filename = (
+                clip_copy.get("source_video_filename")
+                or clip_copy.get("preview_video_filename")
+                or os.path.basename(manifest.get("pipeline", {}).get("input_video") or "")
+            )
+            preview_url = _existing_video_url(output_dir, job_id, source_filename)
+            if preview_url:
+                clip_copy["clip_index"] = i
+                clip_copy["preview_video_filename"] = source_filename
+                clip_copy["preview_video_url"] = preview_url
+                clip_copy["status"] = status or "draft"
                 ready_clips.append(clip_copy)
 
         fallback_filename = data.get("fallback_output")
@@ -224,18 +238,40 @@ def build_job_result(output_dir: str, job_id: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def _build_job_summary(output_root: str, job_id: str) -> Optional[Dict[str, Any]]:
+def _estimate_clip_count(output_dir: str) -> int:
+    metadata_path = find_metadata_path(output_dir)
+    if metadata_path:
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            shorts = data.get("shorts")
+            if isinstance(shorts, list):
+                return len(shorts)
+        except Exception:
+            pass
+    # Fallback: count discoverable output videos without loading full clip metadata.
+    return len(_discover_video_files(output_dir))
+
+
+def _build_job_summary(
+    output_root: str,
+    job_id: str,
+    include_result: bool = True,
+    include_logs: bool = True,
+    log_limit: int = 80,
+) -> Optional[Dict[str, Any]]:
     output_dir = os.path.join(output_root, job_id)
     if not os.path.isdir(output_dir):
         return None
 
     manifest = load_job_manifest(output_dir)
-    result = build_job_result(output_dir, job_id)
+    result = build_job_result(output_dir, job_id) if include_result else None
+    clip_count = len((result or {}).get("clips") or []) if result else _estimate_clip_count(output_dir)
 
-    if not manifest and not result:
+    if not manifest and not result and clip_count <= 0:
         return None
 
-    status = manifest.get("status", "completed" if result else "failed")
+    status = manifest.get("status", "completed" if (result or clip_count > 0) else "failed")
     updated_at = manifest.get("updated_at", os.path.getmtime(output_dir))
     created_at = manifest.get("created_at", updated_at)
     request = manifest.get("request", {})
@@ -261,13 +297,14 @@ def _build_job_summary(output_root: str, job_id: str) -> Optional[Dict[str, Any]
         "created_at": created_at,
         "updated_at": updated_at,
         "source_label": source_label,
+        "clip_count": clip_count,
         "request": request,
         "provider": manifest.get("provider", {}),
         "error": manifest.get("error"),
         "can_resume": can_resume,
-        "generation_mode": result.get("generation_mode") if result else None,
-        "result": result,
-        "logs": read_job_logs(output_dir, limit=80),
+        "generation_mode": (result or {}).get("generation_mode"),
+        "result": result if include_result else None,
+        "logs": read_job_logs(output_dir, limit=log_limit) if include_logs else [],
     }
 
 
@@ -275,15 +312,41 @@ def get_job_summary(output_root: str, job_id: str) -> Optional[Dict[str, Any]]:
     return _build_job_summary(output_root, job_id)
 
 
-def list_job_summaries(output_root: str) -> List[Dict[str, Any]]:
+def list_job_summaries(
+    output_root: str,
+    limit: int = 50,
+    include_result: bool = False,
+    include_logs: bool = True,
+    log_limit: int = 40,
+) -> List[Dict[str, Any]]:
     summaries: List[Dict[str, Any]] = []
     if not os.path.isdir(output_root):
         return summaries
 
+    candidates: List[tuple[float, str]] = []
     for name in os.listdir(output_root):
         if name == "thumbnails":
             continue
-        summary = _build_job_summary(output_root, name)
+        output_dir = os.path.join(output_root, name)
+        if not os.path.isdir(output_dir):
+            continue
+        try:
+            candidates.append((os.path.getmtime(output_dir), name))
+        except Exception:
+            candidates.append((0.0, name))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    if limit > 0:
+        candidates = candidates[:limit]
+
+    for _, name in candidates:
+        summary = _build_job_summary(
+            output_root,
+            name,
+            include_result=include_result,
+            include_logs=include_logs,
+            log_limit=log_limit,
+        )
         if summary:
             summaries.append(summary)
 

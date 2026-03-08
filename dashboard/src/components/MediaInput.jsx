@@ -8,14 +8,15 @@ export default function MediaInput({ onProcess, isProcessing }) {
     const [interviewMode, setInterviewMode] = useState(false);
     const [allowLongClips, setAllowLongClips] = useState(false);
     const [maxClips, setMaxClips] = useState(10);
+    const [analysisOnly, setAnalysisOnly] = useState(true);
 
     const handleSubmit = (e) => {
         e.preventDefault();
         const normalizedMaxClips = Math.max(1, Math.min(50, Number(maxClips) || 10));
         if (mode === 'url' && url) {
-            onProcess({ type: 'url', payload: url, options: { interviewMode, allowLongClips, maxClips: normalizedMaxClips } });
+            onProcess({ type: 'url', payload: url, options: { interviewMode, allowLongClips, maxClips: normalizedMaxClips, analysisOnly } });
         } else if (mode === 'file' && file) {
-            onProcess({ type: 'file', payload: file, options: { interviewMode, allowLongClips, maxClips: normalizedMaxClips } });
+            onProcess({ type: 'file', payload: file, options: { interviewMode, allowLongClips, maxClips: normalizedMaxClips, analysisOnly } });
         }
     };
 
@@ -145,6 +146,21 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     </span>
                 </div>
 
+                <label className="mt-3 flex items-start gap-3 rounded-xl border border-cyan-500/20 bg-cyan-500/5 px-4 py-3 text-left">
+                    <input
+                        type="checkbox"
+                        checked={analysisOnly}
+                        onChange={(e) => setAnalysisOnly(e.target.checked)}
+                        className="mt-1 h-4 w-4 rounded border-white/20 bg-transparent text-primary focus:ring-primary"
+                    />
+                    <span>
+                        <span className="block text-sm font-medium text-white">Nur analysieren + Vorschau (empfohlen)</span>
+                        <span className="block text-xs text-zinc-500">
+                            Erst nur AI-Timestamps erzeugen. Du waehlst danach die besten Clips und renderst nur die wirklich gewuenschten.
+                        </span>
+                    </span>
+                </label>
+
                 <button
                     type="submit"
                     disabled={isProcessing || (mode === 'url' && !url) || (mode === 'file' && !file)}
@@ -157,7 +173,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                         </>
                     ) : (
                         <>
-                            Generate Clips
+                            {analysisOnly ? 'Analyze & Build Drafts' : 'Generate Clips'}
                         </>
                     )}
                 </button>

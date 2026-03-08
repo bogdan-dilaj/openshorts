@@ -140,6 +140,16 @@ const readErrorMessage = async (res) => {
   }
 };
 
+const fetchWithTimeout = async (url, options = {}, timeoutMs = 15000) => {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timer);
+  }
+};
+
 const readStoredJson = (key, fallback) => {
   try {
     const raw = localStorage.getItem(key);
@@ -206,6 +216,43 @@ const DEFAULT_TIGHT_EDIT_SETTINGS = {
   preset: 'aggressive',
 };
 
+const DEFAULT_YOUTUBE_AUTH_SETTINGS = {
+  mode: 'auto',
+  browser: 'auto',
+  cookiesText: '',
+};
+
+const YOUTUBE_AUTH_MODE_OPTIONS = [
+  { value: 'auto', label: 'Auto (inline -> cookies.txt -> browser)' },
+  { value: 'cookies_file', label: 'cookies.txt file only' },
+  { value: 'cookies_text', label: 'Pasted cookies only' },
+  { value: 'browser', label: 'Browser profile only' },
+];
+
+const YOUTUBE_BROWSER_OPTIONS = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'chrome', label: 'Chrome' },
+  { value: 'edge', label: 'Edge' },
+  { value: 'brave', label: 'Brave' },
+  { value: 'chromium', label: 'Chromium' },
+  { value: 'firefox', label: 'Firefox' },
+  { value: 'opera', label: 'Opera' },
+  { value: 'vivaldi', label: 'Vivaldi' },
+  { value: 'safari', label: 'Safari' },
+];
+
+const detectLikelyBrowser = () => {
+  const ua = (navigator.userAgent || '').toLowerCase();
+  if (ua.includes('edg/')) return 'edge';
+  if (ua.includes('brave')) return 'brave';
+  if (ua.includes('opr/') || ua.includes('opera')) return 'opera';
+  if (ua.includes('vivaldi')) return 'vivaldi';
+  if (ua.includes('firefox')) return 'firefox';
+  if (ua.includes('safari') && !ua.includes('chrome')) return 'safari';
+  if (ua.includes('chrome')) return 'chrome';
+  return 'auto';
+};
+
 function App() {
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
   const [llmProvider, setLlmProvider] = useState(localStorage.getItem('llm_provider') || 'gemini');
@@ -234,6 +281,7 @@ function App() {
 
   const [uploadUserId, setUploadUserId] = useState(() => localStorage.getItem('uploadUserId') || '');
   const [userProfiles, setUserProfiles] = useState([]); // List of {username, connected: []}
+  const [uploadProfileStatus, setUploadProfileStatus] = useState(null); // { type: 'success' | 'error' | 'info', message: string }
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState('idle'); // idle, processing, complete, error
   const [jobState, setJobState] = useState('idle'); // queued, processing, partial, completed, failed
@@ -250,12 +298,30 @@ function App() {
   const [hookStyle, setHookStyle] = useState(() => readStoredJson('hook_style_v1', DEFAULT_HOOK_STYLE));
   const [tightEditSettings, setTightEditSettings] = useState(() => readStoredJson('tight_edit_settings_v1', DEFAULT_TIGHT_EDIT_SETTINGS));
   const [socialPostSettings, setSocialPostSettings] = useState(() => readStoredSocialPostSettings());
+  const [youtubeAuthSettings, setYoutubeAuthSettings] = useState(() => {
+    const stored = readStoredJson('youtube_auth_settings_v1', DEFAULT_YOUTUBE_AUTH_SETTINGS);
+    const browser = stored.browser && stored.browser !== 'auto' ? stored.browser : detectLikelyBrowser();
+    return {
+      ...DEFAULT_YOUTUBE_AUTH_SETTINGS,
+      ...stored,
+      browser: browser || 'auto',
+    };
+  });
+  const [youtubeAuthStatus, setYoutubeAuthStatus] = useState(null);
+  const [youtubeAuthBusy, setYoutubeAuthBusy] = useState(false);
+  const [settingsSyncCode, setSettingsSyncCode] = useState('');
+  const [generatedSettingsSyncCode, setGeneratedSettingsSyncCode] = useState('');
+  const [settingsSyncBusy, setSettingsSyncBusy] = useState(false);
+  const [settingsSyncStatus, setSettingsSyncStatus] = useState(null);
+  const [settingsSyncIncludeYoutubeCookies, setSettingsSyncIncludeYoutubeCookies] = useState(true);
   const [clipVideoOverrides, setClipVideoOverrides] = useState({});
 
   // Sync state for original video playback
   const [syncedTime, setSyncedTime] = useState(0);
   const [isSyncedPlaying, setIsSyncedPlaying] = useState(false);
   const [syncTrigger, setSyncTrigger] = useState(0);
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+  const [isMobileLiveAnalysisOpen, setIsMobileLiveAnalysisOpen] = useState(false);
 
   const handleClipPlay = (startTime) => {
     setSyncedTime(startTime);
@@ -266,6 +332,36 @@ function App() {
   const handleClipPause = () => {
     setIsSyncedPlaying(false);
   };
+
+  const handleTabSelect = (tab) => {
+    setActiveTab(tab);
+    setIsMobileSidebarOpen(false);
+  };
+
+  useEffect(() => {
+    setIsMobileSidebarOpen(false);
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (!isMobileSidebarOpen) return undefined;
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        setIsMobileSidebarOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isMobileSidebarOpen]);
+
+  useEffect(() => {
+    if (status === 'processing') {
+      setIsMobileLiveAnalysisOpen(true);
+      return;
+    }
+    if (status === 'complete' || status === 'error' || status === 'idle') {
+      setIsMobileLiveAnalysisOpen(false);
+    }
+  }, [status, jobId]);
 
   const setOllamaModel = (value) => {
     setOllamaModelState(normalizeOllamaModelName(value));
@@ -325,6 +421,223 @@ function App() {
     return headers;
   };
 
+  const buildYoutubeAuthPayload = () => {
+    const mode = youtubeAuthSettings.mode || 'auto';
+    const browser = youtubeAuthSettings.browser || 'auto';
+    const payload = {
+      youtube_auth_mode: mode,
+      youtube_cookies_from_browser: browser,
+    };
+    if (mode === 'cookies_text' || (mode === 'auto' && (youtubeAuthSettings.cookiesText || '').trim())) {
+      payload.youtube_cookies = youtubeAuthSettings.cookiesText || '';
+    }
+    return payload;
+  };
+
+  const refreshYoutubeAuthStatus = async () => {
+    setYoutubeAuthBusy(true);
+    try {
+      const res = await fetch(getApiUrl('/api/youtube/auth/status'));
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      setYoutubeAuthStatus(data);
+    } catch (e) {
+      setYoutubeAuthStatus({
+        logged_in: false,
+        error: e.message || 'Status check failed',
+      });
+    } finally {
+      setYoutubeAuthBusy(false);
+    }
+  };
+
+  const saveYoutubeCookiesToBackend = async () => {
+    if (!(youtubeAuthSettings.cookiesText || '').trim()) {
+      alert('Bitte erst cookies.txt Inhalt einfuegen.');
+      return;
+    }
+    setYoutubeAuthBusy(true);
+    try {
+      const res = await fetch(getApiUrl('/api/youtube/auth/cookies'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cookies_text: youtubeAuthSettings.cookiesText }),
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      setYoutubeAuthStatus(data);
+      setYoutubeAuthSettings((prev) => ({ ...prev, mode: prev.mode === 'cookies_text' ? prev.mode : 'cookies_file' }));
+    } catch (e) {
+      alert(`Cookie Save fehlgeschlagen: ${e.message}`);
+    } finally {
+      setYoutubeAuthBusy(false);
+    }
+  };
+
+  const deleteYoutubeCookiesFromBackend = async () => {
+    setYoutubeAuthBusy(true);
+    try {
+      const res = await fetch(getApiUrl('/api/youtube/auth/cookies'), {
+        method: 'DELETE',
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      setYoutubeAuthStatus(data);
+    } catch (e) {
+      alert(`Cookie Delete fehlgeschlagen: ${e.message}`);
+    } finally {
+      setYoutubeAuthBusy(false);
+    }
+  };
+
+  const importYoutubeCookiesFromBrowser = async () => {
+    setYoutubeAuthBusy(true);
+    try {
+      const selectedBrowser = youtubeAuthSettings.browser && youtubeAuthSettings.browser !== 'auto'
+        ? youtubeAuthSettings.browser
+        : detectLikelyBrowser();
+      const res = await fetch(getApiUrl('/api/youtube/auth/import-browser'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ browser: selectedBrowser }),
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      setYoutubeAuthStatus(data);
+      setYoutubeAuthSettings((prev) => ({
+        ...prev,
+        browser: selectedBrowser,
+        mode: prev.mode === 'cookies_text' ? 'auto' : prev.mode,
+      }));
+    } catch (e) {
+      alert(`Browser-Cookie-Import fehlgeschlagen: ${e.message}`);
+    } finally {
+      setYoutubeAuthBusy(false);
+    }
+  };
+
+  const collectSyncSettings = () => ({
+    apiKey,
+    llmProvider,
+    ollamaBaseUrl,
+    ollamaModel,
+    uploadPostKey,
+    uploadUserId,
+    elevenLabsKey,
+    subtitleStyle,
+    hookStyle,
+    tightEditSettings,
+    socialPostSettings,
+    youtubeAuthSettings,
+  });
+
+  const applySyncedSettings = (payload) => {
+    if (!payload || typeof payload !== 'object') return;
+
+    if (typeof payload.apiKey === 'string') setApiKey(payload.apiKey);
+    if (payload.llmProvider === 'gemini' || payload.llmProvider === 'ollama') setLlmProvider(payload.llmProvider);
+    if (typeof payload.ollamaBaseUrl === 'string' && payload.ollamaBaseUrl.trim()) setOllamaBaseUrl(payload.ollamaBaseUrl);
+    if (typeof payload.ollamaModel === 'string' && payload.ollamaModel.trim()) setOllamaModel(payload.ollamaModel);
+    if (typeof payload.uploadPostKey === 'string') setUploadPostKey(payload.uploadPostKey);
+    if (typeof payload.uploadUserId === 'string') setUploadUserId(payload.uploadUserId);
+    if (typeof payload.elevenLabsKey === 'string') setElevenLabsKey(payload.elevenLabsKey);
+
+    if (payload.subtitleStyle && typeof payload.subtitleStyle === 'object') {
+      setSubtitleStyle({ ...DEFAULT_SUBTITLE_STYLE, ...payload.subtitleStyle });
+    }
+    if (payload.hookStyle && typeof payload.hookStyle === 'object') {
+      setHookStyle({ ...DEFAULT_HOOK_STYLE, ...payload.hookStyle });
+    }
+    if (payload.tightEditSettings && typeof payload.tightEditSettings === 'object') {
+      setTightEditSettings({ ...DEFAULT_TIGHT_EDIT_SETTINGS, ...payload.tightEditSettings });
+    }
+    if (payload.socialPostSettings && typeof payload.socialPostSettings === 'object') {
+      setSocialPostSettings({
+        ...DEFAULT_SOCIAL_POST_SETTINGS,
+        ...payload.socialPostSettings,
+        platforms: {
+          ...DEFAULT_SOCIAL_POST_SETTINGS.platforms,
+          ...(payload.socialPostSettings.platforms || {}),
+        },
+      });
+    }
+    if (payload.youtubeAuthSettings && typeof payload.youtubeAuthSettings === 'object') {
+      setYoutubeAuthSettings({
+        ...DEFAULT_YOUTUBE_AUTH_SETTINGS,
+        ...payload.youtubeAuthSettings,
+        browser: payload.youtubeAuthSettings.browser || detectLikelyBrowser(),
+      });
+    }
+  };
+
+  const createSettingsSyncCode = async () => {
+    setSettingsSyncBusy(true);
+    setSettingsSyncStatus({ type: 'info', message: 'Sync-Key wird erstellt...' });
+    try {
+      const res = await fetchWithTimeout(getApiUrl('/api/settings/sync/create'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          settings: collectSyncSettings(),
+          include_youtube_cookies: settingsSyncIncludeYoutubeCookies,
+        }),
+      }, 12000);
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      setGeneratedSettingsSyncCode(data.sync_code || '');
+      setSettingsSyncCode(data.sync_code || '');
+      setSettingsSyncStatus({
+        type: 'success',
+        message: `Sync-Code erstellt (${data.expires_in_days || 30} Tage gueltig).`,
+      });
+    } catch (e) {
+      if (e?.name === 'AbortError') {
+        setSettingsSyncStatus({ type: 'error', message: 'Sync create timed out. Bitte Netzwerk/Backend prüfen.' });
+      } else {
+        setSettingsSyncStatus({ type: 'error', message: e.message || 'Sync-Code konnte nicht erstellt werden.' });
+      }
+    } finally {
+      setSettingsSyncBusy(false);
+    }
+  };
+
+  const loadSettingsFromSyncCode = async () => {
+    const code = (settingsSyncCode || '').replace(/\s+/g, '').trim();
+    if (!code) {
+      setSettingsSyncStatus({ type: 'error', message: 'Bitte Sync-Code eingeben.' });
+      return;
+    }
+    setSettingsSyncBusy(true);
+    setSettingsSyncStatus({ type: 'info', message: 'Sync-Key wird geladen...' });
+    try {
+      const res = await fetchWithTimeout(getApiUrl('/api/settings/sync/load'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sync_code: code, apply_youtube_cookies: true }),
+      }, 12000);
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      applySyncedSettings(data.settings || {});
+      if (data.youtube_cookies_applied) {
+        await refreshYoutubeAuthStatus();
+      }
+      setSettingsSyncStatus({
+        type: 'success',
+        message: data.youtube_cookies_applied
+          ? 'Settings geladen. YouTube-Session wurde ebenfalls uebernommen.'
+          : 'Settings geladen.',
+      });
+    } catch (e) {
+      if (e?.name === 'AbortError') {
+        setSettingsSyncStatus({ type: 'error', message: 'Sync load timed out. Bitte Netzwerk/Backend prüfen.' });
+      } else {
+        setSettingsSyncStatus({ type: 'error', message: e.message || 'Sync-Code konnte nicht geladen werden.' });
+      }
+    } finally {
+      setSettingsSyncBusy(false);
+    }
+  };
+
   const deriveProcessingMedia = (job) => {
     const request = job?.request;
     if (request?.type === 'url' && request?.url) {
@@ -369,6 +682,10 @@ function App() {
   }, [socialPostSettings]);
 
   useEffect(() => {
+    localStorage.setItem('youtube_auth_settings_v1', JSON.stringify(youtubeAuthSettings));
+  }, [youtubeAuthSettings]);
+
+  useEffect(() => {
     if (uploadPostKey) {
       localStorage.setItem('uploadPostKey_v3', encrypt(uploadPostKey));
     }
@@ -388,6 +705,12 @@ function App() {
       fetchUserProfiles();
     }
   }, [uploadPostKey]);
+
+  useEffect(() => {
+    if (activeTab === 'settings') {
+      refreshYoutubeAuthStatus();
+    }
+  }, [activeTab]);
 
   useEffect(() => {
     let interval;
@@ -432,17 +755,43 @@ function App() {
   const fetchJobHistory = async () => {
     setHistoryLoading(true);
     setHistoryError('');
+    let timedOutByGuard = false;
+    const failSafeTimer = window.setTimeout(() => {
+      timedOutByGuard = true;
+      setHistoryLoading(false);
+      setHistoryError('Job history request timed out. Please check network reachability to backend.');
+    }, 16000);
     try {
-      const res = await fetch(getApiUrl('/api/jobs/history'));
+      const res = await fetchWithTimeout(
+        getApiUrl('/api/jobs/history?limit=100&include_result=false&include_logs=true&log_limit=30'),
+        {},
+        10000
+      );
+      if (timedOutByGuard) {
+        return;
+      }
       if (!res.ok) {
         throw new Error('Failed to load job history');
       }
       const data = await res.json();
+      if (timedOutByGuard) {
+        return;
+      }
       setHistoryJobs(data.jobs || []);
     } catch (e) {
-      setHistoryError(e.message || 'Failed to load job history');
+      if (timedOutByGuard) {
+        return;
+      }
+      if (e?.name === 'AbortError') {
+        setHistoryError('Job history request timed out. Please check network reachability to backend.');
+      } else {
+        setHistoryError(e.message || 'Failed to load job history');
+      }
     } finally {
-      setHistoryLoading(false);
+      window.clearTimeout(failSafeTimer);
+      if (!timedOutByGuard) {
+        setHistoryLoading(false);
+      }
     }
   };
 
@@ -454,7 +803,12 @@ function App() {
 
 
   const fetchUserProfiles = async () => {
-    if (!uploadPostKey) return;
+    if (!uploadPostKey) {
+      setUploadProfileStatus({ type: 'error', message: 'Bitte zuerst einen Upload-Post API Key eingeben.' });
+      setUserProfiles([]);
+      return;
+    }
+    setUploadProfileStatus({ type: 'info', message: 'Profile werden geladen...' });
     try {
       const res = await fetch(getApiUrl('/api/social/user'), {
         headers: { 'X-Upload-Post-Key': uploadPostKey }
@@ -463,16 +817,20 @@ function App() {
       const data = await res.json();
       if (data.profiles && data.profiles.length > 0) {
         setUserProfiles(data.profiles);
+        setUploadProfileStatus({ type: 'success', message: `${data.profiles.length} Profile geladen.` });
         // Auto select first if none selected
         if (!uploadUserId || !data.profiles.some((profile) => profile.username === uploadUserId)) {
           setUploadUserId(data.profiles[0].username);
         }
       } else {
         setUserProfiles([]);
-        alert(data.error || "No profiles found for this API Key.");
+        setUploadProfileStatus({
+          type: data.recoverable ? 'info' : 'error',
+          message: data.error || 'Keine Profile gefunden. Bitte Key und Upload-Post Konto prüfen.',
+        });
       }
     } catch (e) {
-      alert(`Error fetching User Profiles: ${e.message}`);
+      setUploadProfileStatus({ type: 'error', message: `Fehler beim Laden der Profile: ${e.message}` });
       console.error(e);
     }
   };
@@ -496,6 +854,8 @@ function App() {
           allow_long_clips: !!data.options?.allowLongClips,
           max_clips: Number(data.options?.maxClips) || 10,
           tight_edit_preset: tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset,
+          analysis_only: !!data.options?.analysisOnly,
+          ...buildYoutubeAuthPayload(),
         });
       } else {
         const formData = new FormData();
@@ -504,6 +864,13 @@ function App() {
         formData.append('allow_long_clips', data.options?.allowLongClips ? 'true' : 'false');
         formData.append('max_clips', String(Number(data.options?.maxClips) || 10));
         formData.append('tight_edit_preset', tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset);
+        formData.append('analysis_only', data.options?.analysisOnly ? 'true' : 'false');
+        const youtubePayload = buildYoutubeAuthPayload();
+        formData.append('youtube_auth_mode', youtubePayload.youtube_auth_mode || 'auto');
+        formData.append('youtube_cookies_from_browser', youtubePayload.youtube_cookies_from_browser || 'auto');
+        if (youtubePayload.youtube_cookies) {
+          formData.append('youtube_cookies', youtubePayload.youtube_cookies);
+        }
         body = formData;
       }
 
@@ -560,6 +927,7 @@ function App() {
           ollama_base_url: ollamaBaseUrl,
           ollama_model: ollamaModel,
           tight_edit_preset: tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset,
+          ...buildYoutubeAuthPayload(),
         })
       });
 
@@ -611,46 +979,46 @@ function App() {
 
   // --- UI Components ---
 
-  const Sidebar = () => (
-    <div className="w-20 lg:w-64 bg-surface border-r border-white/5 flex flex-col h-full shrink-0 transition-all duration-300">
+  const Sidebar = ({ mobile = false }) => (
+    <div className={`${mobile ? 'w-72 max-w-[88vw]' : 'w-20 lg:w-64'} bg-surface border-r border-white/5 flex flex-col h-full shrink-0 transition-all duration-300`}>
       <div className="p-6 flex items-center gap-3">
         <div className="w-8 h-8 bg-white/5 rounded-lg flex items-center justify-center shrink-0 overflow-hidden border border-white/5">
           <img src="/logo-openshorts.png" alt="Logo" className="w-full h-full object-cover" />
         </div>
-        <span className="font-bold text-lg text-white hidden lg:block tracking-tight">OpenShorts</span>
+        <span className={`font-bold text-lg text-white tracking-tight ${mobile ? 'block' : 'hidden lg:block'}`}>OpenShorts</span>
       </div>
 
-      <nav className="flex-1 px-4 py-4 space-y-2">
+      <nav className="flex-1 px-4 py-4 space-y-2 overflow-y-auto custom-scrollbar touch-scroll">
         <button
-          onClick={() => setActiveTab('dashboard')}
+          onClick={() => handleTabSelect('dashboard')}
           className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'dashboard' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
         >
           <LayoutDashboard size={20} />
-          <span className="font-medium hidden lg:block">Dashboard</span>
+          <span className={`font-medium ${mobile ? 'block' : 'hidden lg:block'}`}>Dashboard</span>
         </button>
 
         <button
-          onClick={() => setActiveTab('thumbnails')}
+          onClick={() => handleTabSelect('thumbnails')}
           className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'thumbnails' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
         >
           <Image size={20} />
-          <span className="font-medium hidden lg:block">YouTube Studio</span>
+          <span className={`font-medium ${mobile ? 'block' : 'hidden lg:block'}`}>YouTube Studio</span>
         </button>
 
         <button
-          onClick={() => setActiveTab('history')}
+          onClick={() => handleTabSelect('history')}
           className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'history' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
         >
           <History size={20} />
-          <span className="font-medium hidden lg:block">History</span>
+          <span className={`font-medium ${mobile ? 'block' : 'hidden lg:block'}`}>History</span>
         </button>
 
         <button
-          onClick={() => setActiveTab('settings')}
+          onClick={() => handleTabSelect('settings')}
           className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'settings' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
         >
           <Settings size={20} />
-          <span className="font-medium hidden lg:block">Settings</span>
+          <span className={`font-medium ${mobile ? 'block' : 'hidden lg:block'}`}>Settings</span>
         </button>
       </nav>
 
@@ -663,7 +1031,7 @@ function App() {
           <div className="w-8 h-8 rounded-full bg-primary/20 text-primary flex items-center justify-center shrink-0">
             <Globe size={16} />
           </div>
-          <div className="hidden lg:block overflow-hidden">
+          <div className={`${mobile ? 'block' : 'hidden lg:block'} overflow-hidden`}>
             <p className="text-sm font-bold text-white leading-none mb-0.5">Landing Page</p>
             <p className="text-[10px] text-zinc-400 group-hover:text-zinc-300 transition-colors truncate">View website</p>
           </div>
@@ -677,7 +1045,7 @@ function App() {
           <div className="w-8 h-8 rounded-full bg-white text-black flex items-center justify-center shrink-0">
             <svg height="20" viewBox="0 0 16 16" version="1.1" width="20" aria-hidden="true"><path fillRule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
           </div>
-          <div className="hidden lg:block overflow-hidden">
+          <div className={`${mobile ? 'block' : 'hidden lg:block'} overflow-hidden`}>
             <p className="text-sm font-bold text-white leading-none mb-0.5">Open Source</p>
             <p className="text-[10px] text-zinc-400 group-hover:text-zinc-300 transition-colors truncate">Free & Community Driven</p>
           </div>
@@ -687,18 +1055,52 @@ function App() {
   );
 
   return (
-    <div className="flex h-screen bg-background overflow-hidden selection:bg-primary/30">
-      <Sidebar />
+    <div className="flex h-[100dvh] min-h-screen bg-background overflow-hidden selection:bg-primary/30">
+      <aside className="hidden md:flex h-full">
+        <Sidebar />
+      </aside>
 
-      <main className="flex-1 flex flex-col h-full overflow-hidden relative">
+      {isMobileSidebarOpen && (
+        <div className="fixed inset-0 z-[140] md:hidden">
+          <button
+            type="button"
+            aria-label="Close menu overlay"
+            className="absolute inset-0 bg-black/70 backdrop-blur-[1px]"
+            onClick={() => setIsMobileSidebarOpen(false)}
+          />
+          <div className="absolute inset-y-0 left-0 pointer-events-none">
+            <div className="h-full pointer-events-auto relative">
+              <button
+                type="button"
+                aria-label="Close menu"
+                onClick={() => setIsMobileSidebarOpen(false)}
+                className="absolute top-3 right-3 z-10 inline-flex items-center justify-center w-8 h-8 rounded-lg border border-white/10 bg-black/45 text-zinc-200 hover:text-white hover:bg-black/65 transition-colors"
+              >
+                <X size={16} />
+              </button>
+              <Sidebar mobile />
+            </div>
+          </div>
+        </div>
+      )}
+
+      <main className="flex-1 min-w-0 flex flex-col h-full min-h-0 overflow-hidden relative">
         {/* Background Gradients */}
         <div className="absolute inset-0 overflow-hidden -z-10 pointer-events-none">
           <div className="absolute -top-[10%] -right-[10%] w-[50%] h-[50%] bg-primary/5 rounded-full blur-[120px]" />
         </div>
 
         {/* Top Header */}
-        <header className="h-16 border-b border-white/5 bg-background/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10">
+        <header className="h-16 border-b border-white/5 bg-background/50 backdrop-blur-md flex items-center justify-between px-4 md:px-6 shrink-0 z-10">
           <div className="flex items-center gap-4">
+            <button
+              type="button"
+              onClick={() => setIsMobileSidebarOpen(true)}
+              className="md:hidden inline-flex items-center justify-center w-9 h-9 rounded-lg border border-white/10 bg-white/5 text-zinc-200 hover:text-white hover:bg-white/10 transition-colors"
+              aria-label="Open navigation menu"
+            >
+              <Menu size={18} />
+            </button>
             {status !== 'idle' && (
               <button
                 onClick={handleReset}
@@ -728,7 +1130,7 @@ function App() {
         </header>
 
         {/* Main Workspace */}
-        <div className="flex-1 overflow-hidden relative">
+        <div className="flex-1 min-h-0 overflow-hidden relative">
 
           {activeTab === 'history' && (
             <JobHistory
@@ -746,7 +1148,7 @@ function App() {
 
           {/* View: Settings */}
           {activeTab === 'settings' && (
-            <div className="h-full overflow-y-auto p-8 max-w-2xl mx-auto animate-[fadeIn_0.3s_ease-out]">
+            <div className="h-full overflow-y-auto touch-scroll p-5 md:p-8 max-w-2xl mx-auto animate-[fadeIn_0.3s_ease-out]">
               <div className="flex items-center justify-between mb-8">
                 <h1 className="text-2xl font-bold">Settings</h1>
                 <div className="px-3 py-1 bg-green-500/10 border border-green-500/20 rounded-full text-[10px] text-green-400 font-medium flex items-center gap-2">
@@ -785,12 +1187,164 @@ function App() {
                   <h2 className="text-lg font-semibold">YouTube Download Quality</h2>
                   <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Local setup</span>
                 </div>
-                <p className="text-xs text-zinc-500 leading-relaxed">
-                  The downloader now aborts if YouTube only exposes a low-quality source. For locked formats, place a Netscape
-                  <strong> cookies.txt</strong> in the project root or set <strong>YOUTUBE_VISITOR_DATA</strong> and optional
-                  <strong> YOUTUBE_PO_TOKEN_WEB</strong>, <strong>YOUTUBE_PO_TOKEN_MWEB</strong>, <strong>YOUTUBE_PO_TOKEN_ANDROID</strong>
-                  in your backend environment.
-                </p>
+                <div className="space-y-4">
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div>
+                      <label className="block text-sm text-zinc-400 mb-2">Auth Mode</label>
+                      <select
+                        value={youtubeAuthSettings.mode}
+                        onChange={(e) => setYoutubeAuthSettings((prev) => ({ ...prev, mode: e.target.value }))}
+                        className="input-field"
+                      >
+                        {YOUTUBE_AUTH_MODE_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm text-zinc-400 mb-2">Browser (for browser mode)</label>
+                      <select
+                        value={youtubeAuthSettings.browser}
+                        onChange={(e) => setYoutubeAuthSettings((prev) => ({ ...prev, browser: e.target.value }))}
+                        className="input-field"
+                      >
+                        {YOUTUBE_BROWSER_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-zinc-400 mb-2">cookies.txt (Netscape format, optional)</label>
+                    <textarea
+                      value={youtubeAuthSettings.cookiesText}
+                      onChange={(e) => setYoutubeAuthSettings((prev) => ({ ...prev, cookiesText: e.target.value }))}
+                      rows={5}
+                      className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-primary/50 font-mono resize-y"
+                      placeholder="# Netscape HTTP Cookie File ..."
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={saveYoutubeCookiesToBackend}
+                      disabled={youtubeAuthBusy}
+                      className="px-3 py-1.5 rounded-lg bg-primary/20 border border-primary/30 text-xs text-primary hover:bg-primary/30 disabled:opacity-50"
+                    >
+                      Cookies speichern (Backend)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={importYoutubeCookiesFromBrowser}
+                      disabled={youtubeAuthBusy}
+                      className="px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
+                    >
+                      Browser-Login importieren
+                    </button>
+                    <button
+                      type="button"
+                      onClick={refreshYoutubeAuthStatus}
+                      disabled={youtubeAuthBusy}
+                      className="px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-xs text-zinc-200 hover:bg-white/10 disabled:opacity-50"
+                    >
+                      Status pruefen
+                    </button>
+                    <button
+                      type="button"
+                      onClick={deleteYoutubeCookiesFromBackend}
+                      disabled={youtubeAuthBusy}
+                      className="px-3 py-1.5 rounded-lg bg-red-500/10 border border-red-500/20 text-xs text-red-300 hover:bg-red-500/20 disabled:opacity-50"
+                    >
+                      Cookies loeschen
+                    </button>
+                    <span className={`ml-auto text-[11px] px-2 py-1 rounded border ${youtubeAuthStatus?.logged_in ? 'bg-green-500/10 border-green-500/20 text-green-300' : 'bg-zinc-500/10 border-zinc-500/20 text-zinc-300'}`}>
+                      {youtubeAuthStatus?.logged_in ? 'Login erkannt' : 'Nicht eingeloggt'}
+                    </span>
+                  </div>
+
+                  <p className="text-xs text-zinc-500 leading-relaxed">
+                    Bei jedem Job werden diese Einstellungen an den Downloader uebergeben. Wenn YouTube nur niedrige Qualitaet anbietet, bricht der Job jetzt sauber ab statt 360p weiterzuverarbeiten.
+                    Fuer gesperrte Streams sind frische Login-Cookies meist Pflicht.
+                  </p>
+                  {youtubeAuthStatus?.cookies_file_path && (
+                    <p className="text-[11px] text-zinc-600 break-all">
+                      cookies file: {youtubeAuthStatus.cookies_file_path} ({youtubeAuthStatus.cookies_file_size || 0} bytes)
+                    </p>
+                  )}
+                  <p className="text-[11px] text-zinc-600 leading-relaxed">
+                    Hinweis: Der Browser-Import liest Cookies vom Host-Rechner, auf dem Docker laeuft. Auf iPhone/iPad kann Safari-Cookie-Export nicht direkt automatisiert ausgelesen werden.
+                  </p>
+                </div>
+              </div>
+
+              <div className="glass-panel p-6 mt-8">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-semibold">Device Sync</h2>
+                  <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Encrypted</span>
+                </div>
+                <div className="space-y-4">
+                  <label className="flex items-start gap-3 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-left">
+                    <input
+                      type="checkbox"
+                      checked={settingsSyncIncludeYoutubeCookies}
+                      onChange={(e) => setSettingsSyncIncludeYoutubeCookies(e.target.checked)}
+                      className="mt-1 h-4 w-4 rounded border-white/20 bg-transparent text-primary focus:ring-primary"
+                    />
+                    <span>
+                      <span className="block text-sm font-medium text-white">YouTube Session mit synchronisieren</span>
+                      <span className="block text-xs text-zinc-500">
+                        Wenn aktiv, wird die aktuelle Backend-YouTube-Session im Sync-Profil hinterlegt und beim Laden auf einem anderen Geraet wiederhergestellt.
+                      </span>
+                    </span>
+                  </label>
+
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={createSettingsSyncCode}
+                      disabled={settingsSyncBusy}
+                      className="px-3 py-1.5 rounded-lg bg-primary/20 border border-primary/30 text-xs text-primary hover:bg-primary/30 disabled:opacity-50"
+                    >
+                      Sync-Key erstellen
+                    </button>
+                    <button
+                      type="button"
+                      onClick={loadSettingsFromSyncCode}
+                      disabled={settingsSyncBusy}
+                      className="px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-xs text-zinc-200 hover:bg-white/10 disabled:opacity-50"
+                    >
+                      Vom Sync-Key laden
+                    </button>
+                    {generatedSettingsSyncCode && (
+                      <button
+                        type="button"
+                        onClick={() => navigator.clipboard?.writeText(generatedSettingsSyncCode)}
+                        className="px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-xs text-zinc-300 hover:bg-white/10"
+                      >
+                        Key kopieren
+                      </button>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-zinc-400 mb-2">Sync-Key</label>
+                    <textarea
+                      value={settingsSyncCode}
+                      onChange={(e) => setSettingsSyncCode(e.target.value)}
+                      rows={3}
+                      className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-primary/50 font-mono resize-y"
+                      placeholder="xxxxxx.yyyyyyyyyyyyyyyyyyyyyyyyyyy"
+                    />
+                  </div>
+
+                  {settingsSyncStatus?.message && (
+                    <p className={`text-xs ${settingsSyncStatus.type === 'error' ? 'text-red-300' : 'text-emerald-300'}`}>
+                      {settingsSyncStatus.message}
+                    </p>
+                  )}
+                </div>
               </div>
 
               <div className="glass-panel p-6 mt-8">
@@ -931,6 +1485,17 @@ function App() {
                       Connect
                     </button>
                   </div>
+                  {uploadProfileStatus?.message && (
+                    <p className={`text-xs mt-2 ${
+                      uploadProfileStatus.type === 'success'
+                        ? 'text-emerald-300'
+                        : uploadProfileStatus.type === 'info'
+                          ? 'text-zinc-400'
+                          : 'text-red-300'
+                    }`}>
+                      {uploadProfileStatus.message}
+                    </p>
+                  )}
                   <div>
                     <label className="block text-sm text-zinc-400 mb-2">Default Upload-Post Profile</label>
                     <select
@@ -1121,7 +1686,7 @@ function App() {
 
           {/* View: Dashboard (Idle) */}
           {activeTab === 'dashboard' && status === 'idle' && (
-            <div className="h-full flex flex-col items-center justify-center p-6 animate-[fadeIn_0.3s_ease-out]">
+            <div className="h-full overflow-y-auto touch-scroll flex flex-col items-center justify-center p-5 md:p-6 animate-[fadeIn_0.3s_ease-out]">
               <div className="max-w-xl w-full text-center space-y-8">
                 <div className="space-y-4">
                   <h1 className="text-4xl md:text-5xl font-black bg-gradient-to-b from-white to-white/60 bg-clip-text text-transparent">
@@ -1145,67 +1710,79 @@ function App() {
 
           {/* View: Processing / Results (Split View) */}
           {activeTab === 'dashboard' && (status === 'processing' || status === 'complete' || status === 'error') && (
-            <div className="h-full flex flex-col md:flex-row animate-[fadeIn_0.3s_ease-out]">
+            <div className="h-full min-h-0 flex flex-col md:flex-row animate-[fadeIn_0.3s_ease-out]">
 
               {/* Left Panel: Preview & Status */}
-              <div className={`${status === 'complete' ? 'w-full md:w-[30%] lg:w-[25%]' : 'w-full md:w-[55%] lg:w-[60%]'} h-full flex flex-col border-r border-white/5 bg-black/20 p-6 overflow-y-auto custom-scrollbar transition-all duration-700 ease-in-out`}>
-                <div className="mb-6 flex items-center justify-between">
+              <div className={`${status === 'complete' ? 'w-full md:w-[30%] lg:w-[25%]' : 'w-full md:w-[55%] lg:w-[60%]'} md:h-full ${isMobileLiveAnalysisOpen ? 'h-[44dvh]' : 'h-auto'} md:max-h-none flex flex-col border-b md:border-b-0 md:border-r border-white/5 bg-black/20 p-4 md:p-6 overflow-hidden md:overflow-y-auto custom-scrollbar touch-scroll transition-all duration-700 ease-in-out`}>
+                <div className="mb-4 md:mb-6 flex items-center justify-between gap-3">
                   <h2 className="text-lg font-semibold flex items-center gap-2">
                     <Activity className={`text-primary ${status === 'processing' ? 'animate-pulse' : ''}`} size={20} />
                     Live Analysis
                   </h2>
-                  <span className={`text-xs px-2 py-1 rounded-full border ${status === 'processing' ? 'bg-primary/10 border-primary/20 text-primary' :
-                    status === 'complete' ? 'bg-green-500/10 border-green-500/20 text-green-400' :
-                      'bg-red-500/10 border-red-500/20 text-red-400'
-                    }`}>
-                    {(status === 'processing'
-                      ? jobState
-                      : (status === 'complete' && jobState === 'partial') || (status === 'error' && jobState === 'cancelled')
+                  <div className="flex items-center gap-2">
+                    <span className={`text-xs px-2 py-1 rounded-full border ${status === 'processing' ? 'bg-primary/10 border-primary/20 text-primary' :
+                      status === 'complete' ? 'bg-green-500/10 border-green-500/20 text-green-400' :
+                        'bg-red-500/10 border-red-500/20 text-red-400'
+                      }`}>
+                      {(status === 'processing'
                         ? jobState
-                        : status
-                    ).toUpperCase()}
-                  </span>
-                </div>
-
-                {/* Video Preview */}
-                {processingMedia && (
-                  <ProcessingAnimation
-                    media={processingMedia}
-                    isComplete={status === 'complete'}
-                    syncedTime={syncedTime}
-                    isSyncedPlaying={isSyncedPlaying}
-                    syncTrigger={syncTrigger}
-                  />
-                )}
-
-                {/* Logs Terminal */}
-                <div className={`bg-[#0c0c0e] rounded-xl border border-white/10 overflow-hidden flex flex-col transition-all duration-500 ${status === 'complete' ? 'h-32 min-h-0 opacity-50 hover:opacity-100' : 'flex-1 min-h-[200px]'}`}>
-                  <div className="px-4 py-2 border-b border-white/5 flex items-center justify-between bg-white/5 shrink-0">
-                    <span className="text-xs font-mono text-zinc-400 flex items-center gap-2">
-                      <Terminal size={12} /> System Logs
+                        : (status === 'complete' && jobState === 'partial') || (status === 'error' && jobState === 'cancelled')
+                          ? jobState
+                          : status
+                      ).toUpperCase()}
                     </span>
-                    <button onClick={() => setLogsVisible(!logsVisible)} className="text-zinc-500 hover:text-white transition-colors">
-                      {logsVisible ? <ChevronDown size={14} /> : <ChevronDown size={14} className="rotate-180" />}
+                    <button
+                      type="button"
+                      onClick={() => setIsMobileLiveAnalysisOpen((prev) => !prev)}
+                      className="md:hidden inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-zinc-300 hover:text-white hover:bg-white/10"
+                    >
+                      <span>{isMobileLiveAnalysisOpen ? 'Hide' : 'Show'}</span>
+                      <ChevronDown size={13} className={`transition-transform ${isMobileLiveAnalysisOpen ? '' : '-rotate-90'}`} />
                     </button>
                   </div>
-                  {logsVisible && (
-                    <div className="flex-1 p-4 overflow-y-auto font-mono text-xs space-y-1.5 custom-scrollbar text-zinc-400">
-                      {logs.map((log, i) => (
-                        <div key={i} className={`flex gap-2 ${log.toLowerCase().includes('error') ? 'text-red-400' : 'text-zinc-400'}`}>
-                          <span className="text-zinc-700 shrink-0">{new Date().toLocaleTimeString()}</span>
-                          <span>{log}</span>
-                        </div>
-                      ))}
-                      {status === 'processing' && (
-                        <div className="animate-pulse text-primary/70">_</div>
-                      )}
-                    </div>
+                </div>
+
+                <div className={`${isMobileLiveAnalysisOpen ? 'flex' : 'hidden'} md:flex flex-1 min-h-0 flex-col gap-4`}>
+                  {/* Video Preview */}
+                  {processingMedia && (
+                    <ProcessingAnimation
+                      media={processingMedia}
+                      isComplete={status === 'complete'}
+                      syncedTime={syncedTime}
+                      isSyncedPlaying={isSyncedPlaying}
+                      syncTrigger={syncTrigger}
+                    />
                   )}
+
+                  {/* Logs Terminal */}
+                  <div className={`bg-[#0c0c0e] rounded-xl border border-white/10 overflow-hidden flex flex-col transition-all duration-500 ${status === 'complete' ? 'h-32 min-h-0 opacity-50 hover:opacity-100' : 'flex-1 min-h-[200px]'}`}>
+                    <div className="px-4 py-2 border-b border-white/5 flex items-center justify-between bg-white/5 shrink-0">
+                      <span className="text-xs font-mono text-zinc-400 flex items-center gap-2">
+                        <Terminal size={12} /> System Logs
+                      </span>
+                      <button onClick={() => setLogsVisible(!logsVisible)} className="text-zinc-500 hover:text-white transition-colors">
+                        {logsVisible ? <ChevronDown size={14} /> : <ChevronDown size={14} className="rotate-180" />}
+                      </button>
+                    </div>
+                    {logsVisible && (
+                      <div className="flex-1 p-4 overflow-y-auto font-mono text-xs space-y-1.5 custom-scrollbar touch-scroll text-zinc-400">
+                        {logs.map((log, i) => (
+                          <div key={i} className={`flex gap-2 ${log.toLowerCase().includes('error') ? 'text-red-400' : 'text-zinc-400'}`}>
+                            <span className="text-zinc-700 shrink-0">{new Date().toLocaleTimeString()}</span>
+                            <span>{log}</span>
+                          </div>
+                        ))}
+                        {status === 'processing' && (
+                          <div className="animate-pulse text-primary/70">_</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 
               {/* Right Panel: Results Grid */}
-              <div className={`${status === 'complete' ? 'w-full md:w-[70%] lg:w-[75%]' : 'w-full md:w-[45%] lg:w-[40%]'} h-full flex flex-col bg-background p-6 transition-all duration-700 ease-in-out`}>
+              <div className={`${status === 'complete' ? 'w-full md:w-[70%] lg:w-[75%]' : 'w-full md:w-[45%] lg:w-[40%]'} flex-1 min-h-0 md:h-full flex flex-col bg-background p-4 md:p-6 transition-all duration-700 ease-in-out`}>
                 <h2 className="text-lg font-semibold mb-6 flex items-center gap-2 shrink-0">
                   <Sparkles className="text-yellow-400" size={20} />
                   Generated Shorts
@@ -1221,7 +1798,7 @@ function App() {
                   )}
                 </h2>
 
-                <div className="flex-1 overflow-y-auto custom-scrollbar p-1">
+                <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar touch-scroll p-1">
                   {results && results.clips && results.clips.length > 0 ? (
                     <div className={`grid gap-4 pb-10 ${status === 'complete' ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1'}`}>
                       {results.clips.map((clip, i) => (
@@ -1239,6 +1816,7 @@ function App() {
                           elevenLabsKey={elevenLabsKey}
                           subtitleStyle={subtitleStyle}
                           hookStyle={hookStyle}
+                          tightEditPreset={tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset}
                           socialPostSettings={socialPostSettings}
                           activeUploadProfile={uploadUserId}
                           currentVideoOverride={clipVideoOverrides[getClipVariantKey(jobId, clip, i)]}

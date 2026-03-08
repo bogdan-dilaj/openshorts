@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { X, Sparkles, Loader2, Maximize, MoveVertical, MoveHorizontal, Columns3, AlignLeft, AlignCenter, AlignRight } from 'lucide-react';
 import { BACKGROUND_OPTIONS, DEFAULT_HOOK_STYLE, FONT_OPTIONS, GRID_OPTIONS, HOOK_WIDTH_OPTIONS } from '../overlayOptions';
 
@@ -109,9 +110,9 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                 ? { backgroundColor: 'transparent', color: '#fff', textShadow: '0 0 12px rgba(0,0,0,0.95), 0 2px 4px rgba(0,0,0,0.95)' }
                 : { backgroundColor: 'rgba(255,255,255,0.82)', color: '#111' };
 
-    return (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
-            <div className="bg-[#121214] border border-white/10 p-6 rounded-2xl w-full max-w-4xl shadow-2xl relative flex flex-col md:flex-row gap-6 max-h-[90vh]">
+    return createPortal(
+        <div className="fixed inset-0 z-[1000] flex items-start md:items-center justify-center p-2 md:p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out] overflow-y-auto touch-scroll">
+            <div className="bg-[#121214] border border-white/10 p-4 md:p-6 rounded-2xl w-full max-w-4xl shadow-2xl relative flex flex-col md:flex-row gap-4 md:gap-6 my-2 md:my-0 max-h-[calc(100dvh-1rem)] md:max-h-[90vh] overflow-y-auto md:overflow-hidden touch-scroll">
                 <button
                     onClick={onClose}
                     className="absolute top-4 right-4 text-zinc-500 hover:text-white z-10"
@@ -122,7 +123,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                 {/* Left: Preview */}
                 <div
                     ref={previewFrameRef}
-                    className="flex-1 flex flex-col items-center justify-center bg-black rounded-lg border border-white/5 overflow-hidden relative aspect-[9/16] max-h-[600px]"
+                    className="w-full max-w-[420px] mx-auto md:mx-0 md:max-w-none md:flex-1 flex flex-col items-center justify-center bg-black rounded-lg border border-white/5 overflow-hidden relative aspect-[9/16] md:aspect-[9/16]"
                 >
                     <video src={videoUrl} className="w-full h-full object-contain opacity-50" muted playsInline />
 
@@ -157,26 +158,26 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                 </div>
 
                 {/* Right: Controls */}
-                <div className="w-full md:w-80 flex flex-col">
-                    <h3 className="text-xl font-bold text-white mb-6 flex items-center gap-2">
+                <div className="w-full md:w-80 flex flex-col min-h-0">
+                    <h3 className="text-lg md:text-xl font-bold text-white mb-4 md:mb-6 flex items-center gap-2">
                         <Sparkles className="text-yellow-400" /> Viral Hook
                     </h3>
 
-                    <div className="space-y-6 flex-1 overflow-y-auto custom-scrollbar pr-2">
+                    <div className="space-y-4 md:space-y-6 flex-1 overflow-y-auto custom-scrollbar touch-scroll pr-1 md:pr-2">
                         {/* Text Input */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Text</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Text</label>
                             <textarea
                                 value={text}
                                 onChange={(e) => setText(e.target.value)}
                                 rows={4}
-                                className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-white placeholder-zinc-600 focus:outline-none focus:border-yellow-500/50 resize-none font-serif"
+                                className="w-full bg-black/40 border border-white/10 rounded-lg md:rounded-xl p-2.5 md:p-3 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-yellow-500/50 resize-none font-serif"
                                 placeholder={"Enter text that will stop the scroll...\nUse line breaks if you want manual wrapping."}
                             />
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 flex items-center gap-2">
                                 <Columns3 size={12} /> Quick Presets
                             </label>
                             <div className="grid grid-cols-3 gap-2">
@@ -188,7 +189,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                                             setXPosition(legacyHorizontalToPercent[nextHorizontal] ?? 50);
                                             setYPosition(legacyVerticalToPercent[nextVertical === 'center' ? 'center' : nextVertical] ?? 12);
                                         }}
-                                        className={`py-2 px-1 rounded-lg text-[11px] font-bold transition-all border ${Math.abs((legacyHorizontalToPercent[(option.value.split('-')[1] || 'center')] ?? 50) - xPosition) < 1
+                                        className={`py-1.5 md:py-2 px-1 rounded-lg text-[10px] md:text-[11px] font-bold transition-all border ${Math.abs((legacyHorizontalToPercent[(option.value.split('-')[1] || 'center')] ?? 50) - xPosition) < 1
                                             && Math.abs((legacyVerticalToPercent[(option.value.split('-')[0] === 'center' ? 'center' : option.value.split('-')[0])] ?? 12) - yPosition) < 1
                                             ? 'bg-white text-black border-white'
                                             : 'bg-white/5 text-zinc-400 border-white/5 hover:bg-white/10'
@@ -201,7 +202,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 flex items-center gap-2">
                                 <MoveHorizontal size={12} /> X Position
                             </label>
                             <input
@@ -221,7 +222,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 flex items-center gap-2">
                                 <MoveVertical size={12} /> Y Position
                             </label>
                             <input
@@ -241,7 +242,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Text Align</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Text Align</label>
                             <div className="grid grid-cols-3 gap-2">
                                 {[
                                     { value: 'left', label: 'Left', icon: AlignLeft },
@@ -253,7 +254,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                                         <button
                                             key={option.value}
                                             onClick={() => setTextAlign(option.value)}
-                                            className={`py-2 px-1 rounded-lg text-xs font-bold transition-all border flex items-center justify-center gap-2 ${textAlign === option.value
+                                            className={`py-1.5 md:py-2 px-1 rounded-lg text-[11px] md:text-xs font-bold transition-all border flex items-center justify-center gap-1.5 md:gap-2 ${textAlign === option.value
                                                 ? 'bg-white text-black border-white'
                                                 : 'bg-white/5 text-zinc-400 border-white/5 hover:bg-white/10'
                                                 }`}
@@ -268,7 +269,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
 
                         {/* Size Control */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 flex items-center gap-2">
                                 <Maximize size={12} /> Size
                             </label>
                             <div className="grid grid-cols-3 gap-2">
@@ -276,7 +277,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                                     <button
                                         key={sz}
                                         onClick={() => setSize(sz)}
-                                        className={`py-2 px-1 rounded-lg text-xs font-bold transition-all border ${size === sz
+                                        className={`py-1.5 md:py-2 px-1 rounded-lg text-[11px] md:text-xs font-bold transition-all border ${size === sz
                                             ? 'bg-white text-black border-white'
                                             : 'bg-white/5 text-zinc-400 border-white/5 hover:bg-white/10'
                                             }`}
@@ -288,13 +289,13 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Width</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Width</label>
                             <div className="grid grid-cols-2 gap-2">
                                 {HOOK_WIDTH_OPTIONS.map((option) => (
                                     <button
                                         key={option.value}
                                         onClick={() => setWidthPreset(option.value)}
-                                        className={`py-2 px-2 rounded-lg text-xs font-bold transition-all border ${widthPreset === option.value
+                                        className={`py-1.5 md:py-2 px-2 rounded-lg text-[11px] md:text-xs font-bold transition-all border ${widthPreset === option.value
                                             ? 'bg-white text-black border-white'
                                             : 'bg-white/5 text-zinc-400 border-white/5 hover:bg-white/10'
                                             }`}
@@ -306,11 +307,11 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Font</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Font</label>
                             <select
                                 value={fontFamily}
                                 onChange={(e) => setFontFamily(e.target.value)}
-                                className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-white focus:outline-none focus:border-yellow-500/50"
+                                className="w-full bg-black/40 border border-white/10 rounded-lg md:rounded-xl p-2.5 md:p-3 text-sm text-white focus:outline-none focus:border-yellow-500/50"
                             >
                                 {FONT_OPTIONS.map((option) => (
                                     <option key={option} value={option}>{option}</option>
@@ -319,11 +320,11 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Background</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Background</label>
                             <select
                                 value={backgroundStyle}
                                 onChange={(e) => setBackgroundStyle(e.target.value)}
-                                className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-white focus:outline-none focus:border-yellow-500/50"
+                                className="w-full bg-black/40 border border-white/10 rounded-lg md:rounded-xl p-2.5 md:p-3 text-sm text-white focus:outline-none focus:border-yellow-500/50"
                             >
                                 {BACKGROUND_OPTIONS.map((option) => (
                                     <option key={option.value} value={option.value}>{option.label}</option>
@@ -331,7 +332,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                             </select>
                         </div>
 
-                        <div className="p-3 bg-white/5 rounded-lg border border-white/5 text-[11px] text-zinc-400">
+                        <div className="p-2.5 md:p-3 bg-white/5 rounded-lg border border-white/5 text-[11px] text-zinc-400">
                             <strong>Tip:</strong> Keep it short and punchy. Using "POV:" or specific questions works best for retention.
                         </div>
                     </div>
@@ -339,13 +340,14 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                     <button
                         onClick={() => onGenerate({ text, xPosition, yPosition, textAlign, size, widthPreset, fontFamily, backgroundStyle })}
                         disabled={isProcessing || !text.trim()}
-                        className="w-full py-4 mt-4 bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black font-bold rounded-xl shadow-lg shadow-amber-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                        className="w-full py-3 md:py-4 mt-3 md:mt-4 bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black text-sm md:text-base font-bold rounded-xl shadow-lg shadow-amber-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
                     >
                         {isProcessing ? <Loader2 size={20} className="animate-spin" /> : <Sparkles size={20} />}
                         {isProcessing ? 'Generating...' : 'Add Hook'}
                     </button>
                 </div>
             </div>
-        </div>
+        </div>,
+        document.body
     );
 }

@@ -22,7 +22,7 @@ from google import genai
 from dotenv import load_dotenv
 import json
 from job_store import load_job_manifest, update_job_manifest
-from runtime_limits import FFMPEG_PRESET, WHISPER_CPU_THREADS, ffmpeg_thread_args, subprocess_priority_kwargs
+from runtime_limits import FFMPEG_PRESET, ffmpeg_thread_args, subprocess_priority_kwargs
 from tight_edit import (
     DEFAULT_TIGHT_EDIT_PRESET,
     TIGHT_EDIT_PRESETS,
@@ -30,6 +30,7 @@ from tight_edit import (
     normalize_tight_edit_preset,
     render_keep_segments,
 )
+from whisper_runtime import transcribe_with_runtime
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='google.protobuf')
@@ -69,6 +70,7 @@ class ClipSelectionConfigurationError(RuntimeError):
 LANGUAGE_LABELS = {
     "de": "German (Deutsch)",
     "en": "English",
+    "ru": "Russian (Русский)",
     "es": "Spanish (Español)",
     "fr": "French (Français)",
     "it": "Italian (Italiano)",
@@ -110,6 +112,10 @@ STRICT EXCLUSIONS:
 - ALL user-facing text fields MUST stay in {output_language_name}: `video_description_for_tiktok`, `video_description_for_instagram`, `video_title_for_youtube_short`, and `viral_hook_text`.
 - NEVER translate the content into English unless the transcript itself is English.
 - If the transcript is German, every title, description, and hook must be German.
+- STYLE: Use "Scroll-Stopper" copywriting. No boring summaries. Use the "Curiosity Gap" technique.
+- VIRAL_HOOK_TEXT: Max 5 words. Make it aggressive, controversial, or mysterious. Use "STOP doing X", "The secret to Y", or "POV: You just Z".
+- VIDEO_TITLE: Max 40 characters. High-impact keywords only. No full sentences.
+- VIDEO_DESCRIPTION: Start with a punchy first line that creates FOMO (Fear Of Missing Out).
 
 OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by predicted performance (best to worst). In the descriptions, ALWAYS include a CTA like "Follow me and comment X and I'll send you the workflow" (especially if discussing an n8n workflow):
 {{
@@ -145,6 +151,10 @@ Task:
 - NEVER translate the transcript into English unless the transcript itself is English.
 - If the transcript is German, every title, description, and hook must be German.
 - Return ONLY valid JSON, no markdown and no extra text.
+- STYLE: Use "Scroll-Stopper" copywriting. No boring summaries. Use the "Curiosity Gap" technique.
+- VIRAL_HOOK_TEXT: Max 5 words. Make it aggressive, controversial, or mysterious. Use "STOP doing X", "The secret to Y", or "POV: You just Z".
+- VIDEO_TITLE: Max 40 characters. High-impact keywords only. No full sentences.
+- VIDEO_DESCRIPTION: Start with a punchy first line that creates FOMO (Fear Of Missing Out).
 
 VIDEO_DURATION_SECONDS: {video_duration}
 CHUNK_RANGE_SECONDS: {chunk_start} - {chunk_end}
@@ -183,7 +193,23 @@ def build_viral_prompt(
     min_over_one_minute_clip_duration=MIN_OVER_ONE_MINUTE_CLIP_DURATION,
     chunk_hint="",
 ):
+    def _fmt_number(value):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return value
+        return int(numeric) if numeric.is_integer() else numeric
+
     over_one_minute_enabled = max_clip_duration > MAX_CLIP_DURATION and min_over_one_minute_clip_duration is not None
+    min_clip_duration_fmt = _fmt_number(min_clip_duration)
+    max_clip_duration_fmt = _fmt_number(max_clip_duration)
+    min_over_one_minute_fmt = _fmt_number(min_over_one_minute_clip_duration)
+    over_one_minute_exclusion = (
+        f"No clips between 60.001 and {min_over_one_minute_clip_duration - 0.001:.3f} seconds."
+        if over_one_minute_enabled
+        else "No clips over 60 seconds."
+    )
+
     return GEMINI_PROMPT_TEMPLATE.format(
         video_duration=video_duration,
         transcript_text=json.dumps(transcript_text),
@@ -191,9 +217,9 @@ def build_viral_prompt(
         output_language_code=output_language_code,
         output_language_name=output_language_name,
         max_clips=max_clips,
-        min_clip_duration=int(min_clip_duration) if float(min_clip_duration).is_integer() else min_clip_duration,
-        min_over_one_minute_clip_duration=int(min_over_one_minute_clip_duration) if float(min_over_one_minute_clip_duration).is_integer() else min_over_one_minute_clip_duration,
-        max_clip_duration=int(max_clip_duration) if float(max_clip_duration).is_integer() else max_clip_duration,
+        min_clip_duration=min_clip_duration_fmt,
+        min_over_one_minute_clip_duration=min_over_one_minute_fmt,
+        max_clip_duration=max_clip_duration_fmt,
         over_one_minute_rule_1="Clips up to 60 seconds are always allowed." if over_one_minute_enabled else "Prefer staying near the strongest payoff and avoid unnecessary padding.",
         over_one_minute_rule_2=(
             "Only create a clip longer than 60 seconds when the moment clearly needs more room."
@@ -201,15 +227,11 @@ def build_viral_prompt(
             else "Do not exceed 60 seconds."
         ),
         over_one_minute_rule_3=(
-            f"If a clip is longer than 60 seconds, it MUST be at least {int(min_over_one_minute_clip_duration) if float(min_over_one_minute_clip_duration).is_integer() else min_over_one_minute_clip_duration} seconds and at most {int(max_clip_duration) if float(max_clip_duration).is_integer() else max_clip_duration} seconds."
+            f"If a clip is longer than 60 seconds, it MUST be at least {min_over_one_minute_fmt} seconds and at most {max_clip_duration_fmt} seconds."
             if over_one_minute_enabled
             else "Shorter clips are fine if the moment is strongest that way."
         ),
-        over_one_minute_exclusion=(
-            f"No clips between 60.001 and {min_over_one_minute_clip_duration - 0.001:.3f} seconds."
-            if over_one_minute_enabled
-            else "No clips over 60 seconds."
-        ),
+        over_one_minute_exclusion=over_one_minute_exclusion,
         chunk_hint=chunk_hint,
     )
 
@@ -508,11 +530,36 @@ def _split_env_values(value):
     return parts
 
 
+def _env_flag(name, default=False):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _build_youtube_extractor_args():
-    youtube_args = {
-        "player_client": ["tv_embed", "android", "mweb", "web"],
-        "player_skip": ["webpage", "configs"],
-    }
+    youtube_args = {}
+
+    player_clients = _split_env_values(os.environ.get("YOUTUBE_PLAYER_CLIENTS"))
+    player_skip = _split_env_values(os.environ.get("YOUTUBE_PLAYER_SKIP"))
+    legacy_mode = _env_flag("YOUTUBE_LEGACY_EXTRACTOR_ARGS", False)
+
+    # Legacy compatibility switch:
+    # keep old forced-client behavior only when explicitly enabled.
+    if legacy_mode and not player_clients:
+        player_clients = ["tv_embed", "android", "mweb", "web"]
+    if legacy_mode and not player_skip:
+        player_skip = ["webpage", "configs"]
+
+    if player_clients:
+        youtube_args["player_client"] = player_clients
+    if player_skip:
+        youtube_args["player_skip"] = player_skip
 
     visitor_data = os.environ.get("YOUTUBE_VISITOR_DATA")
     if visitor_data:
@@ -528,6 +575,8 @@ def _build_youtube_extractor_args():
     if po_tokens:
         youtube_args["po_token"] = po_tokens
 
+    if not youtube_args:
+        return None
     return {"youtube": youtube_args}
 
 
@@ -1021,6 +1070,145 @@ def sanitize_filename(filename):
     return filename[:100]
 
 
+def _write_temp_cookies_file(content):
+    temp_path = f"/tmp/youtube_cookies_{os.getpid()}_{int(time.time() * 1000)}.txt"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return temp_path
+
+
+def _copy_cookies_file_to_temp(cookies_path):
+    with open(cookies_path, "r", encoding="utf-8", errors="ignore") as src:
+        return _write_temp_cookies_file(src.read())
+
+
+def _browser_profile_roots(browser_name):
+    home = os.path.expanduser("~")
+    roots = []
+
+    override_roots = _split_env_values(os.environ.get("YOUTUBE_BROWSER_PROFILE_ROOTS"))
+    if override_roots:
+        roots.extend(os.path.expanduser(path) for path in override_roots)
+
+    if browser_name in {"chrome", "brave", "edge", "chromium", "opera", "vivaldi"}:
+        roots.extend(
+            [
+                os.path.join(home, ".config", "google-chrome"),
+                os.path.join(home, ".config", "chromium"),
+                os.path.join(home, ".config", "BraveSoftware", "Brave-Browser"),
+                os.path.join(home, ".config", "microsoft-edge"),
+                os.path.join(home, ".config", "opera"),
+                os.path.join(home, ".config", "vivaldi"),
+                os.path.join(home, ".var", "app", "com.google.Chrome", "config", "google-chrome"),
+                os.path.join(home, ".var", "app", "org.chromium.Chromium", "config", "chromium"),
+            ]
+        )
+    elif browser_name == "firefox":
+        roots.extend(
+            [
+                os.path.join(home, ".mozilla", "firefox"),
+                os.path.join(home, ".var", "app", "org.mozilla.firefox", "config", "mozilla", "firefox"),
+            ]
+        )
+    elif browser_name == "safari":
+        roots.append(os.path.join(home, "Library", "Safari"))
+
+    unique = []
+    seen = set()
+    for path in roots:
+        if not path:
+            continue
+        norm = os.path.normpath(path)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        unique.append(norm)
+    return unique
+
+
+def _browser_profile_available(browser_name):
+    return any(os.path.exists(path) for path in _browser_profile_roots(browser_name))
+
+
+def _build_youtube_auth_candidates():
+    mode = (os.environ.get("YOUTUBE_AUTH_MODE") or "auto").strip().lower()
+    cookies_file_path = os.environ.get("YOUTUBE_COOKIES_FILE", "/app/cookies.txt")
+    cookies_env = (os.environ.get("YOUTUBE_COOKIES") or "").strip()
+    browser = (os.environ.get("YOUTUBE_COOKIES_FROM_BROWSER") or "").strip().lower()
+
+    candidates = []
+    temp_files = []
+
+    def add_inline():
+        if not cookies_env:
+            return
+        try:
+            temp_path = _write_temp_cookies_file(cookies_env)
+            temp_files.append(temp_path)
+            candidates.append({
+                "label": "inline-cookies",
+                "opts": {"cookiefile": temp_path},
+            })
+        except Exception as exc:
+            print(f"⚠️ Failed to materialize YOUTUBE_COOKIES env var: {exc}")
+
+    def add_file():
+        if not cookies_file_path or not os.path.exists(cookies_file_path):
+            return
+        try:
+            temp_path = _copy_cookies_file_to_temp(cookies_file_path)
+            temp_files.append(temp_path)
+            candidates.append({
+                "label": f"cookies-file:{cookies_file_path}",
+                "opts": {"cookiefile": temp_path},
+            })
+        except Exception as exc:
+            print(f"⚠️ Failed to copy cookies file {cookies_file_path}: {exc}")
+
+    def add_browser():
+        browser_name = browser or "chrome"
+        if not _browser_profile_available(browser_name):
+            print(
+                f"⚠️ Skipping browser auth candidate '{browser_name}': "
+                "no browser profile directory found in this runtime."
+            )
+            return
+        candidates.append({
+            "label": f"browser:{browser_name}",
+            "opts": {"cookiesfrombrowser": (browser_name,)},
+        })
+
+    if mode == "cookies_text":
+        add_inline()
+    elif mode == "cookies_file":
+        add_file()
+    elif mode == "browser":
+        add_browser()
+    else:
+        add_inline()
+        add_file()
+        if browser:
+            add_browser()
+
+    allow_unauth_fallback = _env_flag("YOUTUBE_ALLOW_UNAUTH_FALLBACK", True)
+    if allow_unauth_fallback:
+        candidates.append({"label": "unauthenticated", "opts": {}})
+
+    if not candidates:
+        candidates.append({"label": "unauthenticated", "opts": {}})
+
+    deduped = []
+    seen_labels = set()
+    for candidate in candidates:
+        label = candidate.get("label") or ""
+        if label in seen_labels:
+            continue
+        seen_labels.add(label)
+        deduped.append(candidate)
+
+    return deduped, temp_files
+
+
 def download_youtube_video(url, output_dir="."):
     """
     Downloads a YouTube video using yt-dlp.
@@ -1029,87 +1217,128 @@ def download_youtube_video(url, output_dir="."):
     print(f"🔍 Debug: yt-dlp version: {yt_dlp.version.__version__}")
     print("📥 Downloading video from YouTube...")
     step_start_time = time.time()
+    auth_candidates, temp_files = _build_youtube_auth_candidates()
+    extractor_args = _build_youtube_extractor_args()
+    print(
+        "🔐 YouTube auth candidates (in order): "
+        + ", ".join(candidate["label"] for candidate in auth_candidates)
+    )
 
-    cookies_path = os.environ.get("YOUTUBE_COOKIES_FILE", "/app/cookies.txt")
-    temp_cookies_path = f"/tmp/youtube_cookies_{os.getpid()}.txt"
-    cookies_env = os.environ.get("YOUTUBE_COOKIES")
-    if cookies_env:
-        print("🍪 Found YOUTUBE_COOKIES env var, creating temporary cookies file inside container...")
-        try:
-            with open(temp_cookies_path, 'w', encoding="utf-8") as f:
-                f.write(cookies_env)
-            cookies_path = temp_cookies_path
-            if os.path.exists(cookies_path):
-                 print(f"   Debug: Cookies file created. Size: {os.path.getsize(cookies_path)} bytes")
-                 with open(cookies_path, 'r', encoding="utf-8") as f:
-                     content = f.read(100)
-                     print(f"   Debug: First 100 chars of cookie file: {content}")
-        except Exception as e:
-            print(f"⚠️ Failed to write cookies file: {e}")
-            cookies_path = None
-    elif cookies_path and os.path.exists(cookies_path):
-        print(f"🍪 Using cookies file from {cookies_path}")
-        try:
-            with open(cookies_path, "r", encoding="utf-8", errors="ignore") as src, open(temp_cookies_path, "w", encoding="utf-8") as dst:
-                dst.write(src.read())
-            cookies_path = temp_cookies_path
-        except Exception as e:
-            print(f"⚠️ Failed to copy cookies file to writable temp path: {e}")
-    else:
-        cookies_path = None
-        print("⚠️ No YouTube cookies configured. Set YOUTUBE_COOKIES, YOUTUBE_COOKIES_FILE, or provide /app/cookies.txt.")
-    
-    # Common yt-dlp options to work around YouTube bot detection.
-    # extractor_args tries multiple player clients in order; tv_embed / android
-    # avoid the OAuth/PO-token checks that block server IPs.
-    _COMMON_YDL_OPTS = {
-        'quiet': False,
-        'verbose': True,
-        'no_warnings': False,
-        'cookiefile': cookies_path if cookies_path else None,
-        'socket_timeout': 30,
-        'retries': 10,
-        'fragment_retries': 10,
-        'nocheckcertificate': True,
-        'cachedir': False,
-        'extractor_args': _build_youtube_extractor_args(),
-        'http_headers': {
-            'User-Agent': (
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                'AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/120.0.0.0 Safari/537.36'
+    common_ydl_opts = {
+        "quiet": False,
+        "verbose": True,
+        "no_warnings": False,
+        "socket_timeout": 30,
+        "retries": 10,
+        "fragment_retries": 10,
+        "nocheckcertificate": True,
+        "cachedir": False,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
             ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-us,en;q=0.5",
+            "Sec-Fetch-Mode": "navigate",
         },
     }
+    if extractor_args:
+        common_ydl_opts["extractor_args"] = extractor_args
 
-    with yt_dlp.YoutubeDL(_COMMON_YDL_OPTS) as ydl:
-        try:
-            info = ydl.extract_info(url, download=False)
-            video_title = info.get('title', 'youtube_video')
-            sanitized_title = sanitize_filename(video_title)
-            best_format, best_edge = _best_accessible_source_edge(info)
-            if best_format:
-                print(
-                    "🎞️  Best accessible source before download: "
-                    f"format={best_format.get('format_id')} "
-                    f"{best_format.get('width') or '?'}x{best_format.get('height') or '?'} "
-                    f"ext={best_format.get('ext')}"
-                )
-            if best_edge < MIN_SOURCE_EDGE:
-                raise RuntimeError(
-                    f"Best accessible YouTube source is only {best_edge}px on the short edge. "
-                    "Aborting to avoid a blurry vertical export. Configure cookies / visitor data / PO token, "
-                    "or upload the source video manually."
-                )
-        except Exception as e:
-            # Force print to stderr/stdout immediately so it's captured before crash
-            import sys
-            
-            # Print minimal error first to ensure something gets out
-            print("🚨 YOUTUBE DOWNLOAD ERROR 🚨", file=sys.stderr)
-            reason = str(e)
-            
-            error_msg = f"""
+    selected_candidate = None
+    selected_info = None
+    preflight_errors = []
+
+    try:
+        for candidate in auth_candidates:
+            probe_opts = {**common_ydl_opts, **candidate["opts"]}
+            print(f"🔑 Probing YouTube formats using auth={candidate['label']}")
+            try:
+                with yt_dlp.YoutubeDL(probe_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                best_format, best_edge = _best_accessible_source_edge(info)
+                if best_format:
+                    print(
+                        "🎞️  Best accessible source before download: "
+                        f"auth={candidate['label']} "
+                        f"format={best_format.get('format_id')} "
+                        f"{best_format.get('width') or '?'}x{best_format.get('height') or '?'} "
+                        f"ext={best_format.get('ext')}"
+                    )
+                if best_edge < MIN_SOURCE_EDGE:
+                    preflight_errors.append(
+                        f"{candidate['label']}: best short edge {best_edge}px < required {MIN_SOURCE_EDGE}px"
+                    )
+                    continue
+
+                selected_candidate = candidate
+                selected_info = info
+                break
+            except Exception as exc:
+                preflight_errors.append(f"{candidate['label']}: {exc}")
+
+        if not selected_candidate or not selected_info:
+            detail = "\n".join(preflight_errors[-5:]) if preflight_errors else "No auth candidate succeeded."
+            raise RuntimeError(
+                "Unable to access a high-quality YouTube source.\n"
+                f"Details:\n{detail}\n"
+                "Set valid cookies (cookies.txt or pasted cookies), optional visitor data/PO token, or upload the source file manually."
+            )
+
+        video_title = selected_info.get("title", "youtube_video")
+        sanitized_title = sanitize_filename(video_title)
+        output_template = os.path.join(output_dir, f"{sanitized_title}.%(ext)s")
+        existing_file = _find_downloaded_video_file(output_dir, sanitized_title)
+        if existing_file and os.path.exists(existing_file):
+            os.remove(existing_file)
+            print("🗑️  Removed existing file to re-download highest available quality")
+
+        ydl_opts = {
+            **common_ydl_opts,
+            **selected_candidate["opts"],
+            "format": (
+                f"bestvideo[height<={PREFERRED_DOWNLOAD_HEIGHT}][height>={MIN_SOURCE_EDGE}]+bestaudio/"
+                f"best[height<={PREFERRED_DOWNLOAD_HEIGHT}][height>={MIN_SOURCE_EDGE}]/"
+                f"bestvideo[height>={MIN_SOURCE_EDGE}]+bestaudio/best[height>={MIN_SOURCE_EDGE}]"
+            ),
+            "outtmpl": output_template,
+            "merge_output_format": "mkv",
+            "overwrites": True,
+        }
+
+        print(f"⬇️ Downloading with auth={selected_candidate['label']}")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        downloaded_file = _find_downloaded_video_file(output_dir, sanitized_title)
+        if not downloaded_file:
+            raise RuntimeError("yt-dlp finished without a usable video file.")
+
+        width, height = get_video_resolution(downloaded_file)
+        short_edge = min(width, height)
+        print(f"🎞️  Downloaded source resolution: {width}x{height}")
+        if short_edge < MIN_SOURCE_EDGE:
+            if os.path.exists(downloaded_file):
+                os.remove(downloaded_file)
+            raise RuntimeError(
+                f"Downloaded source is only {width}x{height}. "
+                "Aborting to avoid a low-quality 1080x1920 upscale. "
+                "Provide valid YouTube auth cookies/tokens or upload the source video manually."
+            )
+
+        step_end_time = time.time()
+        print(f"✅ Video downloaded in {step_end_time - step_start_time:.2f}s: {downloaded_file}")
+        return downloaded_file, sanitized_title
+
+    except Exception as e:
+        import sys
+
+        print("🚨 YOUTUBE DOWNLOAD ERROR 🚨", file=sys.stderr)
+        reason = str(e)
+
+        error_msg = f"""
             
 ❌ ================================================================= ❌
 ❌ FATAL ERROR: YOUTUBE DOWNLOAD FAILED
@@ -1119,68 +1348,37 @@ REASON: {reason}
 
 👇 SOLUTION FOR USER 👇
 ---------------------------------------------------------------------
-1. If this is a low-quality / token issue, provide cookies.txt, YOUTUBE_VISITOR_DATA,
-   and optional YOUTUBE_PO_TOKEN_* values so yt-dlp can access better formats.
-2. Otherwise download the video manually to your computer and use the upload flow.
+1. Save a fresh cookies.txt from a logged-in browser and configure mode `cookies_file` or `cookies_text`.
+2. Optionally set YOUTUBE_VISITOR_DATA and YOUTUBE_PO_TOKEN_* to unlock blocked streams.
+3. If YouTube still only exposes low quality, upload the original source file directly.
 ---------------------------------------------------------------------
+"""
+        print(error_msg, file=sys.stdout)
+        print(error_msg, file=sys.stderr)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        time.sleep(0.5)
+        raise e
+    finally:
+        for temp_path in temp_files:
+            try:
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
 
-Technical Details: {str(e)}
-            """
-            # Print to both streams to ensure capture
-            print(error_msg, file=sys.stdout)
-            print(error_msg, file=sys.stderr)
-            
-            # Force flush
-            sys.stdout.flush()
-            sys.stderr.flush()
-            
-            # Wait a split second to allow buffer to drain before raising
-            time.sleep(0.5)
-            
-            raise e
-    
-    output_template = os.path.join(output_dir, f'{sanitized_title}.%(ext)s')
-    existing_file = _find_downloaded_video_file(output_dir, sanitized_title)
-    if existing_file and os.path.exists(existing_file):
-        os.remove(existing_file)
-        print(f"🗑️  Removed existing file to re-download highest available quality")
-    
-    ydl_opts = {
-        **_COMMON_YDL_OPTS,
-        'format': (
-            f'bestvideo[height<={PREFERRED_DOWNLOAD_HEIGHT}]+bestaudio/'
-            f'best[height<={PREFERRED_DOWNLOAD_HEIGHT}]/bestvideo+bestaudio/best'
-        ),
-        'outtmpl': output_template,
-        'merge_output_format': 'mkv',
-        'overwrites': True,
-    }
-    
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
-    
-    downloaded_file = _find_downloaded_video_file(output_dir, sanitized_title)
-    if not downloaded_file:
-        raise RuntimeError("yt-dlp finished without a usable video file.")
-
-    width, height = get_video_resolution(downloaded_file)
-    short_edge = min(width, height)
-    print(f"🎞️  Downloaded source resolution: {width}x{height}")
-    if short_edge < MIN_SOURCE_EDGE:
-        if os.path.exists(downloaded_file):
-            os.remove(downloaded_file)
-        raise RuntimeError(
-            f"Downloaded source is only {width}x{height}. "
-            "Aborting to avoid a low-quality 1080x1920 upscale. "
-            "Provide YouTube cookies / visitor data / PO token, or upload the original file."
-        )
-    
-    step_end_time = time.time()
-    print(f"✅ Video downloaded in {step_end_time - step_start_time:.2f}s: {downloaded_file}")
-    
-    return downloaded_file, sanitized_title
-
-def process_video_to_vertical(input_video, final_output_video, interview_mode=False):
+def process_video_to_vertical(
+    input_video,
+    final_output_video,
+    interview_mode=False,
+    output_width=None,
+    output_height=None,
+    ffmpeg_preset_override=None,
+    video_crf="18",
+    video_maxrate="12M",
+    video_bufsize="24M",
+    audio_bitrate="192k",
+):
     """
     Core logic to convert horizontal video to vertical using scene detection and Active Speaker Tracking (MediaPipe).
     """
@@ -1199,8 +1397,17 @@ def process_video_to_vertical(input_video, final_output_video, interview_mode=Fa
     print(f"🎬 Processing clip: {input_video}")
     original_width, original_height = get_video_resolution(input_video)
     
-    OUTPUT_WIDTH = TARGET_VERTICAL_WIDTH
-    OUTPUT_HEIGHT = TARGET_VERTICAL_HEIGHT
+    OUTPUT_WIDTH = int(output_width or TARGET_VERTICAL_WIDTH)
+    OUTPUT_HEIGHT = int(output_height or TARGET_VERTICAL_HEIGHT)
+    if OUTPUT_WIDTH % 2 != 0:
+        OUTPUT_WIDTH += 1
+    if OUTPUT_HEIGHT % 2 != 0:
+        OUTPUT_HEIGHT += 1
+    encode_preset = (ffmpeg_preset_override or FFMPEG_PRESET).strip() or FFMPEG_PRESET
+    encode_crf = str(video_crf or "18")
+    encode_maxrate = str(video_maxrate or "12M")
+    encode_bufsize = str(video_bufsize or "24M")
+    encode_audio_bitrate = str(audio_bitrate or "192k")
     scene_boundaries = []
     scene_strategies = []
     current_scene_index = 0
@@ -1253,8 +1460,8 @@ def process_video_to_vertical(input_video, final_output_video, interview_mode=Fa
         '-r', str(fps), '-i', '-',
         *ffmpeg_thread_args(),
         '-c:v', 'libx264',
-        '-preset', FFMPEG_PRESET, '-crf', '18',
-        '-maxrate', '12M', '-bufsize', '24M',
+        '-preset', encode_preset, '-crf', encode_crf,
+        '-maxrate', encode_maxrate, '-bufsize', encode_bufsize,
         '-profile:v', 'high', '-level', '4.1',
         '-pix_fmt', 'yuv420p',
         '-movflags', '+faststart',
@@ -1344,7 +1551,7 @@ def process_video_to_vertical(input_video, final_output_video, interview_mode=Fa
     audio_extract_command = [
         'ffmpeg', '-y', '-i', input_video, '-vn',
         *ffmpeg_thread_args(),
-        '-c:a', 'aac', '-b:a', '192k', temp_audio_output
+        '-c:a', 'aac', '-b:a', encode_audio_bitrate, temp_audio_output
     ]
     try:
         subprocess.run(
@@ -1363,7 +1570,7 @@ def process_video_to_vertical(input_video, final_output_video, interview_mode=Fa
         merge_command = [
             'ffmpeg', '-y', '-i', temp_video_output, '-i', temp_audio_output,
             *ffmpeg_thread_args(),
-            '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', final_output_video
+            '-c:v', 'copy', '-c:a', 'aac', '-b:a', encode_audio_bitrate, '-movflags', '+faststart', final_output_video
         ]
     else:
          merge_command = [
@@ -1392,15 +1599,62 @@ def process_video_to_vertical(input_video, final_output_video, interview_mode=Fa
     
     return True
 
+def _prepare_transcription_input(video_path):
+    temp_audio_path = f"/tmp/openshorts_whisper_{os.getpid()}_{int(time.time() * 1000)}.wav"
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-v", "error",
+        "-fflags", "+discardcorrupt",
+        "-err_detect", "ignore_err",
+        "-i", video_path,
+        "-vn",
+        "-ac", "1",
+        "-ar", "16000",
+        "-c:a", "pcm_s16le",
+        temp_audio_path,
+    ]
+    try:
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            **subprocess_priority_kwargs(),
+        )
+        if os.path.exists(temp_audio_path) and os.path.getsize(temp_audio_path) > 0:
+            print("🎧 Prepared clean PCM audio for transcription.")
+            return temp_audio_path
+    except Exception as exc:
+        print(f"⚠️ Audio pre-normalization failed, using source container directly: {exc}")
+
+    try:
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
+    except Exception:
+        pass
+    return video_path
+
 def transcribe_video(video_path):
-    print("🎙️  Transcribing video with Faster-Whisper (CPU Optimized)...")
-    from faster_whisper import WhisperModel
+    print("🎙️  Transcribing video with Faster-Whisper...")
+    transcription_input = _prepare_transcription_input(video_path)
+    cleanup_input = transcription_input != video_path
+    try:
+        segments, info, runtime_meta = transcribe_with_runtime(transcription_input, word_timestamps=True)
+    finally:
+        if cleanup_input:
+            try:
+                if os.path.exists(transcription_input):
+                    os.remove(transcription_input)
+            except Exception:
+                pass
     
-    # Run on CPU with INT8 quantization for speed
-    model = WhisperModel("base", device="cpu", compute_type="int8", cpu_threads=WHISPER_CPU_THREADS, num_workers=1)
-    
-    segments, info = model.transcribe(video_path, word_timestamps=True)
-    
+    print(
+        "   Runtime: "
+        f"{runtime_meta.get('model')} on {runtime_meta.get('device')} ({runtime_meta.get('compute_type')}), "
+        f"beam={runtime_meta.get('beam_size')}, vad={runtime_meta.get('vad_filter')}, "
+        f"lang={runtime_meta.get('requested_language', 'auto')}"
+    )
     print(f"   Detected language '{info.language}' with probability {info.language_probability:.2f}")
     
     # Convert to openai-whisper compatible format
@@ -1790,6 +2044,7 @@ if __name__ == '__main__':
     parser.add_argument('--keep-original', action='store_true', help="Keep the downloaded YouTube video.")
     parser.add_argument('--skip-analysis', action='store_true', help="Skip AI analysis and convert the whole video.")
     parser.add_argument('--resume', action='store_true', help="Resume a previous job using existing artifacts in the output directory.")
+    parser.add_argument('--analysis-only', action='store_true', help="Run transcript + AI clip detection only. Do not render clips yet.")
     parser.add_argument('--interview-mode', action='store_true', help="Render in two-person interview layout with one detected speaker on top and one on bottom.")
     parser.add_argument('--allow-long-clips', action='store_true', help="Allow generated clips to exceed 60 seconds.")
     parser.add_argument('--max-clips', type=int, default=MAX_GENERATED_CLIPS, help=f"Maximum number of generated clips to keep (default: {MAX_GENERATED_CLIPS}).")
@@ -1869,6 +2124,7 @@ if __name__ == '__main__':
             "input_video": input_video,
             "video_title": video_title,
             "mode": "whole_video" if args.skip_analysis else "clips",
+            "analysis_only": bool(args.analysis_only),
             "layout_mode": "interview" if args.interview_mode else "auto",
             "max_clip_duration": target_max_clip_duration,
         }
@@ -1974,9 +2230,14 @@ if __name__ == '__main__':
             clips_data['transcript'] = transcript
             clips_data['generation_mode'] = 'clips'
 
+            source_video_filename = os.path.basename(input_video)
             for i, clip in enumerate(clips_data['shorts']):
                 clip_filename = clip.get('video_filename') or f"{video_title}_clip_{i+1}.mp4"
                 clip['video_filename'] = clip_filename
+                clip['source_video_filename'] = clip.get('source_video_filename') or source_video_filename
+                clip['preview_start'] = round(float(clip.get('start', 0.0)), 3)
+                clip['preview_end'] = round(float(clip.get('end', clip.get('start', 0.0))), 3)
+                clip['display_duration'] = round(max(0.0, clip['preview_end'] - clip['preview_start']), 3)
                 if clip.get('status') == 'completed':
                     continue
                 clip['status'] = clip.get('status', 'pending')
@@ -1984,98 +2245,108 @@ if __name__ == '__main__':
             save_json_file(metadata_file, clips_data)
             print(f"   Saved metadata to {metadata_file}")
 
-            for i, clip in enumerate(clips_data['shorts']):
-                start = clip['start']
-                end = clip['end']
-                clip_filename = clip['video_filename']
-                clip_temp_path = os.path.join(output_dir, f"temp_{clip_filename}")
-                clip_final_path = os.path.join(output_dir, clip_filename)
+            if args.analysis_only:
+                print("🧾 Analysis-only mode active: skipping clip rendering. Draft clips are ready for preview + on-demand render.")
+                clips_data['generation_mode'] = 'analysis_only'
+                for clip in clips_data['shorts']:
+                    if clip.get('status') != 'completed':
+                        clip['status'] = 'draft'
+                save_json_file(metadata_file, clips_data)
+                overall_success = True
+                completed_outputs = len(clips_data['shorts'])
+            else:
+                for i, clip in enumerate(clips_data['shorts']):
+                    start = clip['start']
+                    end = clip['end']
+                    clip_filename = clip['video_filename']
+                    clip_temp_path = os.path.join(output_dir, f"temp_{clip_filename}")
+                    clip_final_path = os.path.join(output_dir, clip_filename)
 
-                if os.path.exists(clip_final_path) and os.path.getsize(clip_final_path) > 0:
-                    print(f"\n♻️  Skipping Clip {i+1}; output already exists: {clip_final_path}")
-                    clip['status'] = 'completed'
-                    clip.pop('error', None)
-                    completed_outputs += 1
-                    save_json_file(metadata_file, clips_data)
-                    continue
-
-                print(f"\n🎬 Processing Clip {i+1}: {start}s - {end}s")
-                print(f"   Title: {clip.get('video_title_for_youtube_short', 'No Title')}")
-
-                try:
-                    tight_edit_plan = build_tight_edit_plan(transcript, start, end, args.tight_edit_preset)
-                    keep_segments = tight_edit_plan.get("keep_segments") or [(start, end)]
-                    if tight_edit_plan.get("compacted"):
-                        print(
-                            "   ✂️ Tight edit applied: "
-                            f"{len(keep_segments)} keep segment(s), preset={args.tight_edit_preset}, "
-                            f"new duration ≈ {tight_edit_plan.get('output_duration', end - start):.2f}s"
-                        )
-                    render_keep_segments(
-                        input_video,
-                        keep_segments,
-                        clip_temp_path,
-                        ffmpeg_preset=FFMPEG_PRESET,
-                        crf="17",
-                        audio_bitrate="192k",
-                        thread_args=ffmpeg_thread_args(),
-                        subprocess_kwargs=subprocess_priority_kwargs(),
-                    )
-
-                    if tight_edit_plan.get("compacted"):
-                        clip["display_duration"] = tight_edit_plan.get("output_duration", round(end - start, 3))
-                        clip["tight_edit_preset"] = args.tight_edit_preset
-                        clip["tight_edit_removed_ranges"] = [
-                            {"start": round(range_start, 3), "end": round(range_end, 3)}
-                            for range_start, range_end in tight_edit_plan.get("remove_ranges", [])
-                        ]
-                        if len(keep_segments) == 1:
-                            clip["start"] = round(keep_segments[0][0], 3)
-                            clip["end"] = round(keep_segments[0][1], 3)
-                            clip.pop("transcript_source", None)
-                        else:
-                            clip["transcript_source"] = "audio"
-                    else:
-                        clip["display_duration"] = round(end - start, 3)
-                        clip.pop("tight_edit_preset", None)
-                        clip.pop("tight_edit_removed_ranges", None)
-                        clip.pop("transcript_source", None)
-
-                    success = process_video_to_vertical(clip_temp_path, clip_final_path, interview_mode=args.interview_mode)
-                    if success and os.path.exists(clip_final_path) and os.path.getsize(clip_final_path) > 0:
+                    if os.path.exists(clip_final_path) and os.path.getsize(clip_final_path) > 0:
+                        print(f"\n♻️  Skipping Clip {i+1}; output already exists: {clip_final_path}")
                         clip['status'] = 'completed'
                         clip.pop('error', None)
                         completed_outputs += 1
-                        print(f"   ✅ Clip {i+1} ready: {clip_final_path}")
-                    else:
-                        clip['status'] = 'failed'
-                        clip['error'] = 'Vertical processing failed'
-                        failed_outputs += 1
-                except subprocess.CalledProcessError as e:
-                    clip['status'] = 'failed'
-                    clip['error'] = e.stderr.decode(errors='ignore')[-500:]
-                    failed_outputs += 1
-                    print(f"   ❌ Clip {i+1} cut failed.")
-                finally:
-                    if os.path.exists(clip_temp_path):
-                        os.remove(clip_temp_path)
-                    save_json_file(metadata_file, clips_data)
+                        save_json_file(metadata_file, clips_data)
+                        continue
 
-            if completed_outputs > 0:
-                overall_success = True
-            else:
-                print("⚠️  No clip outputs succeeded. Generating whole-video fallback.")
-                output_file = os.path.join(output_dir, f"{video_title}_vertical.mp4")
-                fallback_success = process_video_to_vertical(input_video, output_file, interview_mode=args.interview_mode)
-                if fallback_success:
-                    clips_data["fallback_output"] = os.path.basename(output_file)
-                    clips_data["fallback_reason"] = "all_clip_renders_failed"
-                    save_json_file(metadata_file, clips_data)
-                    completed_outputs = 1
+                    print(f"\n🎬 Processing Clip {i+1}: {start}s - {end}s")
+                    print(f"   Title: {clip.get('video_title_for_youtube_short', 'No Title')}")
+
+                    try:
+                        tight_edit_plan = build_tight_edit_plan(transcript, start, end, args.tight_edit_preset)
+                        keep_segments = tight_edit_plan.get("keep_segments") or [(start, end)]
+                        if tight_edit_plan.get("compacted"):
+                            print(
+                                "   ✂️ Tight edit applied: "
+                                f"{len(keep_segments)} keep segment(s), preset={args.tight_edit_preset}, "
+                                f"new duration ≈ {tight_edit_plan.get('output_duration', end - start):.2f}s"
+                            )
+                        render_keep_segments(
+                            input_video,
+                            keep_segments,
+                            clip_temp_path,
+                            ffmpeg_preset=FFMPEG_PRESET,
+                            crf="17",
+                            audio_bitrate="192k",
+                            thread_args=ffmpeg_thread_args(),
+                            subprocess_kwargs=subprocess_priority_kwargs(),
+                        )
+
+                        if tight_edit_plan.get("compacted"):
+                            clip["display_duration"] = tight_edit_plan.get("output_duration", round(end - start, 3))
+                            clip["tight_edit_preset"] = args.tight_edit_preset
+                            clip["tight_edit_removed_ranges"] = [
+                                {"start": round(range_start, 3), "end": round(range_end, 3)}
+                                for range_start, range_end in tight_edit_plan.get("remove_ranges", [])
+                            ]
+                            if len(keep_segments) == 1:
+                                clip["start"] = round(keep_segments[0][0], 3)
+                                clip["end"] = round(keep_segments[0][1], 3)
+                                clip.pop("transcript_source", None)
+                            else:
+                                clip["transcript_source"] = "audio"
+                        else:
+                            clip["display_duration"] = round(end - start, 3)
+                            clip.pop("tight_edit_preset", None)
+                            clip.pop("tight_edit_removed_ranges", None)
+                            clip.pop("transcript_source", None)
+
+                        success = process_video_to_vertical(clip_temp_path, clip_final_path, interview_mode=args.interview_mode)
+                        if success and os.path.exists(clip_final_path) and os.path.getsize(clip_final_path) > 0:
+                            clip['status'] = 'completed'
+                            clip.pop('error', None)
+                            completed_outputs += 1
+                            print(f"   ✅ Clip {i+1} ready: {clip_final_path}")
+                        else:
+                            clip['status'] = 'failed'
+                            clip['error'] = 'Vertical processing failed'
+                            failed_outputs += 1
+                    except subprocess.CalledProcessError as e:
+                        clip['status'] = 'failed'
+                        clip['error'] = e.stderr.decode(errors='ignore')[-500:]
+                        failed_outputs += 1
+                        print(f"   ❌ Clip {i+1} cut failed.")
+                    finally:
+                        if os.path.exists(clip_temp_path):
+                            os.remove(clip_temp_path)
+                        save_json_file(metadata_file, clips_data)
+
+                if completed_outputs > 0:
                     overall_success = True
-                    used_fallback = True
                 else:
-                    failed_outputs += 1
+                    print("⚠️  No clip outputs succeeded. Generating whole-video fallback.")
+                    output_file = os.path.join(output_dir, f"{video_title}_vertical.mp4")
+                    fallback_success = process_video_to_vertical(input_video, output_file, interview_mode=args.interview_mode)
+                    if fallback_success:
+                        clips_data["fallback_output"] = os.path.basename(output_file)
+                        clips_data["fallback_reason"] = "all_clip_renders_failed"
+                        save_json_file(metadata_file, clips_data)
+                        completed_outputs = 1
+                        overall_success = True
+                        used_fallback = True
+                    else:
+                        failed_outputs += 1
 
     manifest_status = "completed"
     if overall_success and (failed_outputs > 0 or (used_fallback and not args.skip_analysis and analysis_failed)):
@@ -2096,13 +2367,14 @@ if __name__ == '__main__':
             "failed_outputs": failed_outputs,
             "used_fallback": used_fallback,
             "analysis_failed": analysis_failed,
+            "analysis_only": bool(args.analysis_only),
             "layout_mode": "interview" if args.interview_mode else "auto",
             "max_clip_duration": target_max_clip_duration,
         }
     })
 
     # Clean up original only after a fully successful, non-resumable run.
-    if args.url and not args.keep_original and manifest_status == "completed" and os.path.exists(input_video):
+    if args.url and not args.keep_original and not args.analysis_only and manifest_status == "completed" and os.path.exists(input_video):
         os.remove(input_video)
         print(f"🗑️  Cleaned up downloaded video.")
 

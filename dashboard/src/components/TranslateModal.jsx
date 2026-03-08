@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { X, Loader2, Globe, Languages, AlertCircle } from 'lucide-react';
 import { getApiUrl } from '../config';
 
@@ -46,9 +47,9 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
         onTranslate({ targetLanguage });
     };
 
-    return (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
-            <div className="bg-[#121214] border border-white/10 p-6 rounded-2xl w-full max-w-md shadow-2xl relative">
+    return createPortal(
+        <div className="fixed inset-0 z-[1000] flex items-start md:items-center justify-center p-3 md:p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out] overflow-y-auto touch-scroll">
+            <div className="bg-[#121214] border border-white/10 p-6 rounded-2xl w-full max-w-md shadow-2xl relative my-4 md:my-0 max-h-[calc(100dvh-1.5rem)] md:max-h-[90vh] overflow-y-auto custom-scrollbar touch-scroll">
                 <button
                     onClick={onClose}
                     disabled={isProcessing}
@@ -153,6 +154,7 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
                     </button>
                 </div>
             </div>
-        </div>
+        </div>,
+        document.body
     );
 }

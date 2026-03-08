@@ -84,7 +84,19 @@ docker compose up --build -d
 
 ### 4. Open the dashboard
 - Frontend: `http://localhost:5175`
-- Backend: `http://localhost:8000`
+- Backend API is proxied through the frontend (`/api`, `/videos`, `/thumbnails`) in local dev.
+
+### 5. Optional: access from other devices in the same WLAN
+OpenShorts uses same-origin API proxying in the frontend, so LAN clients only need frontend port `5175`.
+
+1. Find your host IP:
+```bash
+hostname -I
+```
+2. Open from another device:
+- Frontend: `http://<HOST_IP>:5175`
+
+If access fails, check local firewall rules for port `5175`.
 
 ## First use
 
@@ -131,15 +143,64 @@ Configured defaults:
 
 ## YouTube downloads and cookies
 
-YouTube can restrict high-quality formats. OpenShorts supports a local `cookies.txt` file in the project root.
+YouTube can restrict high-quality formats for server-like traffic. OpenShorts supports multiple auth modes and now probes quality before download to avoid silent 360p outputs.
 
-Expected file:
-- `cookies.txt` in the project root
+### Recommended setup (Dashboard)
+1. Open `Settings` -> `YouTube Download Quality`.
+2. Keep `Auth Mode` on `auto`.
+3. Prefer `Browser-Login importieren` (automatic host-browser import).
+4. If browser import is unavailable, paste Netscape `cookies.txt` content and click `Cookies speichern (Backend)`.
+5. Click `Status pruefen` and ensure `Login erkannt` is shown.
+6. Start your job from the dashboard.
+
+### How to get `cookies.txt`
+1. Log into YouTube in your browser account.
+2. Export cookies in **Netscape cookies.txt** format (for example with a cookies.txt exporter extension).
+3. Use a fresh export if downloads start failing again.
+
+### Auth modes
+- `auto`: tries inline cookies -> `cookies.txt` file -> browser profile.
+- `cookies_file`: only file-based cookies (`YOUTUBE_COOKIES_FILE`).
+- `cookies_text`: only the pasted cookie content.
+- `browser`: use `yt-dlp --cookies-from-browser` style profile access.
+
+### Environment-based setup (optional)
+```env
+YOUTUBE_AUTH_MODE=auto
+YOUTUBE_COOKIES_FILE=/app/cookies.txt
+# YOUTUBE_COOKIES_FROM_BROWSER=chrome
+# YOUTUBE_COOKIES=
+```
+
+### Notes and troubleshooting
+- Use Netscape format only. JSON cookie dumps are not valid.
+- If `/app/cookies.txt` is not writable in your setup, the backend falls back to `/tmp/openshorts/cookies.txt`.
+- OpenShorts now aborts cleanly if no source meeting `MIN_SOURCE_EDGE` is available (instead of continuing with blurry output).
+- Browser profile import reads cookies from the machine where Docker runs. Mobile Safari/Chrome cookies on another device cannot be auto-read directly.
+- Browser profile mode can fail if the browser is running; close it before import.
+
+## Device settings sync
+
+OpenShorts can sync dashboard settings across devices via an encrypted sync profile stored in the backend.
+
+Workflow:
+1. On device A open `Settings` -> `Device Sync`.
+2. Click `Sync-Key erstellen`.
+3. Copy the generated sync key.
+4. On device B open the same section, paste the key, click `Vom Sync-Key laden`.
+
+What is synced:
+- AI provider settings (Gemini/Ollama)
+- API keys (Gemini, Upload-Post, ElevenLabs)
+- Overlay defaults
+- Tight edit defaults
+- Social posting defaults
+- YouTube auth settings
+- Optional backend YouTube session cookies (if checkbox enabled when creating the sync key)
 
 Notes:
-- Use Netscape `cookies.txt` format
-- A logged-in browser export often helps unlock better formats
-- If YouTube still only exposes low-quality formats, the job now fails clearly instead of silently producing poor vertical output
+- The sync key is required to decrypt the stored profile.
+- The sync profile expires automatically (default: 365 days).
 
 ## Job history, stop, and resume
 

@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { X, Type, Loader2 } from 'lucide-react';
 import { BACKGROUND_OPTIONS, DEFAULT_SUBTITLE_STYLE, FONT_OPTIONS } from '../overlayOptions';
 
@@ -72,9 +73,9 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                 ? { backgroundColor: 'transparent', color: '#fff', textShadow: '0 0 12px rgba(0,0,0,0.9), 0 2px 4px rgba(0,0,0,0.9)' }
             : { backgroundColor: 'rgba(0,0,0,0.62)', color: '#fff' };
 
-    return (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]">
-            <div className="bg-[#121214] border border-white/10 p-6 rounded-2xl w-full max-w-4xl shadow-2xl relative flex flex-col md:flex-row gap-6 max-h-[90vh]">
+    return createPortal(
+        <div className="fixed inset-0 z-[1000] flex items-start md:items-center justify-center p-2 md:p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out] overflow-y-auto touch-scroll">
+            <div className="bg-[#121214] border border-white/10 p-4 md:p-6 rounded-2xl w-full max-w-4xl shadow-2xl relative flex flex-col md:flex-row gap-4 md:gap-6 my-2 md:my-0 max-h-[calc(100dvh-1rem)] md:max-h-[90vh] overflow-y-auto md:overflow-hidden touch-scroll">
                 <button
                     onClick={onClose}
                     className="absolute top-4 right-4 text-zinc-500 hover:text-white z-10"
@@ -85,7 +86,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                 {/* Left: Preview */}
                 <div
                     ref={previewFrameRef}
-                    className="flex-1 flex flex-col items-center justify-center bg-black rounded-lg border border-white/5 overflow-hidden relative aspect-[9/16] max-h-[600px]"
+                    className="w-full max-w-[420px] mx-auto md:mx-0 md:max-w-none md:flex-1 flex flex-col items-center justify-center bg-black rounded-lg border border-white/5 overflow-hidden relative aspect-[9/16] md:aspect-[9/16]"
                 >
                      <video src={videoUrl} className="w-full h-full object-contain opacity-50" muted playsInline />
                      
@@ -113,50 +114,50 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                 </div>
 
                 {/* Right: Controls */}
-                <div className="w-full md:w-80 flex flex-col">
-                    <h3 className="text-xl font-bold text-white mb-6 flex items-center gap-2">
+                <div className="w-full md:w-80 flex flex-col min-h-0">
+                    <h3 className="text-lg md:text-xl font-bold text-white mb-4 md:mb-6 flex items-center gap-2">
                         <Type className="text-primary" /> Auto Subtitles
                     </h3>
 
-                    <div className="space-y-6 flex-1">
+                    <div className="space-y-4 md:space-y-6 flex-1 overflow-y-auto custom-scrollbar touch-scroll pr-1 md:pr-2">
                         {/* Position Selector */}
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Quick Position</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Quick Position</label>
                             <div className="grid grid-cols-1 gap-2">
                                 <button 
                                     onClick={() => setYPosition(presetPositions.top)}
-                                    className={`p-3 rounded-xl border flex items-center gap-3 transition-all ${Math.abs(yPosition - presetPositions.top) < 1 ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
+                                    className={`p-2.5 md:p-3 rounded-lg md:rounded-xl border flex items-center gap-2 md:gap-3 transition-all ${Math.abs(yPosition - presetPositions.top) < 1 ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
                                 >
-                                    <div className="w-8 h-8 rounded-lg bg-black/50 border border-white/10 flex items-start justify-center pt-1">
+                                    <div className="w-7 h-7 md:w-8 md:h-8 rounded-lg bg-black/50 border border-white/10 flex items-start justify-center pt-1">
                                         <div className="w-4 h-0.5 bg-white/50 rounded-full"></div>
                                     </div>
-                                    <span className="font-medium">Top</span>
+                                    <span className="text-sm md:text-base font-medium">Top</span>
                                 </button>
                                 
                                 <button 
                                     onClick={() => setYPosition(presetPositions.middle)}
-                                    className={`p-3 rounded-xl border flex items-center gap-3 transition-all ${Math.abs(yPosition - presetPositions.middle) < 1 ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
+                                    className={`p-2.5 md:p-3 rounded-lg md:rounded-xl border flex items-center gap-2 md:gap-3 transition-all ${Math.abs(yPosition - presetPositions.middle) < 1 ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
                                 >
-                                    <div className="w-8 h-8 rounded-lg bg-black/50 border border-white/10 flex items-center justify-center">
+                                    <div className="w-7 h-7 md:w-8 md:h-8 rounded-lg bg-black/50 border border-white/10 flex items-center justify-center">
                                         <div className="w-4 h-0.5 bg-white/50 rounded-full"></div>
                                     </div>
-                                    <span className="font-medium">Center</span>
+                                    <span className="text-sm md:text-base font-medium">Center</span>
                                 </button>
                                 
                                 <button 
                                     onClick={() => setYPosition(presetPositions.bottom)}
-                                    className={`p-3 rounded-xl border flex items-center gap-3 transition-all ${Math.abs(yPosition - presetPositions.bottom) < 1 ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
+                                    className={`p-2.5 md:p-3 rounded-lg md:rounded-xl border flex items-center gap-2 md:gap-3 transition-all ${Math.abs(yPosition - presetPositions.bottom) < 1 ? 'bg-primary/20 border-primary text-white' : 'bg-white/5 border-white/5 text-zinc-400 hover:bg-white/10'}`}
                                 >
-                                    <div className="w-8 h-8 rounded-lg bg-black/50 border border-white/10 flex items-end justify-center pb-1">
+                                    <div className="w-7 h-7 md:w-8 md:h-8 rounded-lg bg-black/50 border border-white/10 flex items-end justify-center pb-1">
                                         <div className="w-4 h-0.5 bg-white/50 rounded-full"></div>
                                     </div>
-                                    <span className="font-medium">Bottom</span>
+                                    <span className="text-sm md:text-base font-medium">Bottom</span>
                                 </button>
                             </div>
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Y Position</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Y Position</label>
                             <input
                                 type="range"
                                 min="0"
@@ -174,11 +175,11 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Font</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Font</label>
                             <select
                                 value={fontFamily}
                                 onChange={(e) => setFontFamily(e.target.value)}
-                                className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-white focus:outline-none focus:border-primary/50"
+                                className="w-full bg-black/40 border border-white/10 rounded-lg md:rounded-xl p-2.5 md:p-3 text-sm text-white focus:outline-none focus:border-primary/50"
                             >
                                 {FONT_OPTIONS.map((option) => (
                                     <option key={option} value={option}>{option}</option>
@@ -187,11 +188,11 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Background</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Background</label>
                             <select
                                 value={backgroundStyle}
                                 onChange={(e) => setBackgroundStyle(e.target.value)}
-                                className="w-full bg-black/40 border border-white/10 rounded-xl p-3 text-white focus:outline-none focus:border-primary/50"
+                                className="w-full bg-black/40 border border-white/10 rounded-lg md:rounded-xl p-2.5 md:p-3 text-sm text-white focus:outline-none focus:border-primary/50"
                             >
                                 {BACKGROUND_OPTIONS.map((option) => (
                                     <option key={option.value} value={option.value}>{option.label}</option>
@@ -200,7 +201,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Size</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Size</label>
                             <input
                                 type="range"
                                 min="18"
@@ -209,14 +210,14 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                 onChange={(e) => setFontSize(Number(e.target.value))}
                                 className="w-full"
                             />
-                            <div className="text-xs text-zinc-500 mt-2">{fontSize}px</div>
+                            <div className="text-[11px] md:text-xs text-zinc-500 mt-2">{fontSize}px</div>
                         </div>
                     </div>
 
                     <button
                         onClick={() => onGenerate({ position, yPosition, fontSize, fontFamily, backgroundStyle })}
                         disabled={isProcessing}
-                        className="w-full py-4 mt-6 bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-400 hover:to-orange-400 text-black font-bold rounded-xl shadow-lg shadow-orange-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2"
+                        className="w-full py-3 md:py-4 mt-4 md:mt-6 bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-400 hover:to-orange-400 text-black text-sm md:text-base font-bold rounded-xl shadow-lg shadow-orange-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2"
                     >
                         {isProcessing ? <Loader2 size={20} className="animate-spin" /> : <Type size={20} />}
                         {isProcessing ? 'Generating...' : 'Generate Subtitles'}
@@ -227,6 +228,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                     </p>
                 </div>
             </div>
-        </div>
+        </div>,
+        document.body
     );
 }

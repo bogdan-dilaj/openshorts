@@ -11,12 +11,17 @@ import signal
 import difflib
 import re
 import tempfile
+import base64
+import hashlib
+import secrets
+import zlib
 import urllib.request
 import urllib.error
+import urllib.parse
 from dotenv import load_dotenv
 from typing import Any, Dict, Optional, List
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -33,6 +38,7 @@ from job_store import (
 from runtime_limits import MAX_CONCURRENT_JOBS, ffmpeg_thread_args, subprocess_priority_kwargs
 from tight_edit import (
     DEFAULT_TIGHT_EDIT_PRESET,
+    build_tight_edit_plan,
     normalize_tight_edit_preset,
     plan_manual_keep_segments,
     render_keep_segments,
@@ -49,6 +55,10 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # Configuration
 MAX_FILE_SIZE_MB = 2048  # 2GB limit
 JOB_RETENTION_SECONDS = int(os.environ.get("JOB_RETENTION_SECONDS", str(7 * 24 * 3600)))
+SETTINGS_SYNC_DIR = os.environ.get("SETTINGS_SYNC_DIR", "/tmp/openshorts/settings_sync")
+SETTINGS_SYNC_TTL_DAYS = int(os.environ.get("SETTINGS_SYNC_TTL_DAYS", "365"))
+SETTINGS_SYNC_MAX_BYTES = int(os.environ.get("SETTINGS_SYNC_MAX_BYTES", str(2 * 1024 * 1024)))
+os.makedirs(SETTINGS_SYNC_DIR, exist_ok=True)
 
 # Application State
 job_queue = asyncio.Queue()
@@ -208,6 +218,8 @@ def _strip_overlay_prefixes(filename: Optional[str]) -> Optional[str]:
 
 def _infer_version_operation(filename: Optional[str]) -> str:
     name = os.path.basename(filename or "").lower()
+    if name.startswith("rendered_"):
+        return "render"
     if name.startswith("subtitled_"):
         return "subtitle"
     if name.startswith("hook_"):
@@ -224,6 +236,7 @@ def _infer_version_operation(filename: Optional[str]) -> str:
 def _operation_label(operation: str) -> str:
     return {
         "original": "Original",
+        "render": "Rendered",
         "subtitle": "Subtitles",
         "hook": "Hook",
         "edit": "Auto Edit",
@@ -233,6 +246,8 @@ def _operation_label(operation: str) -> str:
 
 
 def _default_transcript_source(operation: str) -> str:
+    if operation == "render":
+        return "original"
     return "audio" if operation in {"translate", "edit"} else "original"
 
 
@@ -265,7 +280,7 @@ def _existing_clip_filenames(output_dir: str, clip: Dict[str, Any]) -> List[str]
             filenames.append(name)
     if not filenames:
         fallback = os.path.basename(clip.get("video_filename") or "")
-        if fallback:
+        if fallback and os.path.exists(os.path.join(output_dir, fallback)):
             filenames.append(fallback)
     return filenames
 
@@ -342,7 +357,8 @@ def _ensure_clip_versions(job_id: str, output_dir: str, clip: Dict[str, Any]) ->
 
     if not existing_versions:
         filenames = _existing_clip_filenames(output_dir, clip)
-        current_filename = os.path.basename(clip.get("video_filename") or filenames[-1])
+        fallback_filename = next(iter(filenames), "")
+        current_filename = os.path.basename(clip.get("video_filename") or fallback_filename)
         versions = []
         for index, filename in enumerate(filenames):
             operation = "original" if index == 0 else _infer_version_operation(filename)
@@ -506,6 +522,26 @@ def _probe_video_duration(video_path: str) -> float:
     return max(0.0, float(result))
 
 
+def _video_has_audio(video_path: str) -> bool:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=index",
+        "-of",
+        "csv=p=0",
+        video_path,
+    ]
+    try:
+        result = subprocess.check_output(cmd).decode().strip()
+        return bool(result)
+    except Exception:
+        return False
+
+
 def _build_subtitle_settings(req, clip_data: Dict) -> Optional[Dict]:
     existing = clip_data.get("subtitle_settings")
     alignment = req.position or (existing or {}).get("position") or "bottom"
@@ -541,6 +577,81 @@ def _build_hook_settings(req, clip_data: Dict) -> Optional[Dict]:
         "font_family": req.font_family or (existing or {}).get("font_family"),
         "background_style": req.background_style or (existing or {}).get("background_style"),
     }
+
+
+def _sanitize_subtitle_settings_dict(settings: Optional[Dict[str, Any]], clip_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if settings is None:
+        return clip_data.get("subtitle_settings")
+    if not isinstance(settings, dict):
+        return clip_data.get("subtitle_settings")
+    alignment = settings.get("position") or "bottom"
+    y_position = settings.get("y_position")
+    font_size = settings.get("font_size") or settings.get("fontSize") or 16
+    try:
+        font_size = int(font_size)
+    except (TypeError, ValueError):
+        font_size = 16
+    return {
+        "position": alignment,
+        "y_position": y_position,
+        "font_size": max(10, min(120, font_size)),
+        "font_family": settings.get("font_family") or settings.get("fontFamily"),
+        "background_style": settings.get("background_style") or settings.get("backgroundStyle"),
+    }
+
+
+def _sanitize_hook_settings_dict(settings: Optional[Dict[str, Any]], clip_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if settings is None:
+        return clip_data.get("hook_settings")
+    if not isinstance(settings, dict):
+        return clip_data.get("hook_settings")
+
+    text = (settings.get("text") or "").strip()
+    if not text:
+        return clip_data.get("hook_settings")
+
+    return {
+        "text": text,
+        "position": settings.get("position") or "top",
+        "horizontal_position": settings.get("horizontal_position") or settings.get("horizontalPosition") or "center",
+        "x_position": settings.get("x_position") if settings.get("x_position") is not None else settings.get("xPosition"),
+        "y_position": settings.get("y_position") if settings.get("y_position") is not None else settings.get("yPosition"),
+        "text_align": settings.get("text_align") or settings.get("textAlign") or "center",
+        "size": settings.get("size") or "M",
+        "width_preset": settings.get("width_preset") or settings.get("widthPreset") or "wide",
+        "font_family": settings.get("font_family") or settings.get("fontFamily"),
+        "background_style": settings.get("background_style") or settings.get("backgroundStyle"),
+    }
+
+
+def _resolve_clip_source_input_path(job_id: str, output_dir: str, clip: Dict[str, Any]) -> Optional[str]:
+    candidates: List[str] = []
+    manifest = load_job_manifest(output_dir)
+    manifest_input = manifest.get("pipeline", {}).get("input_video")
+    if manifest_input:
+        candidates.append(manifest_input)
+    for key in (
+        "source_video_filename",
+        "preview_video_filename",
+        "original_video_filename",
+        "base_video_filename",
+        "video_filename",
+    ):
+        value = clip.get(key)
+        if value:
+            candidates.append(os.path.join(output_dir, os.path.basename(value)))
+
+    seen = set()
+    for path in candidates:
+        if not path:
+            continue
+        normalized = os.path.abspath(path)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if os.path.exists(normalized):
+            return normalized
+    return None
 
 
 def _render_subtitle_and_hook_stack(
@@ -636,7 +747,30 @@ def _coerce_tight_edit_preset(value, default: str = DEFAULT_TIGHT_EDIT_PRESET) -
 
 
 def _normalize_ollama_base_url(base_url: Optional[str]) -> str:
-    return (base_url or "http://127.0.0.1:11434").strip().rstrip("/")
+    normalized = (base_url or "http://127.0.0.1:11434").strip().rstrip("/")
+    if not normalized:
+        normalized = "http://127.0.0.1:11434"
+
+    # In Docker bridge mode, localhost points to the container itself.
+    # If user configured localhost/127.0.0.1 for a host Ollama daemon,
+    # transparently route through host-gateway alias.
+    in_docker = os.path.exists("/.dockerenv")
+    network_mode = (os.environ.get("NETWORK_MODE") or "").strip().lower()
+    bridge_mode = in_docker and network_mode != "host"
+    if bridge_mode:
+        try:
+            parsed = urllib.parse.urlparse(normalized)
+            host = (parsed.hostname or "").lower()
+            if host in {"127.0.0.1", "localhost", "::1"}:
+                port = parsed.port or 11434
+                scheme = parsed.scheme or "http"
+                path = parsed.path or ""
+                query = f"?{parsed.query}" if parsed.query else ""
+                normalized = f"{scheme}://host.docker.internal:{port}{path}{query}".rstrip("/")
+        except Exception:
+            pass
+
+    return normalized
 
 
 def _normalize_ollama_model_name(model_name: Optional[str]) -> str:
@@ -698,9 +832,14 @@ def _validate_ollama_model_or_raise(base_url: Optional[str], model_name: Optiona
             detail=f"Failed to query Ollama models at {normalized_base_url}: HTTP {exc.code} {body or exc.reason}",
         )
     except urllib.error.URLError as exc:
+        detail = (
+            f"Could not reach Ollama at {normalized_base_url}: {exc.reason}. "
+            "If Ollama runs on the host, ensure it listens on a non-loopback interface "
+            "(e.g. OLLAMA_HOST=0.0.0.0:11434) or run the backend with host networking."
+        )
         raise HTTPException(
             status_code=502,
-            detail=f"Could not reach Ollama at {normalized_base_url}: {exc.reason}",
+            detail=detail,
         )
     except Exception as exc:
         raise HTTPException(
@@ -722,6 +861,218 @@ def _validate_ollama_model_or_raise(base_url: Optional[str], model_name: Optiona
             f"{suggestion_text} Installed models: {installed_text}"
         ),
     )
+
+
+YOUTUBE_AUTH_MODES = {"auto", "cookies_text", "cookies_file", "browser"}
+YOUTUBE_BROWSER_ALIASES = {
+    "edge": "edge",
+    "msedge": "edge",
+    "chrome": "chrome",
+    "chromium": "chromium",
+    "firefox": "firefox",
+    "brave": "brave",
+    "opera": "opera",
+    "safari": "safari",
+    "vivaldi": "vivaldi",
+}
+
+
+def _normalize_youtube_auth_mode(value: Optional[str]) -> str:
+    mode = (value or "auto").strip().lower()
+    return mode if mode in YOUTUBE_AUTH_MODES else "auto"
+
+
+def _normalize_youtube_browser(value: Optional[str]) -> Optional[str]:
+    browser = (value or "").strip().lower()
+    if not browser or browser in {"auto", "none"}:
+        return None
+    return YOUTUBE_BROWSER_ALIASES.get(browser)
+
+
+def _youtube_cookies_file_path() -> str:
+    configured = (os.environ.get("YOUTUBE_COOKIES_FILE") or "").strip()
+    return configured or "/app/cookies.txt"
+
+
+def _youtube_cookie_file_status() -> Dict[str, Any]:
+    path = _youtube_cookies_file_path()
+    exists = os.path.exists(path)
+    result: Dict[str, Any] = {
+        "cookies_file_path": path,
+        "cookies_file_exists": exists,
+        "cookies_file_size": 0,
+        "cookies_file_mtime": None,
+        "cookies_file_has_youtube_domain": False,
+        "cookies_file_readable": False,
+        "cookies_file_error": None,
+    }
+    if not exists:
+        return result
+
+    try:
+        stat = os.stat(path)
+        result["cookies_file_size"] = stat.st_size
+        result["cookies_file_mtime"] = stat.st_mtime
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+        lowered = content.lower()
+        result["cookies_file_has_youtube_domain"] = ".youtube.com" in lowered or "youtube.com" in lowered
+        result["cookies_file_readable"] = True
+    except Exception as exc:
+        result["cookies_file_error"] = str(exc)
+    return result
+
+
+def _apply_youtube_auth_env(
+    env: Dict[str, str],
+    mode: Optional[str],
+    browser: Optional[str],
+    cookies_text: Optional[str],
+) -> tuple[str, Optional[str], bool]:
+    resolved_mode = _normalize_youtube_auth_mode(mode)
+    resolved_browser = _normalize_youtube_browser(browser)
+    cleaned_cookies = (cookies_text or "").strip()
+
+    env["YOUTUBE_AUTH_MODE"] = resolved_mode
+
+    if resolved_browser:
+        env["YOUTUBE_COOKIES_FROM_BROWSER"] = resolved_browser
+    else:
+        env.pop("YOUTUBE_COOKIES_FROM_BROWSER", None)
+
+    if cleaned_cookies:
+        env["YOUTUBE_COOKIES"] = cleaned_cookies
+    else:
+        env.pop("YOUTUBE_COOKIES", None)
+
+    return resolved_mode, resolved_browser, bool(cleaned_cookies)
+
+
+def _persist_youtube_cookies_text(cookies_text: str) -> Dict[str, Any]:
+    preferred_path = _youtube_cookies_file_path()
+    fallback_path = "/tmp/openshorts/cookies.txt"
+    write_candidates = [preferred_path]
+    if os.path.abspath(preferred_path) != os.path.abspath(fallback_path):
+        write_candidates.append(fallback_path)
+
+    saved_path = None
+    last_error = None
+    for target_path in write_candidates:
+        target_dir = os.path.dirname(target_path) or "."
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+            with open(target_path, "w", encoding="utf-8") as f:
+                f.write(cookies_text)
+            try:
+                os.chmod(target_path, 0o600)
+            except Exception:
+                pass
+            saved_path = target_path
+            break
+        except Exception as exc:
+            last_error = exc
+
+    if not saved_path:
+        raise RuntimeError(f"Failed to save cookies file: {last_error}")
+
+    os.environ["YOUTUBE_COOKIES_FILE"] = saved_path
+    status = _youtube_cookie_file_status()
+    status["saved_path"] = saved_path
+    return status
+
+
+def _import_youtube_cookies_from_browser(browser: Optional[str]) -> Dict[str, Any]:
+    normalized_browser = _normalize_youtube_browser(browser) or "chrome"
+
+    from yt_dlp.cookies import YDLLogger, YoutubeDLCookieJar, extract_cookies_from_browser
+
+    try:
+        browser_cookies = extract_cookies_from_browser(normalized_browser, logger=YDLLogger())
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not read cookies from browser '{normalized_browser}'. "
+            f"Ensure the browser is installed locally on the host and fully closed. {exc}"
+        )
+
+    temp_cookie_path = os.path.join("/tmp", f"youtube_browser_import_{secrets.token_hex(8)}.txt")
+    jar = YoutubeDLCookieJar(temp_cookie_path)
+    imported_count = 0
+    for cookie in browser_cookies:
+        imported_count += 1
+        jar.set_cookie(cookie)
+
+    if imported_count == 0:
+        raise RuntimeError(f"No cookies found in browser '{normalized_browser}'.")
+
+    jar.save(ignore_discard=True, ignore_expires=True)
+    with open(temp_cookie_path, "r", encoding="utf-8", errors="ignore") as f:
+        cookie_text = f.read()
+    try:
+        os.remove(temp_cookie_path)
+    except Exception:
+        pass
+
+    status = _persist_youtube_cookies_text(cookie_text)
+    status["browser"] = normalized_browser
+    status["imported_cookie_count"] = imported_count
+    return status
+
+
+def _settings_sync_record_path(sync_id: str) -> str:
+    return os.path.join(SETTINGS_SYNC_DIR, f"{sync_id}.json")
+
+
+def _settings_sync_cleanup_expired() -> None:
+    if SETTINGS_SYNC_TTL_DAYS <= 0:
+        return
+    ttl_seconds = SETTINGS_SYNC_TTL_DAYS * 86400
+    now = time.time()
+    for path in glob.glob(os.path.join(SETTINGS_SYNC_DIR, "*.json")):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            updated_at = float(payload.get("updated_at") or payload.get("created_at") or 0.0)
+            if updated_at and now - updated_at > ttl_seconds:
+                os.remove(path)
+        except Exception:
+            continue
+
+
+def _derive_settings_sync_key(secret_text: str, salt_bytes: bytes) -> bytes:
+    raw_key = hashlib.pbkdf2_hmac(
+        "sha256",
+        secret_text.encode("utf-8"),
+        salt_bytes,
+        200_000,
+        dklen=32,
+    )
+    return base64.urlsafe_b64encode(raw_key)
+
+
+def _parse_settings_sync_code(sync_code: str) -> tuple[str, str]:
+    normalized = re.sub(r"\s+", "", (sync_code or "").strip())
+    if "." not in normalized:
+        raise ValueError("Invalid sync code format")
+    sync_id, secret_text = normalized.split(".", 1)
+    if not sync_id or not secret_text:
+        raise ValueError("Invalid sync code format")
+    if not re.fullmatch(r"[a-f0-9]{12,64}", sync_id):
+        raise ValueError("Invalid sync code id")
+    return sync_id, secret_text
+
+
+def _read_backend_youtube_cookies(max_bytes: int = 1024 * 1024) -> Optional[str]:
+    path = _youtube_cookies_file_path()
+    if not path or not os.path.exists(path):
+        return None
+    size = os.path.getsize(path)
+    if size <= 0 or size > max_bytes:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    except Exception:
+        return None
 
 
 def _terminate_job_process(job: Dict, force: bool = False) -> bool:
@@ -896,6 +1247,28 @@ class ResumeJobRequest(BaseModel):
     ollama_base_url: Optional[str] = None
     ollama_model: Optional[str] = None
     tight_edit_preset: Optional[str] = None
+    analysis_only: Optional[bool] = None
+    youtube_auth_mode: Optional[str] = None
+    youtube_cookies_from_browser: Optional[str] = None
+    youtube_cookies: Optional[str] = None
+
+
+class YouTubeCookiesSaveRequest(BaseModel):
+    cookies_text: str
+
+
+class YouTubeBrowserImportRequest(BaseModel):
+    browser: Optional[str] = None
+
+
+class SettingsSyncCreateRequest(BaseModel):
+    settings: Dict[str, Any]
+    include_youtube_cookies: Optional[bool] = True
+
+
+class SettingsSyncLoadRequest(BaseModel):
+    sync_code: str
+    apply_youtube_cookies: Optional[bool] = True
 
 def enqueue_output(out, job_id, output_dir):
     """Reads output from a subprocess and appends it to jobs logs."""
@@ -1061,6 +1434,10 @@ async def process_endpoint(
     allow_long_clips: Optional[str] = Form(None),
     max_clips: Optional[str] = Form(None),
     tight_edit_preset: Optional[str] = Form(None),
+    analysis_only: Optional[str] = Form(None),
+    youtube_auth_mode: Optional[str] = Form(None),
+    youtube_cookies_from_browser: Optional[str] = Form(None),
+    youtube_cookies: Optional[str] = Form(None),
 ):
     provider = (request.headers.get("X-LLM-Provider") or "gemini").strip().lower()
     api_key = request.headers.get("X-Gemini-Key")
@@ -1081,11 +1458,18 @@ async def process_endpoint(
         allow_long_clips = body.get("allow_long_clips")
         max_clips = body.get("max_clips")
         tight_edit_preset = body.get("tight_edit_preset")
+        analysis_only = body.get("analysis_only")
+        youtube_auth_mode = body.get("youtube_auth_mode")
+        youtube_cookies_from_browser = body.get("youtube_cookies_from_browser")
+        youtube_cookies = body.get("youtube_cookies")
 
     interview_mode_enabled = _coerce_bool(interview_mode)
     allow_long_clips_enabled = _coerce_bool(allow_long_clips)
     max_clips_value = _coerce_max_clips(max_clips)
     tight_edit_preset_value = _coerce_tight_edit_preset(tight_edit_preset)
+    analysis_only_enabled = _coerce_bool(analysis_only)
+    if youtube_cookies and len(str(youtube_cookies)) > 1024 * 1024:
+        raise HTTPException(status_code=413, detail="youtube_cookies payload is too large")
     
     if not url and not file:
         raise HTTPException(status_code=400, detail="Must provide URL or File")
@@ -1102,6 +1486,7 @@ async def process_endpoint(
         "allow_long_clips": allow_long_clips_enabled,
         "max_clips": max_clips_value,
         "tight_edit_preset": tight_edit_preset_value,
+        "analysis_only": analysis_only_enabled,
     }
     
     # Prepare Command
@@ -1114,6 +1499,15 @@ async def process_endpoint(
         env["OLLAMA_BASE_URL"] = ollama_base_url
     if ollama_model:
         env["OLLAMA_MODEL"] = ollama_model
+    youtube_auth_mode_value, youtube_browser_value, youtube_inline_present = _apply_youtube_auth_env(
+        env,
+        youtube_auth_mode,
+        youtube_cookies_from_browser,
+        youtube_cookies,
+    )
+    request_meta["youtube_auth_mode"] = youtube_auth_mode_value
+    request_meta["youtube_cookies_from_browser"] = youtube_browser_value
+    request_meta["youtube_inline_cookies_present"] = youtube_inline_present
     
     if url:
         cmd.extend(["-u", url])
@@ -1146,6 +1540,10 @@ async def process_endpoint(
         cmd.append("--allow-long-clips")
     cmd.extend(["--max-clips", str(max_clips_value)])
     cmd.extend(["--tight-edit-preset", tight_edit_preset_value])
+    if analysis_only_enabled:
+        cmd.append("--analysis-only")
+    if analysis_only_enabled and url:
+        cmd.append("--keep-original")
     append_job_log(job_output_dir, f"Job {job_id} queued.")
     update_job_manifest(job_output_dir, {
         "job_id": job_id,
@@ -1179,6 +1577,243 @@ async def process_endpoint(
     
     return {"job_id": job_id, "status": "queued"}
 
+
+@app.get("/api/youtube/auth/status")
+async def youtube_auth_status():
+    file_status = _youtube_cookie_file_status()
+    env_mode = _normalize_youtube_auth_mode(os.environ.get("YOUTUBE_AUTH_MODE"))
+    env_browser = _normalize_youtube_browser(os.environ.get("YOUTUBE_COOKIES_FROM_BROWSER"))
+    env_inline = bool((os.environ.get("YOUTUBE_COOKIES") or "").strip())
+    inferred_logged_in = bool(file_status.get("cookies_file_has_youtube_domain")) or env_inline
+
+    return {
+        "mode_default": env_mode,
+        "browser_default": env_browser,
+        "inline_cookies_env_present": env_inline,
+        "logged_in": inferred_logged_in,
+        **file_status,
+    }
+
+
+@app.post("/api/youtube/auth/cookies")
+async def save_youtube_cookies(req: YouTubeCookiesSaveRequest):
+    cookies_text = (req.cookies_text or "").strip()
+    if not cookies_text:
+        raise HTTPException(status_code=400, detail="cookies_text is required")
+    if len(cookies_text) > 1024 * 1024:
+        raise HTTPException(status_code=413, detail="cookies_text is too large")
+    try:
+        status = _persist_youtube_cookies_text(cookies_text)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {
+        "success": True,
+        "message": f"Saved cookies to {status.get('saved_path')}",
+        **status,
+    }
+
+
+@app.post("/api/youtube/auth/import-browser")
+async def import_youtube_cookies_from_browser(req: YouTubeBrowserImportRequest):
+    try:
+        status = _import_youtube_cookies_from_browser(req.browser)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {
+        "success": True,
+        "message": f"Imported cookies from browser '{status.get('browser')}'",
+        **status,
+    }
+
+
+@app.delete("/api/youtube/auth/cookies")
+async def delete_youtube_cookies():
+    target_path = _youtube_cookies_file_path()
+    if os.path.exists(target_path):
+        try:
+            os.remove(target_path)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to delete cookies file: {exc}")
+    return {
+        "success": True,
+        "message": "YouTube cookies file deleted.",
+        **_youtube_cookie_file_status(),
+    }
+
+
+@app.post("/api/settings/sync/create")
+async def create_settings_sync(req: SettingsSyncCreateRequest):
+    settings_payload = req.settings if isinstance(req.settings, dict) else None
+    if settings_payload is None:
+        raise HTTPException(status_code=400, detail="settings must be an object")
+
+    payload = dict(settings_payload)
+    if req.include_youtube_cookies:
+        backend_cookie_text = _read_backend_youtube_cookies()
+        if backend_cookie_text:
+            payload["youtube_session_cookies"] = backend_cookie_text
+            youtube_settings = payload.get("youtubeAuthSettings")
+            if isinstance(youtube_settings, dict):
+                copied_settings = dict(youtube_settings)
+                inline_cookie_text = (copied_settings.get("cookiesText") or "").strip()
+                if inline_cookie_text and inline_cookie_text == backend_cookie_text.strip():
+                    copied_settings["cookiesText"] = ""
+                    payload["youtubeAuthSettings"] = copied_settings
+
+    raw_payload = json.dumps(payload, ensure_ascii=False)
+    raw_payload_bytes = raw_payload.encode("utf-8")
+    compressed_payload = zlib.compress(raw_payload_bytes, level=6)
+    if len(compressed_payload) < len(raw_payload_bytes):
+        payload_blob = compressed_payload
+        payload_encoding = "zlib+utf8"
+    else:
+        payload_blob = raw_payload_bytes
+        payload_encoding = "utf8"
+
+    payload_size = len(payload_blob)
+    raw_payload_size = len(raw_payload_bytes)
+    if payload_size > SETTINGS_SYNC_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "settings payload too large "
+                f"({payload_size} bytes stored, raw {raw_payload_size} bytes > {SETTINGS_SYNC_MAX_BYTES} bytes)"
+            ),
+        )
+
+    _settings_sync_cleanup_expired()
+
+    try:
+        from cryptography.fernet import Fernet
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Missing cryptography runtime for settings sync: {exc}")
+
+    sync_id = secrets.token_hex(8)
+    sync_secret = secrets.token_urlsafe(24)
+    salt = os.urandom(16)
+    fernet_key = _derive_settings_sync_key(sync_secret, salt)
+    token = Fernet(fernet_key).encrypt(payload_blob).decode("utf-8")
+    now = time.time()
+
+    record = {
+        "version": 1,
+        "created_at": now,
+        "updated_at": now,
+        "salt": base64.urlsafe_b64encode(salt).decode("ascii"),
+        "encoding": payload_encoding,
+        "raw_payload_size": raw_payload_size,
+        "stored_payload_size": payload_size,
+        "token": token,
+    }
+
+    path = _settings_sync_record_path(sync_id)
+    try:
+        _write_metadata(path, record)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to persist sync profile: {exc}")
+
+    return {
+        "success": True,
+        "sync_code": f"{sync_id}.{sync_secret}",
+        "sync_id": sync_id,
+        "payload_size": payload_size,
+        "raw_payload_size": raw_payload_size,
+        "payload_encoding": payload_encoding,
+        "expires_in_days": SETTINGS_SYNC_TTL_DAYS,
+    }
+
+
+@app.post("/api/settings/sync/load")
+async def load_settings_sync(req: SettingsSyncLoadRequest):
+    sync_code = (req.sync_code or "").strip()
+    if not sync_code:
+        raise HTTPException(status_code=400, detail="sync_code is required")
+
+    try:
+        sync_id, sync_secret = _parse_settings_sync_code(sync_code)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    path = _settings_sync_record_path(sync_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Sync profile not found")
+
+    try:
+        from cryptography.fernet import Fernet, InvalidToken
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Missing cryptography runtime for settings sync: {exc}")
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            record = json.load(f)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read sync profile: {exc}")
+
+    ttl_seconds = SETTINGS_SYNC_TTL_DAYS * 86400
+    updated_at = float(record.get("updated_at") or record.get("created_at") or 0.0)
+    if SETTINGS_SYNC_TTL_DAYS > 0 and updated_at and (time.time() - updated_at) > ttl_seconds:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        raise HTTPException(status_code=410, detail="Sync profile expired")
+
+    try:
+        salt = base64.urlsafe_b64decode(record.get("salt", "").encode("ascii"))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Invalid sync profile salt")
+
+    token = record.get("token")
+    if not token:
+        raise HTTPException(status_code=500, detail="Invalid sync profile token")
+
+    try:
+        fernet_key = _derive_settings_sync_key(sync_secret, salt)
+        decrypted_payload = Fernet(fernet_key).decrypt(token.encode("utf-8"))
+    except InvalidToken:
+        raise HTTPException(status_code=401, detail="Invalid sync code")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to decrypt sync profile: {exc}")
+
+    payload_encoding = (record.get("encoding") or "utf8").strip().lower()
+    try:
+        if payload_encoding in {"utf8", "utf-8"}:
+            raw_payload = decrypted_payload.decode("utf-8")
+        elif payload_encoding in {"zlib+utf8", "zlib"}:
+            raw_payload = zlib.decompress(decrypted_payload).decode("utf-8")
+        else:
+            raise HTTPException(status_code=500, detail=f"Unsupported sync payload encoding: {payload_encoding}")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to decode sync profile payload: {exc}")
+
+    try:
+        payload = json.loads(raw_payload)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Sync profile payload is invalid")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="Sync profile payload is invalid")
+
+    youtube_cookies_applied = False
+    if req.apply_youtube_cookies:
+        sync_cookie_text = (payload.get("youtube_session_cookies") or "").strip()
+        if sync_cookie_text:
+            try:
+                _persist_youtube_cookies_text(sync_cookie_text)
+                youtube_cookies_applied = True
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Failed to apply synced YouTube cookies: {exc}")
+
+    payload.pop("youtube_session_cookies", None)
+
+    return {
+        "success": True,
+        "settings": payload,
+        "youtube_cookies_applied": youtube_cookies_applied,
+    }
+
 @app.get("/api/status/{job_id}")
 async def get_status(job_id: str):
     job = jobs.get(job_id)
@@ -1205,8 +1840,21 @@ async def get_status(job_id: str):
 
 
 @app.get("/api/jobs/history")
-async def get_job_history():
-    return {"jobs": list_job_summaries(OUTPUT_DIR)}
+async def get_job_history(
+    limit: int = Query(50, ge=1, le=500),
+    include_result: bool = Query(False),
+    include_logs: bool = Query(True),
+    log_limit: int = Query(40, ge=0, le=200),
+):
+    return {
+        "jobs": list_job_summaries(
+            OUTPUT_DIR,
+            limit=limit,
+            include_result=include_result,
+            include_logs=include_logs,
+            log_limit=log_limit,
+        )
+    }
 
 
 @app.post("/api/jobs/{job_id}/cancel")
@@ -1264,6 +1912,12 @@ async def resume_job(
     ollama_base_url = req.ollama_base_url or manifest.get("provider", {}).get("ollama_base_url")
     ollama_model = req.ollama_model or manifest.get("provider", {}).get("ollama_model")
     tight_edit_preset = _coerce_tight_edit_preset(req.tight_edit_preset or request_meta.get("tight_edit_preset"))
+    analysis_only_enabled = req.analysis_only if req.analysis_only is not None else _coerce_bool(request_meta.get("analysis_only"))
+    youtube_auth_mode_value = req.youtube_auth_mode or request_meta.get("youtube_auth_mode")
+    youtube_browser_value = req.youtube_cookies_from_browser or request_meta.get("youtube_cookies_from_browser")
+    youtube_cookies_value = req.youtube_cookies
+    if youtube_cookies_value and len(str(youtube_cookies_value)) > 1024 * 1024:
+        raise HTTPException(status_code=413, detail="youtube_cookies payload is too large")
 
     if provider == "gemini" and not x_gemini_key:
         raise HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
@@ -1279,6 +1933,12 @@ async def resume_job(
         env["OLLAMA_BASE_URL"] = ollama_base_url
     if ollama_model:
         env["OLLAMA_MODEL"] = ollama_model
+    youtube_auth_mode_value, youtube_browser_value, youtube_inline_present = _apply_youtube_auth_env(
+        env,
+        youtube_auth_mode_value,
+        youtube_browser_value,
+        youtube_cookies_value,
+    )
 
     if source_type == "url":
         source_url = request_meta.get("url")
@@ -1298,6 +1958,10 @@ async def resume_job(
         cmd.append("--allow-long-clips")
     cmd.extend(["--max-clips", str(_coerce_max_clips(request_meta.get("max_clips")))])
     cmd.extend(["--tight-edit-preset", tight_edit_preset])
+    if analysis_only_enabled:
+        cmd.append("--analysis-only")
+    if analysis_only_enabled and source_type == "url":
+        cmd.append("--keep-original")
 
     jobs[job_id] = {
         "status": "queued",
@@ -1319,6 +1983,10 @@ async def resume_job(
         "request": {
             **request_meta,
             "tight_edit_preset": tight_edit_preset,
+            "analysis_only": analysis_only_enabled,
+            "youtube_auth_mode": youtube_auth_mode_value,
+            "youtube_cookies_from_browser": youtube_browser_value,
+            "youtube_inline_cookies_present": youtube_inline_present,
         },
         "provider": {
             "name": provider,
@@ -1505,7 +2173,17 @@ async def add_subtitles(req: SubtitleRequest):
     metadata_changed = _ensure_clip_versions(req.job_id, output_dir, clip_data)
     source_version = _find_clip_version(clip_data, filename=req.input_filename)
     if not source_version:
-        raise HTTPException(status_code=404, detail="Source clip version not found")
+        subtitle_settings = _build_subtitle_settings(req, clip_data)
+        clip_data["subtitle_settings"] = subtitle_settings
+        clip_data["status"] = clip_data.get("status") or "draft"
+        data["shorts"][req.clip_index] = clip_data
+        _write_metadata(metadata_path, data)
+        _refresh_job_result(req.job_id)
+        return {
+            "success": True,
+            "settings_saved": True,
+            "clip": clip_data,
+        }
 
     input_path = os.path.join(output_dir, source_version["filename"])
     if not os.path.exists(input_path):
@@ -1606,7 +2284,19 @@ async def add_hook(req: HookRequest):
     metadata_changed = _ensure_clip_versions(req.job_id, output_dir, clip_data)
     source_version = _find_clip_version(clip_data, filename=req.input_filename)
     if not source_version:
-        raise HTTPException(status_code=404, detail="Source clip version not found")
+        hook_settings = _build_hook_settings(req, clip_data)
+        if not hook_settings:
+            raise HTTPException(status_code=400, detail="Hook text is required")
+        clip_data["hook_settings"] = hook_settings
+        clip_data["status"] = clip_data.get("status") or "draft"
+        data["shorts"][req.clip_index] = clip_data
+        _write_metadata(metadata_path, data)
+        _refresh_job_result(req.job_id)
+        return {
+            "success": True,
+            "settings_saved": True,
+            "clip": clip_data,
+        }
 
     input_path = os.path.join(output_dir, source_version["filename"])
     if not os.path.exists(input_path):
@@ -1816,6 +2506,464 @@ async def trim_clip(req: TrimRequest):
         "duration": round(sum(segment_end - segment_start for segment_start, segment_end in keep_segments), 3),
     }
 
+
+class RenderClipRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    apply_tight_edit: Optional[bool] = True
+    tight_edit_preset: Optional[str] = None
+    apply_subtitles: Optional[bool] = True
+    subtitle_settings: Optional[Dict[str, Any]] = None
+    apply_hook: Optional[bool] = True
+    hook_settings: Optional[Dict[str, Any]] = None
+    interview_mode: Optional[bool] = None
+
+
+@app.post("/api/clip/preview/render")
+async def render_clip_preview(req: RenderClipRequest):
+    _get_job_record_or_404(req.job_id)
+    output_dir, metadata_path, data = _load_job_metadata_or_404(req.job_id)
+
+    clips = data.get("shorts", [])
+    if req.clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    clip_data = clips[req.clip_index]
+    clip_data["clip_index"] = req.clip_index
+
+    source_input_path = _resolve_clip_source_input_path(req.job_id, output_dir, clip_data)
+    if not source_input_path:
+        raise HTTPException(status_code=404, detail="Source input video for preview clip not found")
+
+    source_start = float(clip_data.get("start", clip_data.get("preview_start", 0.0)) or 0.0)
+    source_end = float(clip_data.get("end", clip_data.get("preview_end", source_start)) or source_start)
+    if source_end <= source_start:
+        raise HTTPException(status_code=400, detail="Invalid clip timestamps")
+
+    try:
+        preview_sample_seconds = float(os.environ.get("PREVIEW_SAMPLE_SECONDS", "1.0"))
+    except (TypeError, ValueError):
+        preview_sample_seconds = 1.0
+    preview_sample_seconds = max(0.15, preview_sample_seconds)
+
+    preview_source_start = source_start
+    preview_source_end = min(source_end, source_start + preview_sample_seconds)
+    if preview_source_end <= preview_source_start:
+        preview_source_end = min(source_end, preview_source_start + 0.15)
+    if preview_source_end <= preview_source_start:
+        raise HTTPException(status_code=400, detail="Invalid preview sample timestamps")
+
+    def _env_int(name: str, default: int, minimum: int) -> int:
+        try:
+            value = int(os.environ.get(name, str(default)))
+        except (TypeError, ValueError):
+            value = default
+        value = max(minimum, value)
+        if value % 2 != 0:
+            value += 1
+        return value
+
+    preview_render_width = _env_int("PREVIEW_RENDER_WIDTH", 360, 180)
+    preview_render_height = _env_int("PREVIEW_RENDER_HEIGHT", 640, 320)
+    preview_trim_preset = (os.environ.get("PREVIEW_TRIM_PRESET", "ultrafast") or "ultrafast").strip() or "ultrafast"
+    preview_vertical_preset = (os.environ.get("PREVIEW_VERTICAL_PRESET", "ultrafast") or "ultrafast").strip() or "ultrafast"
+    preview_render_crf = str((os.environ.get("PREVIEW_RENDER_CRF", "34") or "34")).strip() or "34"
+    preview_render_maxrate = str((os.environ.get("PREVIEW_RENDER_MAXRATE", "1M") or "1M")).strip() or "1M"
+    preview_render_bufsize = str((os.environ.get("PREVIEW_RENDER_BUFSIZE", "2M") or "2M")).strip() or "2M"
+    preview_audio_bitrate = str((os.environ.get("PREVIEW_AUDIO_BITRATE", "96k") or "96k")).strip() or "96k"
+
+    manifest = load_job_manifest(output_dir)
+    request_meta = manifest.get("request", {})
+    interview_mode = req.interview_mode if req.interview_mode is not None else bool(request_meta.get("interview_mode"))
+
+    subtitle_settings = _sanitize_subtitle_settings_dict(req.subtitle_settings, clip_data)
+    hook_settings = _sanitize_hook_settings_dict(req.hook_settings, clip_data)
+    apply_subtitles = bool(req.apply_subtitles) and bool(subtitle_settings)
+    apply_hook = bool(req.apply_hook) and bool(hook_settings)
+
+    transcript = data.get("transcript")
+    keep_segments = [(preview_source_start, preview_source_end)]
+
+    request_token = int(time.time() * 1000)
+    temp_clip_filename = f"temp_preview_source_{request_token}_{req.clip_index + 1}.mp4"
+    temp_vertical_filename = f"temp_preview_vertical_{request_token}_{req.clip_index + 1}.mp4"
+    final_preview_filename = f"preview_rendered_{request_token}_clip_{req.clip_index + 1}.mp4"
+    temp_clip_path = os.path.join(output_dir, temp_clip_filename)
+    temp_vertical_path = os.path.join(output_dir, temp_vertical_filename)
+    final_preview_path = os.path.join(output_dir, final_preview_filename)
+
+    generated_paths: List[str] = []
+    current_path = temp_vertical_path
+
+    def run_base_preview():
+        render_keep_segments(
+            source_input_path,
+            keep_segments,
+            temp_clip_path,
+            ffmpeg_preset=preview_trim_preset,
+            crf=preview_render_crf,
+            audio_bitrate=preview_audio_bitrate,
+            thread_args=ffmpeg_thread_args(),
+            subprocess_kwargs=subprocess_priority_kwargs(),
+        )
+        from main import process_video_to_vertical
+        return process_video_to_vertical(
+            temp_clip_path,
+            temp_vertical_path,
+            interview_mode=bool(interview_mode),
+            output_width=preview_render_width,
+            output_height=preview_render_height,
+            ffmpeg_preset_override=preview_vertical_preset,
+            video_crf=preview_render_crf,
+            video_maxrate=preview_render_maxrate,
+            video_bufsize=preview_render_bufsize,
+            audio_bitrate=preview_audio_bitrate,
+        )
+
+    try:
+        loop = asyncio.get_event_loop()
+        success = await loop.run_in_executor(None, run_base_preview)
+        if not success or not os.path.exists(temp_vertical_path):
+            raise HTTPException(status_code=500, detail="Preview render failed")
+        generated_paths.append(temp_vertical_path)
+
+        if apply_subtitles:
+            subtitle_filename = f"preview_subtitled_{request_token}_clip_{req.clip_index + 1}.mp4"
+            subtitle_path = os.path.join(output_dir, subtitle_filename)
+            if transcript and len(keep_segments) == 1:
+                subtitle_transcript = transcript
+                subtitle_clip_start = float(keep_segments[0][0])
+                subtitle_clip_end = float(keep_segments[0][1])
+            else:
+                subtitle_transcript = transcribe_audio(current_path)
+                subtitle_clip_start = 0.0
+                subtitle_clip_end = _probe_video_duration(current_path)
+
+            def run_subtitles():
+                return burn_subtitles(
+                    current_path,
+                    subtitle_transcript,
+                    subtitle_clip_start,
+                    subtitle_clip_end,
+                    subtitle_path,
+                    alignment=subtitle_settings.get("position", "bottom"),
+                    y_position=subtitle_settings.get("y_position"),
+                    fontsize=subtitle_settings.get("font_size", 16),
+                    font_family=subtitle_settings.get("font_family"),
+                    background_style=subtitle_settings.get("background_style"),
+                )
+
+            subtitle_success = await loop.run_in_executor(None, run_subtitles)
+            if not subtitle_success:
+                raise HTTPException(status_code=400, detail="No words found for this clip range.")
+            current_path = subtitle_path
+            generated_paths.append(subtitle_path)
+
+        if apply_hook:
+            hook_filename = f"preview_hook_{request_token}_clip_{req.clip_index + 1}.mp4"
+            hook_path = os.path.join(output_dir, hook_filename)
+            size_map = {"S": 0.8, "M": 1.0, "L": 1.3}
+
+            def run_hook():
+                return add_hook_to_video(
+                    current_path,
+                    hook_settings["text"],
+                    hook_path,
+                    position=hook_settings.get("position", "top"),
+                    horizontal_position=hook_settings.get("horizontal_position", "center"),
+                    x_position=hook_settings.get("x_position"),
+                    y_position=hook_settings.get("y_position"),
+                    text_align=hook_settings.get("text_align", "center"),
+                    font_scale=size_map.get(hook_settings.get("size"), 1.0),
+                    width_preset=hook_settings.get("width_preset", "wide"),
+                    font_name=hook_settings.get("font_family"),
+                    background_style=hook_settings.get("background_style"),
+                )
+
+            await loop.run_in_executor(None, run_hook)
+            current_path = hook_path
+            generated_paths.append(hook_path)
+
+        if os.path.abspath(current_path) != os.path.abspath(final_preview_path):
+            if os.path.exists(final_preview_path):
+                os.remove(final_preview_path)
+            shutil.move(current_path, final_preview_path)
+
+        if not os.path.exists(final_preview_path):
+            raise HTTPException(status_code=500, detail="Preview output missing")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        for path in generated_paths:
+            if os.path.abspath(path) == os.path.abspath(final_preview_path):
+                continue
+            if os.path.exists(path):
+                os.remove(path)
+        if os.path.exists(temp_clip_path):
+            os.remove(temp_clip_path)
+
+    try:
+        preview_duration = _probe_video_duration(final_preview_path)
+    except Exception:
+        preview_duration = max(0.15, preview_source_end - preview_source_start)
+    preview_duration = max(0.15, preview_duration)
+
+    clip_data["display_duration"] = round(preview_duration, 3)
+    clip_data.pop("tight_edit_preset", None)
+    clip_data.pop("tight_edit_removed_ranges", None)
+
+    clip_data["source_video_filename"] = clip_data.get("source_video_filename") or os.path.basename(source_input_path)
+    clip_data["preview_video_filename"] = final_preview_filename
+    clip_data["preview_video_url"] = _clip_video_url(req.job_id, final_preview_filename)
+    clip_data["preview_start"] = 0.0
+    clip_data["preview_end"] = round(preview_duration, 3)
+    clip_data["preview_generated_at"] = time.time()
+    clip_data["preview_source_start"] = round(preview_source_start, 3)
+    clip_data["preview_source_end"] = round(preview_source_end, 3)
+    clip_data["preview_sample_seconds"] = round(preview_duration, 3)
+    clip_data["preview_interview_mode"] = bool(interview_mode)
+
+    if subtitle_settings:
+        clip_data["subtitle_settings"] = subtitle_settings
+    if hook_settings:
+        clip_data["hook_settings"] = hook_settings
+
+    if clip_data.get("status") in {"pending", "failed", "draft", None}:
+        clip_data["status"] = "draft"
+
+    data["shorts"][req.clip_index] = clip_data
+    _write_metadata(metadata_path, data)
+    _refresh_job_result(req.job_id)
+
+    audio_included = _video_has_audio(final_preview_path)
+
+    return {
+        "success": True,
+        "preview_video_url": clip_data["preview_video_url"],
+        "audio_included": audio_included,
+        "preview_sample_seconds": clip_data["preview_sample_seconds"],
+        "clip": clip_data,
+    }
+
+
+@app.post("/api/clip/render")
+async def render_clip(req: RenderClipRequest):
+    _get_job_record_or_404(req.job_id)
+    output_dir, metadata_path, data = _load_job_metadata_or_404(req.job_id)
+
+    clips = data.get("shorts", [])
+    if req.clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    clip_data = clips[req.clip_index]
+    clip_data["clip_index"] = req.clip_index
+
+    source_input_path = _resolve_clip_source_input_path(req.job_id, output_dir, clip_data)
+    if not source_input_path:
+        raise HTTPException(status_code=404, detail="Source input video for preview clip not found")
+
+    source_start = float(clip_data.get("start", clip_data.get("preview_start", 0.0)) or 0.0)
+    source_end = float(clip_data.get("end", clip_data.get("preview_end", source_start)) or source_start)
+    if source_end <= source_start:
+        raise HTTPException(status_code=400, detail="Invalid clip timestamps")
+
+    manifest = load_job_manifest(output_dir)
+    request_meta = manifest.get("request", {})
+    tight_edit_preset = _coerce_tight_edit_preset(req.tight_edit_preset or request_meta.get("tight_edit_preset"))
+    apply_tight_edit = req.apply_tight_edit if req.apply_tight_edit is not None else True
+    interview_mode = req.interview_mode if req.interview_mode is not None else bool(request_meta.get("interview_mode"))
+
+    subtitle_settings = _sanitize_subtitle_settings_dict(req.subtitle_settings, clip_data)
+    hook_settings = _sanitize_hook_settings_dict(req.hook_settings, clip_data)
+    apply_subtitles = bool(req.apply_subtitles) and bool(subtitle_settings)
+    apply_hook = bool(req.apply_hook) and bool(hook_settings)
+
+    transcript = data.get("transcript")
+    keep_segments = [(source_start, source_end)]
+    tight_edit_plan = None
+    if apply_tight_edit and transcript:
+        tight_edit_plan = build_tight_edit_plan(transcript, source_start, source_end, tight_edit_preset)
+        keep_segments = tight_edit_plan.get("keep_segments") or keep_segments
+
+    request_token = int(time.time() * 1000)
+    temp_clip_filename = f"temp_render_source_{request_token}_{req.clip_index + 1}.mp4"
+    temp_clip_path = os.path.join(output_dir, temp_clip_filename)
+    rendered_filename = f"rendered_{request_token}_clip_{req.clip_index + 1}.mp4"
+    rendered_path = os.path.join(output_dir, rendered_filename)
+
+    def run_render_pipeline():
+        render_keep_segments(
+            source_input_path,
+            keep_segments,
+            temp_clip_path,
+            ffmpeg_preset=os.environ.get("OVERLAY_FFMPEG_PRESET", "veryfast").strip() or "veryfast",
+            crf="18",
+            audio_bitrate="192k",
+            thread_args=ffmpeg_thread_args(),
+            subprocess_kwargs=subprocess_priority_kwargs(),
+        )
+        from main import process_video_to_vertical
+        return process_video_to_vertical(temp_clip_path, rendered_path, interview_mode=bool(interview_mode))
+
+    try:
+        loop = asyncio.get_event_loop()
+        success = await loop.run_in_executor(None, run_render_pipeline)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if os.path.exists(temp_clip_path):
+            os.remove(temp_clip_path)
+
+    if not success or not os.path.exists(rendered_path):
+        raise HTTPException(status_code=500, detail="Clip render failed")
+
+    if tight_edit_plan and tight_edit_plan.get("compacted"):
+        clip_data["display_duration"] = tight_edit_plan.get("output_duration", round(source_end - source_start, 3))
+        clip_data["tight_edit_preset"] = tight_edit_preset
+        clip_data["tight_edit_removed_ranges"] = [
+            {"start": round(range_start, 3), "end": round(range_end, 3)}
+            for range_start, range_end in tight_edit_plan.get("remove_ranges", [])
+        ]
+    else:
+        clip_data["display_duration"] = round(source_end - source_start, 3)
+        clip_data.pop("tight_edit_preset", None)
+        clip_data.pop("tight_edit_removed_ranges", None)
+
+    clip_data["source_video_filename"] = os.path.basename(source_input_path)
+    clip_data["preview_video_filename"] = os.path.basename(source_input_path)
+    clip_data["preview_start"] = round(source_start, 3)
+    clip_data["preview_end"] = round(source_end, 3)
+    if subtitle_settings:
+        clip_data["subtitle_settings"] = subtitle_settings
+    if hook_settings:
+        clip_data["hook_settings"] = hook_settings
+
+    if transcript and len(keep_segments) == 1:
+        active_transcript_source = "original"
+        active_transcript_start = round(keep_segments[0][0], 3)
+        active_transcript_end = round(keep_segments[0][1], 3)
+    else:
+        active_transcript_source = "audio"
+        active_transcript_start = None
+        active_transcript_end = None
+
+    _append_clip_version(
+        req.job_id,
+        output_dir,
+        clip_data,
+        output_filename=rendered_filename,
+        operation="render",
+        label="Rendered",
+        transcript_source=active_transcript_source,
+        transcript_start=active_transcript_start,
+        transcript_end=active_transcript_end,
+        subtitle_settings=subtitle_settings if subtitle_settings else _METADATA_UNSET,
+        hook_settings=hook_settings if hook_settings else _METADATA_UNSET,
+    )
+
+    current_path = rendered_path
+    current_filename = rendered_filename
+
+    if apply_subtitles:
+        subtitle_filename = f"subtitled_{int(time.time() * 1000)}_{current_filename}"
+        subtitle_path = os.path.join(output_dir, subtitle_filename)
+        if active_transcript_source == "audio" or not transcript:
+            subtitle_transcript = transcribe_audio(current_path)
+            subtitle_clip_start = 0.0
+            subtitle_clip_end = _probe_video_duration(current_path)
+            active_transcript_source = "audio"
+            active_transcript_start = None
+            active_transcript_end = None
+        else:
+            subtitle_transcript = transcript
+            subtitle_clip_start = float(active_transcript_start or source_start)
+            subtitle_clip_end = float(active_transcript_end or source_end)
+
+        def run_subtitles():
+            return burn_subtitles(
+                current_path,
+                subtitle_transcript,
+                subtitle_clip_start,
+                subtitle_clip_end,
+                subtitle_path,
+                alignment=subtitle_settings.get("position", "bottom"),
+                y_position=subtitle_settings.get("y_position"),
+                fontsize=subtitle_settings.get("font_size", 16),
+                font_family=subtitle_settings.get("font_family"),
+                background_style=subtitle_settings.get("background_style"),
+            )
+
+        loop = asyncio.get_event_loop()
+        subtitle_success = await loop.run_in_executor(None, run_subtitles)
+        if not subtitle_success:
+            raise HTTPException(status_code=400, detail="No words found for this clip range.")
+
+        _append_clip_version(
+            req.job_id,
+            output_dir,
+            clip_data,
+            output_filename=subtitle_filename,
+            operation="subtitle",
+            label="Subtitles",
+            transcript_source=active_transcript_source,
+            transcript_start=active_transcript_start,
+            transcript_end=active_transcript_end,
+            subtitle_settings=subtitle_settings,
+        )
+        current_path = subtitle_path
+        current_filename = subtitle_filename
+
+    if apply_hook:
+        hook_filename = f"hook_{int(time.time() * 1000)}_{current_filename}"
+        hook_path = os.path.join(output_dir, hook_filename)
+        size_map = {"S": 0.8, "M": 1.0, "L": 1.3}
+
+        def run_hook():
+            return add_hook_to_video(
+                current_path,
+                hook_settings["text"],
+                hook_path,
+                position=hook_settings.get("position", "top"),
+                horizontal_position=hook_settings.get("horizontal_position", "center"),
+                x_position=hook_settings.get("x_position"),
+                y_position=hook_settings.get("y_position"),
+                text_align=hook_settings.get("text_align", "center"),
+                font_scale=size_map.get(hook_settings.get("size"), 1.0),
+                width_preset=hook_settings.get("width_preset", "wide"),
+                font_name=hook_settings.get("font_family"),
+                background_style=hook_settings.get("background_style"),
+            )
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, run_hook)
+
+        _append_clip_version(
+            req.job_id,
+            output_dir,
+            clip_data,
+            output_filename=hook_filename,
+            operation="hook",
+            label="Hook",
+            transcript_source=active_transcript_source,
+            transcript_start=active_transcript_start,
+            transcript_end=active_transcript_end,
+            hook_settings=hook_settings,
+        )
+
+    clip_data["status"] = "completed"
+    clip_data.pop("error", None)
+    data["shorts"][req.clip_index] = clip_data
+    _write_metadata(metadata_path, data)
+    _refresh_job_result(req.job_id)
+
+    return {
+        "success": True,
+        "new_video_url": clip_data.get("video_url"),
+        "clip": clip_data,
+    }
+
 class TranslateRequest(BaseModel):
     job_id: str
     clip_index: int
@@ -1911,6 +3059,7 @@ class SocialPostRequest(BaseModel):
     # Optional overrides if frontend wants to edit them
     title: Optional[str] = None
     description: Optional[str] = None
+    first_comment: Optional[str] = None
     scheduled_date: Optional[str] = None # ISO-8601 string
     timezone: Optional[str] = "UTC"
     instagram_share_mode: Optional[str] = "CUSTOM"
@@ -1923,6 +3072,23 @@ import httpx
 
 UPLOAD_POST_AUTH_SCHEMES = ("ApiKey", "Apikey")
 SOCIAL_PLATFORM_CANONICAL = {
+    "yt": "youtube",
+    "youtube": "youtube",
+    "tt": "tiktok",
+    "tik_tok": "tiktok",
+    "tiktok": "tiktok",
+    "ig": "instagram",
+    "insta": "instagram",
+    "instagram": "instagram",
+    "fb": "facebook",
+    "meta": "facebook",
+    "facebook": "facebook",
+    "twitter": "x",
+    "x": "x",
+    "thread": "threads",
+    "threads": "threads",
+    "pin": "pinterest",
+    "pinterest": "pinterest",
 }
 UPLOAD_POST_STATUS_URL = "https://api.upload-post.com/api/uploadposts/status"
 UPLOAD_POST_AUDIO_LANGUAGE_MAP = {
@@ -2153,12 +3319,38 @@ def _normalize_upload_post_response(
         "raw": payload,
     }
 
+
+def _persist_social_post_status_to_clip(job_id: str, clip_index: int, status_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    try:
+        output_dir, metadata_path, data = _load_job_metadata_or_404(job_id)
+        clips = data.get("shorts", [])
+        if clip_index < 0 or clip_index >= len(clips):
+            return None
+
+        clip_data = clips[clip_index]
+        clip_data["clip_index"] = clip_index
+
+        stored_payload = dict(status_payload or {})
+        stored_payload["clip_index"] = clip_index
+        stored_payload["openshorts_job_id"] = job_id
+        stored_payload["updated_at"] = time.time()
+        clip_data["social_post_status"] = stored_payload
+
+        clips[clip_index] = clip_data
+        data["shorts"] = clips
+        _write_metadata(metadata_path, data)
+        _refresh_job_result(job_id)
+        return clip_data
+    except Exception as e:
+        print(f"⚠️ Failed to persist social post status for {job_id}#{clip_index}: {e}")
+        return None
+
 @app.post("/api/social/post")
 async def post_to_socials(req: SocialPostRequest):
     _, result, _ = _get_job_result_or_400(req.job_id)
         
     try:
-        _, _, metadata = _load_job_metadata_or_404(req.job_id)
+        _, _, metadata_data = _load_job_metadata_or_404(req.job_id)
         clip = _find_result_clip(result, req.clip_index)
         # Video URL is relative /videos/..., we need absolute file path
         # clip['video_url'] is like "/videos/{job_id}/{filename}"
@@ -2175,9 +3367,10 @@ async def post_to_socials(req: SocialPostRequest):
         # Fallbacks
         final_title = req.title or clip.get('video_title_for_youtube_short') or clip.get('title', 'Viral Short')
         final_description = req.description or clip.get('video_description_for_instagram') or clip.get('video_description_for_tiktok') or "Check this out!"
+        first_comment = (req.first_comment or "").strip()
         transcript_language = (
-            metadata.get("transcript", {}).get("language")
-            or metadata.get("language")
+            metadata_data.get("transcript", {}).get("language")
+            or metadata_data.get("language")
             or clip.get("language")
         )
         requested_platforms = _normalize_social_platforms(req.platforms)
@@ -2193,6 +3386,8 @@ async def post_to_socials(req: SocialPostRequest):
             "platform[]": requested_platforms,
             "async_upload": "true"  # Enable async upload
         }
+        if first_comment:
+            data_payload["first_comment"] = first_comment
 
         # Add scheduling if present
         if req.scheduled_date:
@@ -2217,6 +3412,8 @@ async def post_to_socials(req: SocialPostRequest):
              data_payload["youtube_description"] = final_description
              data_payload["privacyStatus"] = "public"
              data_payload.update(_resolve_upload_post_language_fields(transcript_language))
+             if first_comment:
+                 data_payload["youtube_first_comment"] = first_comment
 
         if "facebook" in requested_platform_set:
              data_payload["facebook_title"] = final_title
@@ -2224,18 +3421,27 @@ async def post_to_socials(req: SocialPostRequest):
              data_payload["facebook_media_type"] = "REELS"
              if req.facebook_page_id:
                  data_payload["facebook_page_id"] = req.facebook_page_id
+             if first_comment:
+                 data_payload["facebook_first_comment"] = first_comment
 
         if "x" in requested_platform_set:
              data_payload["x_title"] = final_description
+             if first_comment:
+                 data_payload["x_first_comment"] = first_comment
 
         if "threads" in requested_platform_set:
              data_payload["threads_title"] = final_description
+             if first_comment:
+                 data_payload["threads_first_comment"] = first_comment
 
         if "pinterest" in requested_platform_set:
              data_payload["pinterest_title"] = final_title
              data_payload["pinterest_description"] = final_description
              if req.pinterest_board_id:
                  data_payload["pinterest_board_id"] = req.pinterest_board_id
+
+        if "instagram" in requested_platform_set and first_comment:
+             data_payload["instagram_first_comment"] = first_comment
 
         # Send File
         # httpx AsyncClient requires async file reading or bytes. 
@@ -2257,11 +3463,18 @@ async def post_to_socials(req: SocialPostRequest):
              raise HTTPException(status_code=response.status_code, detail=f"Vendor API Error: {response.text}")
 
         vendor_payload = response.json()
-        return _normalize_upload_post_response(
+        normalized = _normalize_upload_post_response(
             vendor_payload if isinstance(vendor_payload, dict) else {"success": True, "results": vendor_payload},
             requested_platforms=requested_platforms,
             is_scheduled=bool(req.scheduled_date),
         )
+        normalized["clip_index"] = req.clip_index
+
+        persisted_clip = _persist_social_post_status_to_clip(req.job_id, req.clip_index, normalized)
+        if persisted_clip:
+            normalized["clip"] = persisted_clip
+
+        return normalized
 
     except HTTPException:
         raise
@@ -2277,6 +3490,8 @@ async def get_social_post_status(
     vendor_job_id: Optional[str] = None,
     platforms: Optional[str] = None,
     scheduled: bool = False,
+    job_id: Optional[str] = None,
+    clip_index: Optional[int] = None,
 ):
     if not request_id and not vendor_job_id:
         raise HTTPException(status_code=400, detail="Missing request_id or vendor_job_id")
@@ -2297,11 +3512,19 @@ async def get_social_post_status(
 
     payload = resp.json()
     normalized_payload = payload if isinstance(payload, dict) else {"success": True, "results": payload}
-    return _normalize_upload_post_response(
+    normalized = _normalize_upload_post_response(
         normalized_payload,
         requested_platforms=requested_platforms,
         is_scheduled=scheduled,
     )
+    if job_id is not None and clip_index is not None:
+        normalized["clip_index"] = clip_index
+        normalized["openshorts_job_id"] = job_id
+        persisted_clip = _persist_social_post_status_to_clip(job_id, clip_index, normalized)
+        if persisted_clip:
+            normalized["clip"] = persisted_clip
+
+    return normalized
 
 @app.get("/api/social/user")
 async def get_social_user(api_key: str = Header(..., alias="X-Upload-Post-Key")):
@@ -2357,6 +3580,14 @@ async def get_social_user(api_key: str = Header(..., alias="X-Upload-Post-Key"))
             
         except HTTPException:
              raise
+        except httpx.RequestError as e:
+             message = f"Upload-Post is currently unreachable (network/DNS issue): {e}"
+             print(f"⚠️ {message}")
+             return {
+                 "profiles": [],
+                 "error": message,
+                 "recoverable": True,
+             }
         except Exception as e:
              raise HTTPException(status_code=500, detail=str(e))
 
