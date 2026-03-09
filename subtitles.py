@@ -1,6 +1,8 @@
 import os
+import re
 import subprocess
 import tempfile
+from typing import Any, Dict, List, Tuple
 
 from overlay_styles import (
     DEFAULT_BACKGROUND_STYLE,
@@ -25,20 +27,64 @@ LEGACY_SUBTITLE_Y_POSITIONS = {
 }
 
 
-def transcribe_audio(video_path):
-    """
-    Transcribe audio from a video file using faster-whisper.
-    Returns transcript in the same format as main.py for compatibility.
-    """
-    print(f"🎙️  Transcribing audio from: {video_path}")
-    segments, info, runtime_meta = transcribe_with_runtime(video_path, word_timestamps=True)
-    print(
-        "🎙️  Whisper runtime: "
-        f"{runtime_meta.get('model')} on {runtime_meta.get('device')} ({runtime_meta.get('compute_type')}), "
-        f"beam={runtime_meta.get('beam_size')}, vad={runtime_meta.get('vad_filter')}, "
-        f"lang={runtime_meta.get('requested_language', 'auto')}"
-    )
+def _normalize_language_code(value: Any) -> str:
+    if value is None:
+        return ""
+    normalized = str(value).strip().lower().replace("_", "-")
+    if not normalized or normalized == "auto":
+        return ""
+    return normalized.split("-")[0]
 
+
+def _language_candidates(preferred_language: Any) -> List[str]:
+    preferred = _normalize_language_code(preferred_language)
+    raw_candidates = os.environ.get("SUBTITLE_LANGUAGE_CANDIDATES", "de,en")
+    configured = [
+        _normalize_language_code(item)
+        for item in raw_candidates.split(",")
+        if _normalize_language_code(item)
+    ]
+    if not configured:
+        configured = ["de", "en"]
+
+    candidates: List[str] = []
+    seen = set()
+    if preferred and preferred != "en":
+        candidates.append(preferred)
+        seen.add(preferred)
+
+    # If hint is empty or potentially wrong ("en" on German audio), keep configured order.
+    if not preferred or preferred == "en":
+        for candidate in configured:
+            if candidate not in seen:
+                candidates.append(candidate)
+                seen.add(candidate)
+        if preferred and preferred not in seen:
+            candidates.append(preferred)
+            seen.add(preferred)
+    elif preferred and preferred not in seen:
+        candidates.append(preferred)
+        seen.add(preferred)
+
+    if not candidates:
+        candidates = configured[:]
+    return candidates[:3]
+
+
+def _avg_logprob(segments: List[Any]) -> float:
+    values = []
+    for segment in segments:
+        try:
+            value = float(getattr(segment, "avg_logprob"))
+            values.append(value)
+        except Exception:
+            continue
+    if not values:
+        return -9.0
+    return sum(values) / len(values)
+
+
+def _transcript_payload(segments: List[Any], info: Any) -> Dict[str, Any]:
     transcript = {
         "segments": [],
         "language": info.language,
@@ -59,9 +105,125 @@ def transcribe_audio(video_path):
                     "end": word.end,
                 })
         transcript["segments"].append(seg_data)
-
-    print(f"✅ Transcription complete. Language: {info.language}")
     return transcript
+
+
+def _language_lexical_score(transcript: Dict[str, Any], language_code: str) -> float:
+    lang = _normalize_language_code(language_code)
+    if not lang:
+        return 0.0
+    text = " ".join(
+        str((segment or {}).get("text") or "")
+        for segment in (transcript.get("segments") or [])
+        if isinstance(segment, dict)
+    ).lower()
+    if not text:
+        return 0.0
+
+    tokens = re.findall(r"[a-zA-ZäöüÄÖÜß]+", text)
+    if not tokens:
+        return 0.0
+
+    marker_map = {
+        "de": {
+            "und", "ich", "nicht", "das", "die", "der", "du", "ist",
+            "es", "wir", "sie", "ein", "zu", "mit", "dass", "aber",
+            "wie", "auch", "wenn", "auf", "den", "dem", "im", "für", "fuer",
+        },
+        "en": {
+            "the", "and", "you", "that", "is", "to", "of", "it",
+            "in", "for", "on", "with", "this", "are", "be", "your",
+            "from", "as", "have", "just",
+        },
+    }
+    markers = marker_map.get(lang)
+    if not markers:
+        return 0.0
+
+    hits = sum(1 for token in tokens if token in markers)
+    ratio = hits / max(1, len(tokens))
+    if lang == "de" and any(ch in text for ch in ("ä", "ö", "ü", "ß")):
+        ratio += 0.08
+    return ratio
+
+
+def transcribe_audio(video_path, preferred_language=None):
+    """
+    Transcribe audio from a video file using faster-whisper.
+    Returns transcript in the same format as main.py for compatibility.
+    """
+    print(f"🎙️  Transcribing audio from: {video_path}")
+    candidates = _language_candidates(preferred_language)
+    attempts: List[Tuple[float, Dict[str, Any], Dict[str, Any], Any, str, float, float]] = []
+
+    for language_candidate in candidates:
+        segments, info, runtime_meta = transcribe_with_runtime(
+            video_path,
+            word_timestamps=True,
+            language=language_candidate,
+        )
+        print(
+            "🎙️  Whisper runtime: "
+            f"{runtime_meta.get('model')} on {runtime_meta.get('device')} ({runtime_meta.get('compute_type')}), "
+            f"beam={runtime_meta.get('beam_size')}, vad={runtime_meta.get('vad_filter')}, "
+            f"lang={runtime_meta.get('requested_language', 'auto')}"
+        )
+
+        base_score = _avg_logprob(segments)
+        transcript_payload = _transcript_payload(segments, info)
+        detected_language = _normalize_language_code(getattr(info, "language", ""))
+        detected_probability = float(getattr(info, "language_probability", 0.0) or 0.0)
+        lexical_score = _language_lexical_score(transcript_payload, language_candidate)
+
+        quality_score = base_score + (lexical_score * 2.2)
+        if detected_language == _normalize_language_code(language_candidate):
+            quality_score += 0.12
+        if detected_language == "de" and _normalize_language_code(language_candidate) == "de":
+            quality_score += 0.08
+
+        attempts.append((
+            quality_score,
+            transcript_payload,
+            runtime_meta,
+            info,
+            _normalize_language_code(language_candidate),
+            detected_probability,
+            lexical_score,
+        ))
+        print(
+            f"🧪 Subtitle language probe: forced={language_candidate}, "
+            f"detected={getattr(info, 'language', 'unknown')} "
+            f"(p={float(getattr(info, 'language_probability', 0.0) or 0.0):.2f}), "
+            f"lexical={lexical_score:.3f}, score={quality_score:.3f}"
+        )
+
+    preferred = _normalize_language_code(preferred_language)
+    if preferred in {"", "en"}:
+        german_candidates = [
+            item for item in attempts
+            if item[4] == "de" and _normalize_language_code(getattr(item[3], "language", "")) == "de"
+        ]
+        if german_candidates:
+            confident_german = [
+                item for item in german_candidates
+                if item[5] >= 0.55 or item[6] >= 0.055
+            ]
+            if confident_german:
+                best_score, best_transcript, _, best_info, _, _, _ = max(confident_german, key=lambda item: item[0])
+                print("🗣️ Subtitle language selector: forcing best German probe due uncertain EN hint.")
+            else:
+                best_score, best_transcript, _, best_info, _, _, _ = max(attempts, key=lambda item: item[0])
+        else:
+            best_score, best_transcript, _, best_info, _, _, _ = max(attempts, key=lambda item: item[0])
+    else:
+        best_score, best_transcript, _, best_info, _, _, _ = max(attempts, key=lambda item: item[0])
+
+    print(
+        "✅ Transcription complete. "
+        f"Language: {best_transcript.get('language')} "
+        f"(score={best_score:.3f}, p={float(getattr(best_info, 'language_probability', 0.0) or 0.0):.2f})"
+    )
+    return best_transcript
 
 
 def build_subtitle_blocks(transcript, clip_start, clip_end, max_chars=20, max_duration=2.0):

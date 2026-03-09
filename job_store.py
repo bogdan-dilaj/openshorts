@@ -95,6 +95,29 @@ def _existing_video_url(output_dir: str, job_id: str, filename: str) -> Optional
     return None
 
 
+def _expand_preview_filename_candidates(filename: str) -> List[str]:
+    if not filename:
+        return []
+    base = os.path.basename(filename)
+    stem, ext = os.path.splitext(base)
+    ext = ext.lower()
+
+    candidates = [base]
+    if ext in {".mkv", ".webm", ".avi", ".ts"}:
+        candidates.append(f"{stem}_working_h264.mp4")
+        candidates.append(f"{stem}.mp4")
+
+    deduped: List[str] = []
+    seen = set()
+    for candidate in candidates:
+        normalized = os.path.basename(candidate)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
 def _enrich_clip_versions(output_dir: str, job_id: str, clip: Dict[str, Any]) -> List[Dict[str, Any]]:
     versions: List[Dict[str, Any]] = []
     for index, raw_version in enumerate(clip.get("versions") or []):
@@ -175,14 +198,22 @@ def build_job_result(output_dir: str, job_id: str) -> Optional[Dict[str, Any]]:
                 continue
 
             source_filename = (
-                clip_copy.get("source_video_filename")
-                or clip_copy.get("preview_video_filename")
+                clip_copy.get("preview_video_filename")
+                or clip_copy.get("source_video_filename")
                 or os.path.basename(manifest.get("pipeline", {}).get("input_video") or "")
+                or os.path.basename(manifest.get("pipeline", {}).get("source_input_video") or "")
             )
-            preview_url = _existing_video_url(output_dir, job_id, source_filename)
+            preview_url = None
+            resolved_preview_filename = ""
+            for candidate in _expand_preview_filename_candidates(source_filename):
+                maybe_url = _existing_video_url(output_dir, job_id, candidate)
+                if maybe_url:
+                    preview_url = maybe_url
+                    resolved_preview_filename = candidate
+                    break
             if preview_url:
                 clip_copy["clip_index"] = i
-                clip_copy["preview_video_filename"] = source_filename
+                clip_copy["preview_video_filename"] = resolved_preview_filename or source_filename
                 clip_copy["preview_video_url"] = preview_url
                 clip_copy["status"] = status or "draft"
                 ready_clips.append(clip_copy)

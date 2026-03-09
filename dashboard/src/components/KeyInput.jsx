@@ -32,7 +32,7 @@ export default function KeyInput({ provider, onKeySet, savedKey, ollamaBaseUrl, 
                 <div className="p-2 bg-accent/20 rounded-lg text-accent">
                     <Key size={20} />
                 </div>
-                <h2 className="text-lg font-semibold">{provider === 'gemini' ? 'Gemini API Key' : 'Ollama Configuration'}</h2>
+                <h2 className="text-lg font-semibold">{provider === 'gemini' ? 'Gemini API-Key' : 'Ollama-Konfiguration'}</h2>
             </div>
 
             {provider === 'gemini' ? (
@@ -63,7 +63,7 @@ export default function KeyInput({ provider, onKeySet, savedKey, ollamaBaseUrl, 
                             : 'bg-primary hover:bg-blue-600 text-white shadow-lg shadow-primary/20'
                             }`}
                     >
-                        {isSaved ? <><Check size={18} /> Ready</> : 'Set Key'}
+                        {isSaved ? <><Check size={18} /> Bereit</> : 'Key setzen'}
                     </button>
                 </div>
             ) : (
@@ -97,7 +97,7 @@ export default function KeyInput({ provider, onKeySet, savedKey, ollamaBaseUrl, 
                                 : 'bg-primary hover:bg-blue-600 text-white shadow-lg shadow-primary/20'
                                 }`}
                         >
-                            {isSaved ? <><Check size={18} /> Ready</> : 'Save'}
+                            {isSaved ? <><Check size={18} /> Bereit</> : 'Speichern'}
                         </button>
                     </div>
                 </div>
@@ -105,7 +105,7 @@ export default function KeyInput({ provider, onKeySet, savedKey, ollamaBaseUrl, 
             <p className="mt-3 text-xs text-zinc-500">
                 {provider === 'gemini' ? (
                     <>
-                        Your key is stored locally in your browser for convenience.
+                        Dein Key wird zur Bequemlichkeit lokal im Browser gespeichert.
                         <br />
                         <a
                             href="https://aistudio.google.com/app/apikey"
@@ -113,15 +113,15 @@ export default function KeyInput({ provider, onKeySet, savedKey, ollamaBaseUrl, 
                             rel="noopener noreferrer"
                             className="text-primary hover:underline mt-1 inline-block"
                         >
-                            Get your free Gemini API Key here →
+                            Kostenlosen Gemini API Key holen →
                         </a>
                     </>
                 ) : (
                     <>
-                        Base URL and model are stored locally in your browser.
+                        Base-URL und Modell werden lokal im Browser gespeichert.
                         <br />
-                        The backend now runs on the host network, so local Ollama should usually be `http://127.0.0.1:11434`.
-                        Use the exact tag from `ollama list`, for example `gemma3:12b`.
+                        Das Backend läuft im Host-Netzwerk, daher ist lokales Ollama meist `http://127.0.0.1:11434`.
+                        Verwende den exakten Tag aus `ollama list`, z.B. `gemma3:12b`.
                     </>
                 )}
             </p>

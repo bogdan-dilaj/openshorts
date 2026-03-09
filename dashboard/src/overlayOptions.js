@@ -11,29 +11,29 @@ export const FONT_OPTIONS = [
 ];
 
 export const BACKGROUND_OPTIONS = [
-  { value: 'dark-box', label: 'Dark Box' },
-  { value: 'light-box', label: 'Light Box' },
-  { value: 'yellow-box', label: 'Yellow Box' },
+  { value: 'dark-box', label: 'Dunkle Box' },
+  { value: 'light-box', label: 'Helle Box' },
+  { value: 'yellow-box', label: 'Gelbe Box' },
   { value: 'transparent', label: 'Transparent' },
 ];
 
 export const HOOK_WIDTH_OPTIONS = [
-  { value: 'full', label: 'Full Width' },
-  { value: 'wide', label: 'Wide' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'narrow', label: 'Narrow' },
+  { value: 'full', label: 'Volle Breite' },
+  { value: 'wide', label: 'Breit' },
+  { value: 'medium', label: 'Mittel' },
+  { value: 'narrow', label: 'Schmal' },
 ];
 
 export const GRID_OPTIONS = [
-  { value: 'top-left', label: 'Top Left' },
-  { value: 'top-center', label: 'Top Center' },
-  { value: 'top-right', label: 'Top Right' },
-  { value: 'center-left', label: 'Center Left' },
-  { value: 'center', label: 'Center' },
-  { value: 'center-right', label: 'Center Right' },
-  { value: 'bottom-left', label: 'Bottom Left' },
-  { value: 'bottom-center', label: 'Bottom Center' },
-  { value: 'bottom-right', label: 'Bottom Right' },
+  { value: 'top-left', label: 'Oben Links' },
+  { value: 'top-center', label: 'Oben Mitte' },
+  { value: 'top-right', label: 'Oben Rechts' },
+  { value: 'center-left', label: 'Mitte Links' },
+  { value: 'center', label: 'Mitte' },
+  { value: 'center-right', label: 'Mitte Rechts' },
+  { value: 'bottom-left', label: 'Unten Links' },
+  { value: 'bottom-center', label: 'Unten Mitte' },
+  { value: 'bottom-right', label: 'Unten Rechts' },
 ];
 
 export const DEFAULT_SUBTITLE_STYLE = {

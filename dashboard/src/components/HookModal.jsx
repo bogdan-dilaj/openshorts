@@ -3,8 +3,8 @@ import { createPortal } from 'react-dom';
 import { X, Sparkles, Loader2, Maximize, MoveVertical, MoveHorizontal, Columns3, AlignLeft, AlignCenter, AlignRight } from 'lucide-react';
 import { BACKGROUND_OPTIONS, DEFAULT_HOOK_STYLE, FONT_OPTIONS, GRID_OPTIONS, HOOK_WIDTH_OPTIONS } from '../overlayOptions';
 
-export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, videoUrl, initialText, defaultSettings = DEFAULT_HOOK_STYLE }) {
-    const [text, setText] = useState(initialText || 'POV: You are using the viral hook feature');
+export default function HookModal({ isOpen, onClose, onGenerate, onApplyAsJobDefault, isProcessing, videoUrl, initialText, defaultSettings = DEFAULT_HOOK_STYLE }) {
+    const [text, setText] = useState(initialText || 'POV: Das darfst du nicht verpassen');
     const [size, setSize] = useState(defaultSettings.size || 'M'); // S, M, L
     const [widthPreset, setWidthPreset] = useState(defaultSettings.widthPreset || 'wide');
     const [fontFamily, setFontFamily] = useState(defaultSettings.fontFamily || DEFAULT_HOOK_STYLE.fontFamily);
@@ -30,7 +30,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
 
     useEffect(() => {
         if (!isOpen) return;
-        setText(initialText || 'POV: You are using the viral hook feature');
+        setText(initialText || 'POV: Das darfst du nicht verpassen');
         setSize(defaultSettings.size || 'M');
         setWidthPreset(defaultSettings.widthPreset || 'wide');
         setFontFamily(defaultSettings.fontFamily || DEFAULT_HOOK_STYLE.fontFamily);
@@ -123,7 +123,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                 {/* Left: Preview */}
                 <div
                     ref={previewFrameRef}
-                    className="w-full max-w-[420px] mx-auto md:mx-0 md:max-w-none md:flex-1 flex flex-col items-center justify-center bg-black rounded-lg border border-white/5 overflow-hidden relative aspect-[9/16] md:aspect-[9/16]"
+                    className="relative w-full flex-none aspect-[9/16] overflow-hidden rounded-lg border border-white/5 bg-black md:flex-1 md:min-h-0"
                 >
                     <video src={videoUrl} className="w-full h-full object-contain opacity-50" muted playsInline />
 
@@ -152,18 +152,18 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                                 textAlign,
                             }}
                         >
-                            {text || "Enter your text..."}
+                            {text || "Text hier eingeben..."}
                         </div>
                     </div>
                 </div>
 
                 {/* Right: Controls */}
-                <div className="w-full md:w-80 flex flex-col min-h-0">
+                <div className="w-full md:w-80 flex flex-col md:min-h-0">
                     <h3 className="text-lg md:text-xl font-bold text-white mb-4 md:mb-6 flex items-center gap-2">
-                        <Sparkles className="text-yellow-400" /> Viral Hook
+                        <Sparkles className="text-yellow-400" /> Viraler Hook
                     </h3>
 
-                    <div className="space-y-4 md:space-y-6 flex-1 overflow-y-auto custom-scrollbar touch-scroll pr-1 md:pr-2">
+                    <div className="space-y-4 md:space-y-6 md:flex-1 md:overflow-y-auto custom-scrollbar touch-scroll pr-1 md:pr-2">
                         {/* Text Input */}
                         <div>
                             <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Text</label>
@@ -172,13 +172,13 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                                 onChange={(e) => setText(e.target.value)}
                                 rows={4}
                                 className="w-full bg-black/40 border border-white/10 rounded-lg md:rounded-xl p-2.5 md:p-3 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-yellow-500/50 resize-none font-serif"
-                                placeholder={"Enter text that will stop the scroll...\nUse line breaks if you want manual wrapping."}
+                                placeholder={"Text eingeben, der den Scroll stoppt...\nZeilenumbrüche für manuelles Wrapping möglich."}
                             />
                         </div>
 
                         <div>
                             <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 flex items-center gap-2">
-                                <Columns3 size={12} /> Quick Presets
+                                <Columns3 size={12} /> Schnell-Presets
                             </label>
                             <div className="grid grid-cols-3 gap-2">
                                 {GRID_OPTIONS.map((option) => (
@@ -203,7 +203,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
 
                         <div>
                             <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 flex items-center gap-2">
-                                <MoveHorizontal size={12} /> X Position
+                                <MoveHorizontal size={12} /> X-Position
                             </label>
                             <input
                                 type="range"
@@ -215,15 +215,15 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                                 className="w-full accent-yellow-500"
                             />
                             <div className="mt-2 flex justify-between text-[11px] text-zinc-500">
-                                <span>Left</span>
+                                <span>Links</span>
                                 <span>{xPosition}%</span>
-                                <span>Right</span>
+                                <span>Rechts</span>
                             </div>
                         </div>
 
                         <div>
                             <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 flex items-center gap-2">
-                                <MoveVertical size={12} /> Y Position
+                                <MoveVertical size={12} /> Y-Position
                             </label>
                             <input
                                 type="range"
@@ -235,19 +235,19 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                                 className="w-full accent-yellow-500"
                             />
                             <div className="mt-2 flex justify-between text-[11px] text-zinc-500">
-                                <span>Top</span>
+                                <span>Oben</span>
                                 <span>{yPosition}%</span>
-                                <span>Bottom</span>
+                                <span>Unten</span>
                             </div>
                         </div>
 
                         <div>
-                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Text Align</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Textausrichtung</label>
                             <div className="grid grid-cols-3 gap-2">
                                 {[
-                                    { value: 'left', label: 'Left', icon: AlignLeft },
-                                    { value: 'center', label: 'Center', icon: AlignCenter },
-                                    { value: 'right', label: 'Right', icon: AlignRight },
+                                    { value: 'left', label: 'Links', icon: AlignLeft },
+                                    { value: 'center', label: 'Mitte', icon: AlignCenter },
+                                    { value: 'right', label: 'Rechts', icon: AlignRight },
                                 ].map((option) => {
                                     const Icon = option.icon;
                                     return (
@@ -270,7 +270,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                         {/* Size Control */}
                         <div>
                             <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 flex items-center gap-2">
-                                <Maximize size={12} /> Size
+                                <Maximize size={12} /> Größe
                             </label>
                             <div className="grid grid-cols-3 gap-2">
                                 {['S', 'M', 'L'].map((sz) => (
@@ -282,14 +282,14 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                                             : 'bg-white/5 text-zinc-400 border-white/5 hover:bg-white/10'
                                             }`}
                                     >
-                                        {sz === 'S' ? 'Small' : sz === 'M' ? 'Medium' : 'Large'}
+                                        {sz === 'S' ? 'Klein' : sz === 'M' ? 'Mittel' : 'Groß'}
                                     </button>
                                 ))}
                             </div>
                         </div>
 
                         <div>
-                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Width</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Breite</label>
                             <div className="grid grid-cols-2 gap-2">
                                 {HOOK_WIDTH_OPTIONS.map((option) => (
                                     <button
@@ -307,7 +307,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                         </div>
 
                         <div>
-                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Font</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Schriftart</label>
                             <select
                                 value={fontFamily}
                                 onChange={(e) => setFontFamily(e.target.value)}
@@ -320,7 +320,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                         </div>
 
                         <div>
-                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Background</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Hintergrund</label>
                             <select
                                 value={backgroundStyle}
                                 onChange={(e) => setBackgroundStyle(e.target.value)}
@@ -333,17 +333,27 @@ export default function HookModal({ isOpen, onClose, onGenerate, isProcessing, v
                         </div>
 
                         <div className="p-2.5 md:p-3 bg-white/5 rounded-lg border border-white/5 text-[11px] text-zinc-400">
-                            <strong>Tip:</strong> Keep it short and punchy. Using "POV:" or specific questions works best for retention.
+                            <strong>Tipp:</strong> Kurz und prägnant halten. "POV:" oder konkrete Fragen funktionieren meist am besten.
                         </div>
                     </div>
+
+                    {onApplyAsJobDefault && (
+                        <button
+                            onClick={() => onApplyAsJobDefault({ text, xPosition, yPosition, textAlign, size, widthPreset, fontFamily, backgroundStyle })}
+                            disabled={isProcessing}
+                            className="w-full py-2.5 md:py-3 mt-3 border border-white/15 bg-white/5 hover:bg-white/10 text-zinc-100 text-sm font-semibold rounded-xl transition-all active:scale-[0.98]"
+                        >
+                            Für alle Clips im Job übernehmen
+                        </button>
+                    )}
 
                     <button
                         onClick={() => onGenerate({ text, xPosition, yPosition, textAlign, size, widthPreset, fontFamily, backgroundStyle })}
                         disabled={isProcessing || !text.trim()}
-                        className="w-full py-3 md:py-4 mt-3 md:mt-4 bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black text-sm md:text-base font-bold rounded-xl shadow-lg shadow-amber-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                        className="w-full py-3 md:py-4 mt-3 bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-400 hover:to-amber-500 text-black text-sm md:text-base font-bold rounded-xl shadow-lg shadow-amber-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
                     >
                         {isProcessing ? <Loader2 size={20} className="animate-spin" /> : <Sparkles size={20} />}
-                        {isProcessing ? 'Generating...' : 'Add Hook'}
+                        {isProcessing ? 'Generiere...' : 'Hook einbrennen'}
                     </button>
                 </div>
             </div>

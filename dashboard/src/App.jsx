@@ -7,8 +7,9 @@ import ProcessingAnimation from './components/ProcessingAnimation';
 // import Gallery from './components/Gallery';
 import ThumbnailStudio from './components/ThumbnailStudio';
 import JobHistory from './components/JobHistory';
+import SocialUploadStudio from './components/SocialUploadStudio';
 import { getApiUrl } from './config';
-import { BACKGROUND_OPTIONS, DEFAULT_HOOK_STYLE, DEFAULT_SUBTITLE_STYLE, FONT_OPTIONS } from './overlayOptions';
+import { BACKGROUND_OPTIONS, DEFAULT_HOOK_STYLE, DEFAULT_SUBTITLE_STYLE, FONT_OPTIONS, GRID_OPTIONS, HOOK_WIDTH_OPTIONS } from './overlayOptions';
 import { DEFAULT_SOCIAL_POST_SETTINGS, INSTAGRAM_SHARE_MODES, SOCIAL_PLATFORM_OPTIONS, TIKTOK_POST_MODES } from './socialOptions';
 
 // Enhanced "Encryption" using XOR + Base64 with a Salt
@@ -74,7 +75,7 @@ const UserProfileSelector = ({ profiles, selectedUserId, onSelect }) => {
           <div className="w-5 h-5 rounded-full bg-gradient-to-br from-primary to-purple-600 flex items-center justify-center text-[10px] font-bold text-white">
             {selectedProfile?.username?.substring(0, 1).toUpperCase() || "U"}
           </div>
-          <span className="font-medium text-white truncate max-w-[100px]">{selectedProfile?.username || "Select User"}</span>
+          <span className="font-medium text-white truncate max-w-[100px]">{selectedProfile?.username || "Profil wählen"}</span>
         </span>
         <ChevronDown size={14} className={`text-zinc-500 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
       </button>
@@ -126,7 +127,7 @@ const UserProfileSelector = ({ profiles, selectedUserId, onSelect }) => {
 // Mock polling function
 const pollJob = async (jobId) => {
   const res = await fetch(getApiUrl(`/api/status/${jobId}`));
-  if (!res.ok) throw new Error('Status check failed');
+  if (!res.ok) throw new Error('Statusprüfung fehlgeschlagen');
   return res.json();
 };
 
@@ -192,23 +193,23 @@ const normalizeOllamaModelName = (value) => {
 const TIGHT_EDIT_PRESET_OPTIONS = [
   {
     value: 'aggressive',
-    label: 'Aggressive',
-    description: 'Cuts pauses and filler words decisively. Best default for short-form.',
+    label: 'Aggressiv',
+    description: 'Schneidet Pausen und Füllwörter konsequent. Empfohlen für Short-Form.',
   },
   {
     value: 'balanced',
-    label: 'Balanced',
-    description: 'Less jumpy, keeps a little more breathing room.',
+    label: 'Ausgewogen',
+    description: 'Weniger sprunghaft, lässt etwas mehr Luft.',
   },
   {
     value: 'very_aggressive',
-    label: 'Very Aggressive',
-    description: 'Removes even more silence and filler. Use when you want maximum pace.',
+    label: 'Sehr aggressiv',
+    description: 'Entfernt noch mehr Stille und Füllwörter. Für maximales Tempo.',
   },
   {
     value: 'off',
-    label: 'Off',
-    description: 'Keeps the original speech rhythm.',
+    label: 'Aus',
+    description: 'Behält den originalen Sprachrhythmus.',
   },
 ];
 
@@ -223,10 +224,10 @@ const DEFAULT_YOUTUBE_AUTH_SETTINGS = {
 };
 
 const YOUTUBE_AUTH_MODE_OPTIONS = [
-  { value: 'auto', label: 'Auto (inline -> cookies.txt -> browser)' },
-  { value: 'cookies_file', label: 'cookies.txt file only' },
-  { value: 'cookies_text', label: 'Pasted cookies only' },
-  { value: 'browser', label: 'Browser profile only' },
+  { value: 'auto', label: 'Auto (inline -> cookies.txt -> Browser)' },
+  { value: 'cookies_file', label: 'Nur cookies.txt Datei' },
+  { value: 'cookies_text', label: 'Nur eingefügte Cookies' },
+  { value: 'browser', label: 'Nur Browser-Profil' },
 ];
 
 const YOUTUBE_BROWSER_OPTIONS = [
@@ -241,6 +242,231 @@ const YOUTUBE_BROWSER_OPTIONS = [
   { value: 'safari', label: 'Safari' },
 ];
 
+const SUBTITLE_POSITION_PRESETS = [
+  { value: 'top', label: 'Oben', y: 14 },
+  { value: 'middle', label: 'Mitte', y: 50 },
+  { value: 'bottom', label: 'Unten', y: 86 },
+];
+
+const HOOK_VERTICAL_PRESETS = {
+  top: 12,
+  center: 50,
+  bottom: 88,
+};
+
+const HOOK_HORIZONTAL_PRESETS = {
+  left: 18,
+  center: 50,
+  right: 82,
+};
+
+const HOOK_TEXT_ALIGN_OPTIONS = [
+  { value: 'left', label: 'Links' },
+  { value: 'center', label: 'Mitte' },
+  { value: 'right', label: 'Rechts' },
+];
+
+const HOOK_SIZE_OPTIONS = [
+  { value: 'S', label: 'Klein' },
+  { value: 'M', label: 'Mittel' },
+  { value: 'L', label: 'Groß' },
+];
+
+const clampPercent = (value, fallback = 50) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(100, Math.max(0, numeric));
+};
+
+const resolveSubtitlePositionFromY = (yPosition) => {
+  const y = clampPercent(yPosition, SUBTITLE_POSITION_PRESETS[2].y);
+  return SUBTITLE_POSITION_PRESETS.reduce((closest, preset) => (
+    Math.abs(preset.y - y) < Math.abs(closest.y - y) ? preset : closest
+  ), SUBTITLE_POSITION_PRESETS[2]).value;
+};
+
+const resolveHookGridToCoordinates = (gridValue) => {
+  if (!gridValue || gridValue === 'center') {
+    return {
+      x: HOOK_HORIZONTAL_PRESETS.center,
+      y: HOOK_VERTICAL_PRESETS.center,
+      position: 'center',
+      horizontalPosition: 'center',
+      textAlign: 'center',
+    };
+  }
+  const [verticalRaw, horizontalRaw = 'center'] = gridValue.split('-');
+  const vertical = HOOK_VERTICAL_PRESETS[verticalRaw] !== undefined ? verticalRaw : 'center';
+  const horizontal = HOOK_HORIZONTAL_PRESETS[horizontalRaw] !== undefined ? horizontalRaw : 'center';
+  return {
+    x: HOOK_HORIZONTAL_PRESETS[horizontal],
+    y: HOOK_VERTICAL_PRESETS[vertical],
+    position: vertical,
+    horizontalPosition: horizontal,
+    textAlign: horizontal,
+  };
+};
+
+const resolveHookGridFromCoordinates = (xPosition, yPosition) => {
+  const x = clampPercent(xPosition, HOOK_HORIZONTAL_PRESETS.center);
+  const y = clampPercent(yPosition, HOOK_VERTICAL_PRESETS.top);
+  const horizontal = x < 34 ? 'left' : x > 66 ? 'right' : 'center';
+  const vertical = y < 34 ? 'top' : y > 66 ? 'bottom' : 'center';
+  if (horizontal === 'center' && vertical === 'center') return 'center';
+  return `${vertical}-${horizontal}`;
+};
+
+const sanitizeOverlayProfileId = (value) => {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return normalized || '';
+};
+
+const clampFontSize = (value, fallback = DEFAULT_SUBTITLE_STYLE.fontSize) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(18, Math.min(44, Math.round(numeric)));
+};
+
+const normalizeSubtitleStyleConfig = (rawStyle = {}) => {
+  const normalizedPositionInput = String(rawStyle.position || '').toLowerCase();
+  const normalizedPosition = normalizedPositionInput === 'center' ? 'middle' : normalizedPositionInput;
+  const fallbackYFromPosition = SUBTITLE_POSITION_PRESETS.find((item) => item.value === normalizedPosition)?.y;
+  const yPosition = rawStyle.yPosition !== undefined && rawStyle.yPosition !== null
+    ? clampPercent(rawStyle.yPosition, DEFAULT_SUBTITLE_STYLE.yPosition)
+    : (fallbackYFromPosition ?? DEFAULT_SUBTITLE_STYLE.yPosition);
+  return {
+    ...DEFAULT_SUBTITLE_STYLE,
+    ...rawStyle,
+    position: resolveSubtitlePositionFromY(yPosition),
+    yPosition,
+    fontSize: clampFontSize(rawStyle.fontSize, DEFAULT_SUBTITLE_STYLE.fontSize),
+    fontFamily: rawStyle.fontFamily || DEFAULT_SUBTITLE_STYLE.fontFamily,
+    backgroundStyle: rawStyle.backgroundStyle || DEFAULT_SUBTITLE_STYLE.backgroundStyle,
+  };
+};
+
+const normalizeHookStyleConfig = (rawStyle = {}) => {
+  const rawHorizontal = String(rawStyle.horizontalPosition || '').toLowerCase();
+  const rawVertical = String(rawStyle.position || '').toLowerCase();
+  const derivedXFromHorizontal = HOOK_HORIZONTAL_PRESETS[rawHorizontal];
+  const derivedYFromVertical = HOOK_VERTICAL_PRESETS[rawVertical];
+  const xPosition = rawStyle.xPosition !== undefined && rawStyle.xPosition !== null
+    ? clampPercent(rawStyle.xPosition, DEFAULT_HOOK_STYLE.xPosition)
+    : clampPercent(derivedXFromHorizontal, DEFAULT_HOOK_STYLE.xPosition);
+  const yPosition = rawStyle.yPosition !== undefined && rawStyle.yPosition !== null
+    ? clampPercent(rawStyle.yPosition, DEFAULT_HOOK_STYLE.yPosition)
+    : clampPercent(derivedYFromVertical, DEFAULT_HOOK_STYLE.yPosition);
+  const horizontalPosition = ['left', 'center', 'right'].includes(rawHorizontal)
+    ? rawHorizontal
+    : (xPosition < 34 ? 'left' : xPosition > 66 ? 'right' : 'center');
+  const position = ['top', 'center', 'bottom'].includes(rawVertical)
+    ? rawVertical
+    : (yPosition < 34 ? 'top' : yPosition > 66 ? 'bottom' : 'center');
+  const widthValues = new Set(HOOK_WIDTH_OPTIONS.map((option) => option.value));
+  const textAlignInput = String(rawStyle.textAlign || '').toLowerCase();
+  const textAlign = ['left', 'center', 'right'].includes(textAlignInput)
+    ? textAlignInput
+    : horizontalPosition;
+  return {
+    ...DEFAULT_HOOK_STYLE,
+    ...rawStyle,
+    xPosition,
+    yPosition,
+    horizontalPosition,
+    position,
+    textAlign,
+    size: ['S', 'M', 'L'].includes(rawStyle.size) ? rawStyle.size : DEFAULT_HOOK_STYLE.size,
+    widthPreset: widthValues.has(rawStyle.widthPreset) ? rawStyle.widthPreset : DEFAULT_HOOK_STYLE.widthPreset,
+    fontFamily: rawStyle.fontFamily || DEFAULT_HOOK_STYLE.fontFamily,
+    backgroundStyle: rawStyle.backgroundStyle || DEFAULT_HOOK_STYLE.backgroundStyle,
+  };
+};
+
+const DEFAULT_OVERLAY_PROFILES = {
+  default: {
+    id: 'default',
+    name: 'Standard',
+    subtitleStyle: normalizeSubtitleStyleConfig({
+      ...DEFAULT_SUBTITLE_STYLE,
+      position: 'bottom',
+      yPosition: 72,
+    }),
+    hookStyle: normalizeHookStyleConfig({
+      ...DEFAULT_HOOK_STYLE,
+      position: 'top',
+      horizontalPosition: 'center',
+      xPosition: 50,
+      yPosition: 28,
+      textAlign: 'center',
+      size: 'M',
+      widthPreset: 'wide',
+    }),
+  },
+  interview: {
+    id: 'interview',
+    name: 'Interview',
+    subtitleStyle: normalizeSubtitleStyleConfig({
+      ...DEFAULT_SUBTITLE_STYLE,
+      position: 'middle',
+      yPosition: 50,
+    }),
+    hookStyle: normalizeHookStyleConfig({
+      ...DEFAULT_HOOK_STYLE,
+      position: 'top',
+      horizontalPosition: 'right',
+      xPosition: 82,
+      yPosition: 28,
+      textAlign: 'right',
+      size: 'M',
+      widthPreset: 'wide',
+    }),
+  },
+};
+
+const mergeOverlayProfilesWithDefaults = (profilesInput) => {
+  const merged = {
+    default: { ...DEFAULT_OVERLAY_PROFILES.default },
+    interview: { ...DEFAULT_OVERLAY_PROFILES.interview },
+  };
+  if (!profilesInput || typeof profilesInput !== 'object') {
+    return merged;
+  }
+  Object.entries(profilesInput).forEach(([rawId, rawProfile]) => {
+    if (!rawProfile || typeof rawProfile !== 'object') return;
+    const id = sanitizeOverlayProfileId(rawId);
+    if (!id) return;
+    const existing = merged[id];
+    merged[id] = {
+      id,
+      name: String(rawProfile.name || existing?.name || id).trim() || id,
+      subtitleStyle: normalizeSubtitleStyleConfig({
+        ...(existing?.subtitleStyle || {}),
+        ...(rawProfile.subtitleStyle || {}),
+      }),
+      hookStyle: normalizeHookStyleConfig({
+        ...(existing?.hookStyle || {}),
+        ...(rawProfile.hookStyle || {}),
+      }),
+    };
+  });
+  return merged;
+};
+
+const readStoredOverlayProfiles = () => {
+  try {
+    const raw = localStorage.getItem('overlay_profiles_v1');
+    if (!raw) return mergeOverlayProfilesWithDefaults({});
+    const parsed = JSON.parse(raw);
+    return mergeOverlayProfilesWithDefaults(parsed);
+  } catch (e) {
+    return mergeOverlayProfilesWithDefaults({});
+  }
+};
+
 const detectLikelyBrowser = () => {
   const ua = (navigator.userAgent || '').toLowerCase();
   if (ua.includes('edg/')) return 'edge';
@@ -251,6 +477,150 @@ const detectLikelyBrowser = () => {
   if (ua.includes('safari') && !ua.includes('chrome')) return 'safari';
   if (ua.includes('chrome')) return 'chrome';
   return 'auto';
+};
+
+const parseTqdmPercent = (line) => {
+  const match = line.match(/(\d{1,3}(?:\.\d+)?)%/);
+  if (!match) return null;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value)) return null;
+  return Math.max(0, Math.min(100, value));
+};
+
+const estimateMobileProcessingProgress = (logs, status, jobState, elapsedSeconds) => {
+  const normalizedJobState = String(jobState || '').toLowerCase();
+  if (status !== 'processing' || normalizedJobState === 'completed' || normalizedJobState === 'partial') {
+    return { percent: 100, title: 'Fertig', hint: 'Job abgeschlossen.' };
+  }
+  if (normalizedJobState === 'failed' || normalizedJobState === 'cancelled') {
+    return { percent: 100, title: 'Abgeschlossen', hint: 'Job wurde beendet.' };
+  }
+
+  const lines = (logs || []).map((line) => String(line || ''));
+  const lowered = lines.map((line) => line.toLowerCase());
+  const joined = lowered.join('\n');
+
+  if (
+    joined.includes('process finished successfully') ||
+    joined.includes('process cancelled.') ||
+    joined.includes('process failed with exit code') ||
+    joined.includes('execution error:') ||
+    joined.includes('process exited with code')
+  ) {
+    return { percent: 100, title: 'Fertig', hint: 'Job abgeschlossen.' };
+  }
+
+  const lastMatchingLine = (needle) => {
+    for (let i = lowered.length - 1; i >= 0; i -= 1) {
+      if (lowered[i].includes(needle)) return lines[i];
+    }
+    return '';
+  };
+
+  const lastChunkLine = (() => {
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      if (lines[i].includes('Ollama chunk')) return lines[i];
+    }
+    return '';
+  })();
+
+  let percent = 6;
+  let title = 'Job wird vorbereitet';
+  let hint = 'Bitte kurz gedulden.';
+
+  if (jobState === 'queued' || joined.includes('queued')) {
+    percent = Math.max(percent, 8);
+    title = 'In Warteschlange';
+    hint = 'Worker startet gleich.';
+  }
+
+  if (joined.includes('downloading video from youtube') || joined.includes('downloading with auth=')) {
+    percent = Math.max(percent, 14);
+    title = 'Video wird geladen';
+    hint = 'Quelle wird vorbereitet.';
+  }
+
+  if (joined.includes('transcribing video') || joined.includes('faster-whisper runtime ready')) {
+    percent = Math.max(percent, 28);
+    title = 'Transkription läuft';
+    hint = 'Sprache und Text werden analysiert.';
+  }
+
+  if (joined.includes('whisper decoding')) {
+    percent = Math.max(percent, 36);
+    title = 'Transkription läuft';
+    const decodeLine = lastMatchingLine('whisper decoding');
+    const audioMatch = decodeLine.match(/audio=(\d{2}):(\d{2})/);
+    if (audioMatch) {
+      hint = `Bereits verarbeitet: ${audioMatch[1]}:${audioMatch[2]} Audio`;
+    } else {
+      hint = 'Audio wird weiter dekodiert.';
+    }
+  }
+
+  if (joined.includes('analyzing with ollama') || joined.includes('analyzing with gemini') || joined.includes('analyzing with')) {
+    percent = Math.max(percent, 50);
+    title = 'KI analysiert virale Momente';
+    hint = 'Zeitstempel werden ausgewählt.';
+  }
+
+  if (lastChunkLine) {
+    const chunkMatch = lastChunkLine.match(/chunk\s+(\d+)\/(\d+)/i);
+    if (chunkMatch) {
+      const current = Number(chunkMatch[1]);
+      const total = Number(chunkMatch[2]);
+      if (Number.isFinite(current) && Number.isFinite(total) && total > 0) {
+        const chunkProgress = 50 + ((Math.max(1, current) - 1) / total) * 14;
+        percent = Math.max(percent, Math.min(64, chunkProgress));
+        title = 'KI analysiert virale Momente';
+        hint = `Analyse-Chunk ${current}/${total}`;
+      }
+    }
+  }
+
+  if (joined.includes('found') && joined.includes('viral clips')) {
+    percent = Math.max(percent, 68);
+    title = 'Clips gefunden';
+    hint = 'Rendering startet.';
+  }
+
+  if (joined.includes('processing clip') || joined.includes('step 1: detecting scenes') || joined.includes('step 1: processing interview layout')) {
+    percent = Math.max(percent, 74);
+    title = 'Clip wird gerendert';
+    hint = 'Szenen und Tracking werden verarbeitet.';
+  }
+
+  const frameLine = lastMatchingLine('processing:');
+  const framePercent = parseTqdmPercent(frameLine);
+  if (framePercent !== null) {
+    percent = Math.max(percent, Math.min(92, 78 + framePercent * 0.14));
+    title = 'Clip wird gerendert';
+    hint = `Frame-Verarbeitung ${Math.round(framePercent)}%`;
+  }
+
+  if (joined.includes('step 5: extracting audio')) {
+    percent = Math.max(percent, 93);
+    title = 'Audio wird finalisiert';
+    hint = 'Fast fertig.';
+  }
+
+  if (joined.includes('step 6: merging')) {
+    percent = Math.max(percent, 95);
+    title = 'Video wird zusammengeführt';
+    hint = 'Fast geschafft.';
+  }
+
+  if (joined.includes('clip saved') || joined.includes('total execution time')) {
+    percent = Math.max(percent, 97);
+    title = 'Finalisierung läuft';
+    hint = 'Ergebnisse werden geschrieben.';
+  }
+
+  const timeBasedFloor = Math.min(26, Math.floor((elapsedSeconds || 0) / 18));
+  percent = Math.max(percent, timeBasedFloor);
+  percent = Math.min(98, Math.max(4, Math.round(percent)));
+
+  return { percent, title, hint };
 };
 
 function App() {
@@ -289,13 +659,21 @@ function App() {
   const [logs, setLogs] = useState([]);
   const [logsVisible, setLogsVisible] = useState(true);
   const [processingMedia, setProcessingMedia] = useState(null);
-  const [activeTab, setActiveTab] = useState('dashboard'); // dashboard, history, settings
+  const [activeTab, setActiveTab] = useState('dashboard'); // dashboard, thumbnails, social-upload, history, settings
   const [historyJobs, setHistoryJobs] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
   const [cancelingJobId, setCancelingJobId] = useState(null);
-  const [subtitleStyle, setSubtitleStyle] = useState(() => readStoredJson('subtitle_style_v1', DEFAULT_SUBTITLE_STYLE));
-  const [hookStyle, setHookStyle] = useState(() => readStoredJson('hook_style_v1', DEFAULT_HOOK_STYLE));
+  const [deletingJobId, setDeletingJobId] = useState(null);
+  const [overlayProfiles, setOverlayProfiles] = useState(() => readStoredOverlayProfiles());
+  const [activeOverlayProfileId, setActiveOverlayProfileId] = useState(() => {
+    const stored = sanitizeOverlayProfileId(localStorage.getItem('overlay_active_profile_v1') || '');
+    return stored || 'default';
+  });
+  const [overlayProfileNameDraft, setOverlayProfileNameDraft] = useState('');
+  const [overlayProfileStatus, setOverlayProfileStatus] = useState(null);
+  const [subtitleStyle, setSubtitleStyle] = useState(() => normalizeSubtitleStyleConfig(readStoredJson('subtitle_style_v1', DEFAULT_SUBTITLE_STYLE)));
+  const [hookStyle, setHookStyle] = useState(() => normalizeHookStyleConfig(readStoredJson('hook_style_v1', DEFAULT_HOOK_STYLE)));
   const [tightEditSettings, setTightEditSettings] = useState(() => readStoredJson('tight_edit_settings_v1', DEFAULT_TIGHT_EDIT_SETTINGS));
   const [socialPostSettings, setSocialPostSettings] = useState(() => readStoredSocialPostSettings());
   const [youtubeAuthSettings, setYoutubeAuthSettings] = useState(() => {
@@ -315,6 +693,7 @@ function App() {
   const [settingsSyncStatus, setSettingsSyncStatus] = useState(null);
   const [settingsSyncIncludeYoutubeCookies, setSettingsSyncIncludeYoutubeCookies] = useState(true);
   const [clipVideoOverrides, setClipVideoOverrides] = useState({});
+  const [jobOverlayDefaults, setJobOverlayDefaults] = useState({});
 
   // Sync state for original video playback
   const [syncedTime, setSyncedTime] = useState(0);
@@ -322,6 +701,7 @@ function App() {
   const [syncTrigger, setSyncTrigger] = useState(0);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isMobileLiveAnalysisOpen, setIsMobileLiveAnalysisOpen] = useState(false);
+  const [processingStartedAt, setProcessingStartedAt] = useState(null);
 
   const handleClipPlay = (startTime) => {
     setSyncedTime(startTime);
@@ -363,9 +743,141 @@ function App() {
     }
   }, [status, jobId]);
 
+  useEffect(() => {
+    if (status === 'processing') {
+      setProcessingStartedAt((prev) => prev || Date.now());
+      return;
+    }
+    setProcessingStartedAt(null);
+  }, [status, jobId]);
+
   const setOllamaModel = (value) => {
     setOllamaModelState(normalizeOllamaModelName(value));
   };
+
+  const getOverlayProfileForId = (profileId) => {
+    const normalized = sanitizeOverlayProfileId(profileId);
+    if (normalized && overlayProfiles[normalized]) {
+      return overlayProfiles[normalized];
+    }
+    return overlayProfiles.default || DEFAULT_OVERLAY_PROFILES.default;
+  };
+
+  const resolveInterviewProfileId = () => (
+    overlayProfiles.interview ? 'interview' : (overlayProfiles.default ? 'default' : Object.keys(overlayProfiles)[0] || 'default')
+  );
+
+  const resolveProfileIdForJobRequest = (isInterviewMode) => (
+    isInterviewMode ? resolveInterviewProfileId() : (overlayProfiles[activeOverlayProfileId] ? activeOverlayProfileId : 'default')
+  );
+
+  const buildOverlayDefaultsForProfile = (profileId) => {
+    const normalizedProfileId = sanitizeOverlayProfileId(profileId);
+    if (normalizedProfileId && normalizedProfileId === activeOverlayProfileId) {
+      return {
+        profileId: normalizedProfileId,
+        subtitleStyle: normalizeSubtitleStyleConfig(subtitleStyle),
+        hookStyle: normalizeHookStyleConfig(hookStyle),
+      };
+    }
+    const profile = getOverlayProfileForId(profileId);
+    return {
+      profileId: profile.id || profileId || 'default',
+      subtitleStyle: normalizeSubtitleStyleConfig(profile.subtitleStyle),
+      hookStyle: normalizeHookStyleConfig(profile.hookStyle),
+    };
+  };
+
+  const ensureJobOverlayDefaults = (targetJobId, profileIdHint, forceReplace = false) => {
+    if (!targetJobId) return;
+    const defaults = buildOverlayDefaultsForProfile(profileIdHint);
+    setJobOverlayDefaults((prev) => {
+      if (!forceReplace && prev[targetJobId]) return prev;
+      return {
+        ...prev,
+        [targetJobId]: defaults,
+      };
+    });
+  };
+
+  const applyCurrentStylesToActiveOverlayProfile = () => {
+    const targetId = overlayProfiles[activeOverlayProfileId] ? activeOverlayProfileId : 'default';
+    const existing = getOverlayProfileForId(targetId);
+    setOverlayProfiles((prev) => ({
+      ...prev,
+      [targetId]: {
+        ...existing,
+        id: targetId,
+        name: existing.name || targetId,
+        subtitleStyle: normalizeSubtitleStyleConfig(subtitleStyle),
+        hookStyle: normalizeHookStyleConfig(hookStyle),
+      },
+    }));
+    setOverlayProfileStatus({ type: 'success', message: `Profil "${existing.name || targetId}" aktualisiert.` });
+  };
+
+  const saveCurrentStylesAsNewOverlayProfile = () => {
+    const rawName = (overlayProfileNameDraft || '').trim();
+    if (!rawName) {
+      setOverlayProfileStatus({ type: 'error', message: 'Bitte einen Profilnamen eingeben.' });
+      return;
+    }
+    const baseId = sanitizeOverlayProfileId(rawName);
+    if (!baseId) {
+      setOverlayProfileStatus({ type: 'error', message: 'Profilname ist ungueltig.' });
+      return;
+    }
+
+    let candidateId = baseId;
+    let suffix = 2;
+    while (overlayProfiles[candidateId]) {
+      candidateId = `${baseId}_${suffix}`;
+      suffix += 1;
+    }
+
+    const nextProfile = {
+      id: candidateId,
+      name: rawName,
+      subtitleStyle: normalizeSubtitleStyleConfig(subtitleStyle),
+      hookStyle: normalizeHookStyleConfig(hookStyle),
+    };
+    setOverlayProfiles((prev) => ({ ...prev, [candidateId]: nextProfile }));
+    setActiveOverlayProfileId(candidateId);
+    setOverlayProfileNameDraft('');
+    setOverlayProfileStatus({ type: 'success', message: `Profil "${rawName}" gespeichert.` });
+  };
+
+  const applySubtitleDefaultsToJob = (targetJobId, style) => {
+    if (!targetJobId) return;
+    setJobOverlayDefaults((prev) => {
+      const existing = prev[targetJobId] || buildOverlayDefaultsForProfile(activeOverlayProfileId);
+      return {
+        ...prev,
+        [targetJobId]: {
+          ...existing,
+          subtitleStyle: normalizeSubtitleStyleConfig(style || existing.subtitleStyle),
+        },
+      };
+    });
+  };
+
+  const applyHookDefaultsToJob = (targetJobId, style) => {
+    if (!targetJobId) return;
+    setJobOverlayDefaults((prev) => {
+      const existing = prev[targetJobId] || buildOverlayDefaultsForProfile(activeOverlayProfileId);
+      return {
+        ...prev,
+        [targetJobId]: {
+          ...existing,
+          hookStyle: normalizeHookStyleConfig(style || existing.hookStyle),
+        },
+      };
+    });
+  };
+
+  const activeJobOverlayDefaults = jobId
+    ? (jobOverlayDefaults[jobId] || buildOverlayDefaultsForProfile(activeOverlayProfileId))
+    : buildOverlayDefaultsForProfile(activeOverlayProfileId);
 
   const getClipVariantKey = (activeJobId, clip, fallbackIndex) => `${activeJobId}:${clip.clip_index ?? fallbackIndex}`;
 
@@ -444,7 +956,7 @@ function App() {
     } catch (e) {
       setYoutubeAuthStatus({
         logged_in: false,
-        error: e.message || 'Status check failed',
+        error: e.message || 'Statusprüfung fehlgeschlagen',
       });
     } finally {
       setYoutubeAuthBusy(false);
@@ -468,7 +980,7 @@ function App() {
       setYoutubeAuthStatus(data);
       setYoutubeAuthSettings((prev) => ({ ...prev, mode: prev.mode === 'cookies_text' ? prev.mode : 'cookies_file' }));
     } catch (e) {
-      alert(`Cookie Save fehlgeschlagen: ${e.message}`);
+      alert(`Cookie-Speichern fehlgeschlagen: ${e.message}`);
     } finally {
       setYoutubeAuthBusy(false);
     }
@@ -526,6 +1038,8 @@ function App() {
     elevenLabsKey,
     subtitleStyle,
     hookStyle,
+    overlayProfiles,
+    activeOverlayProfileId,
     tightEditSettings,
     socialPostSettings,
     youtubeAuthSettings,
@@ -543,10 +1057,17 @@ function App() {
     if (typeof payload.elevenLabsKey === 'string') setElevenLabsKey(payload.elevenLabsKey);
 
     if (payload.subtitleStyle && typeof payload.subtitleStyle === 'object') {
-      setSubtitleStyle({ ...DEFAULT_SUBTITLE_STYLE, ...payload.subtitleStyle });
+      setSubtitleStyle(normalizeSubtitleStyleConfig(payload.subtitleStyle));
     }
     if (payload.hookStyle && typeof payload.hookStyle === 'object') {
-      setHookStyle({ ...DEFAULT_HOOK_STYLE, ...payload.hookStyle });
+      setHookStyle(normalizeHookStyleConfig(payload.hookStyle));
+    }
+    if (payload.overlayProfiles && typeof payload.overlayProfiles === 'object') {
+      setOverlayProfiles(mergeOverlayProfilesWithDefaults(payload.overlayProfiles));
+    }
+    if (typeof payload.activeOverlayProfileId === 'string') {
+      const requestedId = sanitizeOverlayProfileId(payload.activeOverlayProfileId);
+      setActiveOverlayProfileId(requestedId || 'default');
     }
     if (payload.tightEditSettings && typeof payload.tightEditSettings === 'object') {
       setTightEditSettings({ ...DEFAULT_TIGHT_EDIT_SETTINGS, ...payload.tightEditSettings });
@@ -592,7 +1113,7 @@ function App() {
       });
     } catch (e) {
       if (e?.name === 'AbortError') {
-        setSettingsSyncStatus({ type: 'error', message: 'Sync create timed out. Bitte Netzwerk/Backend prüfen.' });
+        setSettingsSyncStatus({ type: 'error', message: 'Sync-Erstellung abgelaufen. Bitte Netzwerk/Backend prüfen.' });
       } else {
         setSettingsSyncStatus({ type: 'error', message: e.message || 'Sync-Code konnte nicht erstellt werden.' });
       }
@@ -624,12 +1145,12 @@ function App() {
       setSettingsSyncStatus({
         type: 'success',
         message: data.youtube_cookies_applied
-          ? 'Settings geladen. YouTube-Session wurde ebenfalls uebernommen.'
-          : 'Settings geladen.',
+          ? 'Einstellungen geladen. YouTube-Session wurde ebenfalls übernommen.'
+          : 'Einstellungen geladen.',
       });
     } catch (e) {
       if (e?.name === 'AbortError') {
-        setSettingsSyncStatus({ type: 'error', message: 'Sync load timed out. Bitte Netzwerk/Backend prüfen.' });
+        setSettingsSyncStatus({ type: 'error', message: 'Sync-Laden abgelaufen. Bitte Netzwerk/Backend prüfen.' });
       } else {
         setSettingsSyncStatus({ type: 'error', message: e.message || 'Sync-Code konnte nicht geladen werden.' });
       }
@@ -652,6 +1173,30 @@ function App() {
     if (apiStatus === 'completed') return 'complete';
     return 'processing';
   };
+
+  useEffect(() => {
+    if (!overlayProfiles[activeOverlayProfileId]) {
+      setActiveOverlayProfileId('default');
+      return;
+    }
+    const profile = overlayProfiles[activeOverlayProfileId];
+    setSubtitleStyle(normalizeSubtitleStyleConfig(profile.subtitleStyle));
+    setHookStyle(normalizeHookStyleConfig(profile.hookStyle));
+  }, [overlayProfiles, activeOverlayProfileId]);
+
+  useEffect(() => {
+    localStorage.setItem('overlay_profiles_v1', JSON.stringify(overlayProfiles));
+  }, [overlayProfiles]);
+
+  useEffect(() => {
+    localStorage.setItem('overlay_active_profile_v1', activeOverlayProfileId);
+  }, [activeOverlayProfileId]);
+
+  useEffect(() => {
+    if (!overlayProfileStatus) return undefined;
+    const timer = window.setTimeout(() => setOverlayProfileStatus(null), 3500);
+    return () => window.clearTimeout(timer);
+  }, [overlayProfileStatus]);
 
   useEffect(() => {
     // Encrypt Gemini Key too for consistency if desired, but user asked specifically about Social integration not saving well.
@@ -731,17 +1276,22 @@ function App() {
             setJobState(data.job_state);
           }
 
-          if (data.status === 'completed') {
+          const normalizedJobState = String(data.job_state || '').toLowerCase();
+
+          if (data.status === 'completed' || normalizedJobState === 'completed' || normalizedJobState === 'partial') {
             setStatus('complete');
-            if (data.job_state) {
-              setJobState(data.job_state);
-            }
+            setJobState(data.job_state || 'completed');
             clearInterval(interval);
-          } else if (data.status === 'failed' || data.status === 'cancelled') {
+          } else if (
+            data.status === 'failed' ||
+            data.status === 'cancelled' ||
+            normalizedJobState === 'failed' ||
+            normalizedJobState === 'cancelled'
+          ) {
             setStatus('error');
             const errorMsg = data.error || (data.logs && data.logs.length > 0 ? data.logs[data.logs.length - 1] : "Process failed");
-            setLogs(prev => [...prev, "Error: " + errorMsg]);
-            setJobState(data.job_state || data.status || 'failed');
+            setLogs(prev => [...prev, "Fehler: " + errorMsg]);
+            setJobState(data.job_state || data.status || normalizedJobState || 'failed');
             clearInterval(interval);
           }
         } catch (e) {
@@ -759,7 +1309,7 @@ function App() {
     const failSafeTimer = window.setTimeout(() => {
       timedOutByGuard = true;
       setHistoryLoading(false);
-      setHistoryError('Job history request timed out. Please check network reachability to backend.');
+      setHistoryError('Zeitüberschreitung beim Laden der Job-Historie. Bitte Backend-Erreichbarkeit prüfen.');
     }, 16000);
     try {
       const res = await fetchWithTimeout(
@@ -771,7 +1321,7 @@ function App() {
         return;
       }
       if (!res.ok) {
-        throw new Error('Failed to load job history');
+        throw new Error('Job-Historie konnte nicht geladen werden');
       }
       const data = await res.json();
       if (timedOutByGuard) {
@@ -783,9 +1333,9 @@ function App() {
         return;
       }
       if (e?.name === 'AbortError') {
-        setHistoryError('Job history request timed out. Please check network reachability to backend.');
+        setHistoryError('Zeitüberschreitung beim Laden der Job-Historie. Bitte Backend-Erreichbarkeit prüfen.');
       } else {
-        setHistoryError(e.message || 'Failed to load job history');
+        setHistoryError(e.message || 'Job-Historie konnte nicht geladen werden');
       }
     } finally {
       window.clearTimeout(failSafeTimer);
@@ -804,7 +1354,7 @@ function App() {
 
   const fetchUserProfiles = async () => {
     if (!uploadPostKey) {
-      setUploadProfileStatus({ type: 'error', message: 'Bitte zuerst einen Upload-Post API Key eingeben.' });
+      setUploadProfileStatus({ type: 'error', message: 'Bitte zuerst einen Upload-Post API-Key eingeben.' });
       setUserProfiles([]);
       return;
     }
@@ -826,7 +1376,7 @@ function App() {
         setUserProfiles([]);
         setUploadProfileStatus({
           type: data.recoverable ? 'info' : 'error',
-          message: data.error || 'Keine Profile gefunden. Bitte Key und Upload-Post Konto prüfen.',
+          message: data.error || 'Keine Profile gefunden. Bitte API-Key und Upload-Post-Konto prüfen.',
         });
       }
     } catch (e) {
@@ -836,12 +1386,13 @@ function App() {
   };
 
   const handleProcess = async (data) => {
+    const requestedProfileId = resolveProfileIdForJobRequest(!!data.options?.interviewMode);
     setStatus('processing');
     setJobState('queued');
     setLogs(["Starting process..."]);
     setResults(null);
     setClipVideoOverrides({});
-    setProcessingMedia(data);
+    setProcessingMedia({ ...data, overlayProfileId: requestedProfileId });
 
     try {
       let body;
@@ -883,12 +1434,13 @@ function App() {
       if (!res.ok) throw new Error(await readErrorMessage(res));
       const resData = await res.json();
       setJobId(resData.job_id);
+      ensureJobOverlayDefaults(resData.job_id, requestedProfileId, true);
       fetchJobHistory();
 
     } catch (e) {
       setStatus('error');
       setJobState('failed');
-      setLogs(l => [...l, `Error starting job: ${e.message}`]);
+      setLogs(l => [...l, `Fehler beim Starten des Jobs: ${e.message}`]);
     }
   };
 
@@ -905,15 +1457,18 @@ function App() {
   const handleOpenJob = async (job) => {
     try {
       const data = await pollJob(job.job_id);
+      const requestMeta = job?.request || {};
+      const profileIdForJob = resolveProfileIdForJobRequest(!!requestMeta.interview_mode);
       setJobId(job.job_id);
       setResults(data.result || job.result || null);
       setLogs(data.logs || job.logs || []);
       setProcessingMedia(deriveProcessingMedia(job));
+      ensureJobOverlayDefaults(job.job_id, profileIdForJob);
       setJobState(data.job_state || job.status || 'completed');
       setStatus(mapApiStatusToUi(data.status));
       setActiveTab('dashboard');
     } catch (e) {
-      alert(`Failed to open job: ${e.message}`);
+      alert(`Job konnte nicht geöffnet werden: ${e.message}`);
     }
   };
 
@@ -936,16 +1491,19 @@ function App() {
       }
 
       const data = await res.json();
+      const requestMeta = job?.request || {};
+      const profileIdForJob = resolveProfileIdForJobRequest(!!requestMeta.interview_mode);
       setJobId(data.job_id);
       setStatus('processing');
       setJobState('queued');
       setResults(job.result || null);
-      setLogs((job.logs || []).concat([`Job ${job.job_id} resumed and queued.`]));
+      setLogs((job.logs || []).concat([`Job ${job.job_id} wurde fortgesetzt und neu eingereiht.`]));
       setProcessingMedia(deriveProcessingMedia(job));
+      ensureJobOverlayDefaults(data.job_id, profileIdForJob);
       setActiveTab('dashboard');
       fetchJobHistory();
     } catch (e) {
-      alert(`Failed to resume job: ${e.message}`);
+      alert(`Job konnte nicht fortgesetzt werden: ${e.message}`);
     }
   };
 
@@ -971,9 +1529,37 @@ function App() {
       }
       fetchJobHistory();
     } catch (e) {
-      alert(`Failed to cancel job: ${e.message}`);
+      alert(`Job konnte nicht gestoppt werden: ${e.message}`);
     } finally {
       setCancelingJobId(null);
+    }
+  };
+
+  const handleDeleteJob = async (job) => {
+    if (!job?.job_id) return;
+    const confirmed = window.confirm(`Job wirklich loeschen?\n\n${job.source_label || job.job_id}\n\nDer komplette Output-Ordner wird entfernt.`);
+    if (!confirmed) return;
+
+    setDeletingJobId(job.job_id);
+    try {
+      const res = await fetch(getApiUrl(`/api/jobs/${job.job_id}`), {
+        method: 'DELETE',
+      });
+
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res));
+      }
+
+      if (job.job_id === jobId) {
+        handleReset();
+      }
+
+      setHistoryJobs((prev) => prev.filter((entry) => entry.job_id !== job.job_id));
+      fetchJobHistory();
+    } catch (e) {
+      alert(`Job konnte nicht gelöscht werden: ${e.message}`);
+    } finally {
+      setDeletingJobId(null);
     }
   };
 
@@ -998,6 +1584,14 @@ function App() {
         </button>
 
         <button
+          onClick={() => handleTabSelect('history')}
+          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'history' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
+        >
+          <History size={20} />
+          <span className={`font-medium ${mobile ? 'block' : 'hidden lg:block'}`}>Verlauf</span>
+        </button>
+
+        <button
           onClick={() => handleTabSelect('thumbnails')}
           className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'thumbnails' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
         >
@@ -1006,11 +1600,11 @@ function App() {
         </button>
 
         <button
-          onClick={() => handleTabSelect('history')}
-          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'history' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
+          onClick={() => handleTabSelect('social-upload')}
+          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'social-upload' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
         >
-          <History size={20} />
-          <span className={`font-medium ${mobile ? 'block' : 'hidden lg:block'}`}>History</span>
+          <Share2 size={20} />
+          <span className={`font-medium ${mobile ? 'block' : 'hidden lg:block'}`}>Upload-Post</span>
         </button>
 
         <button
@@ -1018,7 +1612,7 @@ function App() {
           className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'settings' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
         >
           <Settings size={20} />
-          <span className={`font-medium ${mobile ? 'block' : 'hidden lg:block'}`}>Settings</span>
+          <span className={`font-medium ${mobile ? 'block' : 'hidden lg:block'}`}>Einstellungen</span>
         </button>
       </nav>
 
@@ -1032,8 +1626,8 @@ function App() {
             <Globe size={16} />
           </div>
           <div className={`${mobile ? 'block' : 'hidden lg:block'} overflow-hidden`}>
-            <p className="text-sm font-bold text-white leading-none mb-0.5">Landing Page</p>
-            <p className="text-[10px] text-zinc-400 group-hover:text-zinc-300 transition-colors truncate">View website</p>
+            <p className="text-sm font-bold text-white leading-none mb-0.5">Landingpage</p>
+            <p className="text-[10px] text-zinc-400 group-hover:text-zinc-300 transition-colors truncate">Website öffnen</p>
           </div>
         </a>
         <a
@@ -1047,15 +1641,20 @@ function App() {
           </div>
           <div className={`${mobile ? 'block' : 'hidden lg:block'} overflow-hidden`}>
             <p className="text-sm font-bold text-white leading-none mb-0.5">Open Source</p>
-            <p className="text-[10px] text-zinc-400 group-hover:text-zinc-300 transition-colors truncate">Free & Community Driven</p>
+            <p className="text-[10px] text-zinc-400 group-hover:text-zinc-300 transition-colors truncate">Kostenlos & Community-getrieben</p>
           </div>
         </a>
       </div>
     </div>
   );
 
+  const processingElapsedSeconds = processingStartedAt ? Math.max(0, Math.floor((Date.now() - processingStartedAt) / 1000)) : 0;
+  const mobileProcessingProgress = estimateMobileProcessingProgress(logs, status, jobState, processingElapsedSeconds);
+  const showMobileProcessingIndicator = status === 'processing' && mobileProcessingProgress.percent < 100;
+  const displayLogs = [...logs].reverse();
+
   return (
-    <div className="flex h-[100dvh] min-h-screen bg-background overflow-hidden selection:bg-primary/30">
+    <div className="flex h-[100svh] min-h-[100svh] bg-background overflow-hidden selection:bg-primary/30">
       <aside className="hidden md:flex h-full">
         <Sidebar />
       </aside>
@@ -1064,7 +1663,7 @@ function App() {
         <div className="fixed inset-0 z-[140] md:hidden">
           <button
             type="button"
-            aria-label="Close menu overlay"
+            aria-label="Menü-Overlay schließen"
             className="absolute inset-0 bg-black/70 backdrop-blur-[1px]"
             onClick={() => setIsMobileSidebarOpen(false)}
           />
@@ -1072,7 +1671,7 @@ function App() {
             <div className="h-full pointer-events-auto relative">
               <button
                 type="button"
-                aria-label="Close menu"
+                aria-label="Menü schließen"
                 onClick={() => setIsMobileSidebarOpen(false)}
                 className="absolute top-3 right-3 z-10 inline-flex items-center justify-center w-8 h-8 rounded-lg border border-white/10 bg-black/45 text-zinc-200 hover:text-white hover:bg-black/65 transition-colors"
               >
@@ -1097,7 +1696,7 @@ function App() {
               type="button"
               onClick={() => setIsMobileSidebarOpen(true)}
               className="md:hidden inline-flex items-center justify-center w-9 h-9 rounded-lg border border-white/10 bg-white/5 text-zinc-200 hover:text-white hover:bg-white/10 transition-colors"
-              aria-label="Open navigation menu"
+              aria-label="Navigationsmenü öffnen"
             >
               <Menu size={18} />
             </button>
@@ -1107,7 +1706,7 @@ function App() {
                 className="flex items-center gap-2 text-sm text-zinc-400 hover:text-white transition-colors"
               >
                 <PlusCircle size={16} />
-                <span className="hidden sm:inline">New Project</span>
+                <span className="hidden sm:inline">Neues Projekt</span>
               </button>
             )}
           </div>
@@ -1123,7 +1722,7 @@ function App() {
 
             {llmProvider === 'gemini' && !apiKey && (
               <span className="text-xs text-amber-500 bg-amber-500/10 px-3 py-1 rounded-full border border-amber-500/20">
-                API Key Missing
+                API-Key fehlt
               </span>
             )}
           </div>
@@ -1139,10 +1738,12 @@ function App() {
               error={historyError}
               currentJobId={jobId}
               cancelingJobId={cancelingJobId}
+              deletingJobId={deletingJobId}
               onRefresh={fetchJobHistory}
               onOpenJob={handleOpenJob}
               onResumeJob={handleResumeJob}
               onCancelJob={handleCancelJob}
+              onDeleteJob={handleDeleteJob}
             />
           )}
 
@@ -1150,9 +1751,9 @@ function App() {
           {activeTab === 'settings' && (
             <div className="h-full overflow-y-auto touch-scroll p-5 md:p-8 max-w-2xl mx-auto animate-[fadeIn_0.3s_ease-out]">
               <div className="flex items-center justify-between mb-8">
-                <h1 className="text-2xl font-bold">Settings</h1>
+                <h1 className="text-2xl font-bold">Einstellungen</h1>
                 <div className="px-3 py-1 bg-green-500/10 border border-green-500/20 rounded-full text-[10px] text-green-400 font-medium flex items-center gap-2">
-                  <Shield size={12} /> Privacy: keys only live in your browser (sent to backend just to process)
+                  <Shield size={12} /> Datenschutz: Keys bleiben im Browser (werden nur zur Verarbeitung ans Backend gesendet)
                 </div>
               </div>
               <div className="glass-panel p-6 mb-8">
@@ -1184,13 +1785,13 @@ function App() {
 
               <div className="glass-panel p-6 mt-8">
                 <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-lg font-semibold">YouTube Download Quality</h2>
-                  <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Local setup</span>
+                  <h2 className="text-lg font-semibold">YouTube-Downloadqualität</h2>
+                  <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Lokales Setup</span>
                 </div>
                 <div className="space-y-4">
                   <div className="grid gap-4 sm:grid-cols-2">
                     <div>
-                      <label className="block text-sm text-zinc-400 mb-2">Auth Mode</label>
+                      <label className="block text-sm text-zinc-400 mb-2">Auth-Modus</label>
                       <select
                         value={youtubeAuthSettings.mode}
                         onChange={(e) => setYoutubeAuthSettings((prev) => ({ ...prev, mode: e.target.value }))}
@@ -1202,7 +1803,7 @@ function App() {
                       </select>
                     </div>
                     <div>
-                      <label className="block text-sm text-zinc-400 mb-2">Browser (for browser mode)</label>
+                      <label className="block text-sm text-zinc-400 mb-2">Browser (für Browser-Modus)</label>
                       <select
                         value={youtubeAuthSettings.browser}
                         onChange={(e) => setYoutubeAuthSettings((prev) => ({ ...prev, browser: e.target.value }))}
@@ -1216,7 +1817,7 @@ function App() {
                   </div>
 
                   <div>
-                    <label className="block text-sm text-zinc-400 mb-2">cookies.txt (Netscape format, optional)</label>
+                    <label className="block text-sm text-zinc-400 mb-2">cookies.txt (Netscape-Format, optional)</label>
                     <textarea
                       value={youtubeAuthSettings.cookiesText}
                       onChange={(e) => setYoutubeAuthSettings((prev) => ({ ...prev, cookiesText: e.target.value }))}
@@ -1266,7 +1867,7 @@ function App() {
 
                   <p className="text-xs text-zinc-500 leading-relaxed">
                     Bei jedem Job werden diese Einstellungen an den Downloader uebergeben. Wenn YouTube nur niedrige Qualitaet anbietet, bricht der Job jetzt sauber ab statt 360p weiterzuverarbeiten.
-                    Fuer gesperrte Streams sind frische Login-Cookies meist Pflicht.
+                    Für gesperrte Streams sind frische Login-Cookies meist Pflicht.
                   </p>
                   {youtubeAuthStatus?.cookies_file_path && (
                     <p className="text-[11px] text-zinc-600 break-all">
@@ -1274,15 +1875,15 @@ function App() {
                     </p>
                   )}
                   <p className="text-[11px] text-zinc-600 leading-relaxed">
-                    Hinweis: Der Browser-Import liest Cookies vom Host-Rechner, auf dem Docker laeuft. Auf iPhone/iPad kann Safari-Cookie-Export nicht direkt automatisiert ausgelesen werden.
+                    Hinweis: Der Browser-Import liest Cookies vom Host-Rechner, auf dem Docker läuft. Auf iPhone/iPad kann Safari-Cookie-Export nicht direkt automatisiert ausgelesen werden.
                   </p>
                 </div>
               </div>
 
               <div className="glass-panel p-6 mt-8">
                 <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-lg font-semibold">Device Sync</h2>
-                  <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Encrypted</span>
+                  <h2 className="text-lg font-semibold">Geräte-Sync</h2>
+                  <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Verschlüsselt</span>
                 </div>
                 <div className="space-y-4">
                   <label className="flex items-start gap-3 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-left">
@@ -1295,7 +1896,7 @@ function App() {
                     <span>
                       <span className="block text-sm font-medium text-white">YouTube Session mit synchronisieren</span>
                       <span className="block text-xs text-zinc-500">
-                        Wenn aktiv, wird die aktuelle Backend-YouTube-Session im Sync-Profil hinterlegt und beim Laden auf einem anderen Geraet wiederhergestellt.
+                        Wenn aktiv, wird die aktuelle Backend-YouTube-Session im Sync-Profil hinterlegt und beim Laden auf einem anderen Gerät wiederhergestellt.
                       </span>
                     </span>
                   </label>
@@ -1349,77 +1950,331 @@ function App() {
 
               <div className="glass-panel p-6 mt-8">
                 <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-lg font-semibold">Subtitle Defaults</h2>
+                  <h2 className="text-lg font-semibold">Overlay-Profile</h2>
                   <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Global</span>
                 </div>
-                <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-4">
                   <div>
-                    <label className="block text-sm text-zinc-400 mb-2">Font</label>
+                    <label className="block text-sm text-zinc-400 mb-2">Aktives Profil</label>
                     <select
-                      value={subtitleStyle.fontFamily}
-                      onChange={(e) => setSubtitleStyle((prev) => ({ ...prev, fontFamily: e.target.value }))}
+                      value={activeOverlayProfileId}
+                      onChange={(e) => setActiveOverlayProfileId(e.target.value)}
                       className="input-field"
                     >
-                      {FONT_OPTIONS.map((option) => (
-                        <option key={option} value={option}>{option}</option>
+                      {Object.values(overlayProfiles).map((profile) => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.name}
+                        </option>
                       ))}
                     </select>
+                    <p className="text-xs text-zinc-500 mt-2">
+                      Bei aktivem <strong>Interview-Modus</strong> im Formular wird automatisch das Profil <strong>Interview</strong> als Job-Standard verwendet.
+                    </p>
                   </div>
-                  <div>
-                    <label className="block text-sm text-zinc-400 mb-2">Background</label>
-                    <select
-                      value={subtitleStyle.backgroundStyle}
-                      onChange={(e) => setSubtitleStyle((prev) => ({ ...prev, backgroundStyle: e.target.value }))}
-                      className="input-field"
+
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={applyCurrentStylesToActiveOverlayProfile}
+                      className="px-3 py-1.5 rounded-lg bg-primary/20 border border-primary/30 text-xs text-primary hover:bg-primary/30"
                     >
-                      {BACKGROUND_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>{option.label}</option>
-                      ))}
-                    </select>
+                      Aktuelles Profil überschreiben
+                    </button>
                   </div>
+
+                  <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
+                    <div>
+                      <label className="block text-sm text-zinc-400 mb-2">Als neues Profil speichern</label>
+                      <input
+                        type="text"
+                        value={overlayProfileNameDraft}
+                        onChange={(e) => setOverlayProfileNameDraft(e.target.value)}
+                        className="input-field"
+                        placeholder="z.B. Cinematic, Faceless, News"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={saveCurrentStylesAsNewOverlayProfile}
+                      className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-zinc-200 hover:bg-white/10"
+                    >
+                      Profil speichern
+                    </button>
+                  </div>
+
+                  {overlayProfileStatus?.message && (
+                    <p className={`text-xs ${overlayProfileStatus.type === 'error' ? 'text-red-300' : 'text-emerald-300'}`}>
+                      {overlayProfileStatus.message}
+                    </p>
+                  )}
                 </div>
-                <div className="mt-4">
-                  <label className="block text-sm text-zinc-400 mb-2">Default Subtitle Y Position</label>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    step="1"
-                    value={subtitleStyle.yPosition ?? 86}
-                    onChange={(e) => setSubtitleStyle((prev) => ({ ...prev, yPosition: Number(e.target.value) }))}
-                    className="w-full accent-yellow-500"
-                  />
-                  <div className="mt-2 flex justify-between text-xs text-zinc-500">
-                    <span>Top</span>
-                    <span>{subtitleStyle.yPosition ?? 86}%</span>
-                    <span>Bottom</span>
+              </div>
+
+              <div className="glass-panel p-6 mt-8">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-semibold">Untertitel-Defaults</h2>
+                  <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Global</span>
+                </div>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm text-zinc-400 mb-2">Schnellposition</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {SUBTITLE_POSITION_PRESETS.map((preset) => (
+                        <button
+                          key={preset.value}
+                          type="button"
+                          onClick={() => setSubtitleStyle((prev) => ({
+                            ...prev,
+                            position: preset.value,
+                            yPosition: preset.y,
+                          }))}
+                          className={`rounded-lg border px-3 py-2 text-xs font-semibold transition-colors ${Math.abs((subtitleStyle.yPosition ?? SUBTITLE_POSITION_PRESETS[2].y) - preset.y) < 1
+                            ? 'border-primary/50 bg-primary/20 text-white'
+                            : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10'
+                            }`}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-zinc-400 mb-2">Y-Position</label>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="1"
+                      value={subtitleStyle.yPosition ?? SUBTITLE_POSITION_PRESETS[2].y}
+                      onChange={(e) => {
+                        const nextY = Number(e.target.value);
+                        setSubtitleStyle((prev) => ({
+                          ...prev,
+                          yPosition: nextY,
+                          position: resolveSubtitlePositionFromY(nextY),
+                        }));
+                      }}
+                      className="w-full accent-yellow-500"
+                    />
+                    <div className="mt-2 flex justify-between text-xs text-zinc-500">
+                      <span>Oben</span>
+                      <span>{Math.round(subtitleStyle.yPosition ?? SUBTITLE_POSITION_PRESETS[2].y)}%</span>
+                      <span>Unten</span>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div>
+                      <label className="block text-sm text-zinc-400 mb-2">Schriftart</label>
+                      <select
+                        value={subtitleStyle.fontFamily}
+                        onChange={(e) => setSubtitleStyle((prev) => ({ ...prev, fontFamily: e.target.value }))}
+                        className="input-field"
+                      >
+                        {FONT_OPTIONS.map((option) => (
+                          <option key={option} value={option}>{option}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm text-zinc-400 mb-2">Hintergrund</label>
+                      <select
+                        value={subtitleStyle.backgroundStyle}
+                        onChange={(e) => setSubtitleStyle((prev) => ({ ...prev, backgroundStyle: e.target.value }))}
+                        className="input-field"
+                      >
+                        {BACKGROUND_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-zinc-400 mb-2">Schriftgröße</label>
+                    <input
+                      type="range"
+                      min="18"
+                      max="44"
+                      step="1"
+                      value={subtitleStyle.fontSize ?? DEFAULT_SUBTITLE_STYLE.fontSize}
+                      onChange={(e) => setSubtitleStyle((prev) => ({ ...prev, fontSize: Number(e.target.value) }))}
+                      className="w-full accent-yellow-500"
+                    />
+                    <div className="mt-2 text-xs text-zinc-500">
+                      {subtitleStyle.fontSize ?? DEFAULT_SUBTITLE_STYLE.fontSize}px
+                    </div>
                   </div>
                 </div>
                 <p className="text-xs text-zinc-500 mt-4">
-                  These defaults prefill the per-short subtitle dialog and can still be changed there.
+                  Diese Defaults befüllen den Untertitel-Dialog pro Short vor und können dort weiter angepasst werden.
                 </p>
               </div>
 
               <div className="glass-panel p-6 mt-8">
                 <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-lg font-semibold">Hook Defaults</h2>
+                  <h2 className="text-lg font-semibold">Hook-Vorgaben</h2>
                   <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Global</span>
                 </div>
-                <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-4">
                   <div>
-                    <label className="block text-sm text-zinc-400 mb-2">Font</label>
-                    <select
-                      value={hookStyle.fontFamily}
-                      onChange={(e) => setHookStyle((prev) => ({ ...prev, fontFamily: e.target.value }))}
-                      className="input-field"
-                    >
-                      {FONT_OPTIONS.map((option) => (
-                        <option key={option} value={option}>{option}</option>
-                      ))}
-                    </select>
+                    <label className="block text-sm text-zinc-400 mb-2">Schnell-Presets</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {GRID_OPTIONS.map((option) => {
+                        const coords = resolveHookGridToCoordinates(option.value);
+                        const activeGridValue = resolveHookGridFromCoordinates(
+                          hookStyle.xPosition ?? DEFAULT_HOOK_STYLE.xPosition,
+                          hookStyle.yPosition ?? DEFAULT_HOOK_STYLE.yPosition
+                        );
+                        const isActive = activeGridValue === option.value;
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => setHookStyle((prev) => ({
+                              ...prev,
+                              xPosition: coords.x,
+                              yPosition: coords.y,
+                              position: coords.position,
+                              horizontalPosition: coords.horizontalPosition,
+                              textAlign: coords.textAlign,
+                            }))}
+                            className={`rounded-lg border px-2 py-2 text-[11px] font-semibold transition-colors ${isActive
+                              ? 'border-yellow-300/50 bg-yellow-500/20 text-white'
+                              : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10'
+                              }`}
+                          >
+                            {option.label}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div>
+                      <label className="block text-sm text-zinc-400 mb-2">X-Position</label>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        step="1"
+                        value={hookStyle.xPosition ?? DEFAULT_HOOK_STYLE.xPosition}
+                        onChange={(e) => {
+                          const nextX = Number(e.target.value);
+                          setHookStyle((prev) => ({
+                            ...prev,
+                            xPosition: nextX,
+                            horizontalPosition: nextX < 34 ? 'left' : nextX > 66 ? 'right' : 'center',
+                          }));
+                        }}
+                        className="w-full accent-yellow-500"
+                      />
+                      <div className="mt-2 flex justify-between text-xs text-zinc-500">
+                        <span>Links</span>
+                        <span>{Math.round(hookStyle.xPosition ?? DEFAULT_HOOK_STYLE.xPosition)}%</span>
+                        <span>Rechts</span>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-sm text-zinc-400 mb-2">Y-Position</label>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        step="1"
+                        value={hookStyle.yPosition ?? DEFAULT_HOOK_STYLE.yPosition}
+                        onChange={(e) => {
+                          const nextY = Number(e.target.value);
+                          setHookStyle((prev) => ({
+                            ...prev,
+                            yPosition: nextY,
+                            position: nextY < 34 ? 'top' : nextY > 66 ? 'bottom' : 'center',
+                          }));
+                        }}
+                        className="w-full accent-yellow-500"
+                      />
+                      <div className="mt-2 flex justify-between text-xs text-zinc-500">
+                        <span>Oben</span>
+                        <span>{Math.round(hookStyle.yPosition ?? DEFAULT_HOOK_STYLE.yPosition)}%</span>
+                        <span>Unten</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div>
+                      <label className="block text-sm text-zinc-400 mb-2">Textausrichtung</label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {HOOK_TEXT_ALIGN_OPTIONS.map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => setHookStyle((prev) => ({
+                              ...prev,
+                              textAlign: option.value,
+                              horizontalPosition: option.value,
+                            }))}
+                            className={`rounded-lg border px-2 py-2 text-xs font-semibold transition-colors ${ (hookStyle.textAlign || DEFAULT_HOOK_STYLE.textAlign) === option.value
+                              ? 'border-yellow-300/50 bg-yellow-500/20 text-white'
+                              : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10'
+                              }`}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-sm text-zinc-400 mb-2">Größe</label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {HOOK_SIZE_OPTIONS.map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => setHookStyle((prev) => ({ ...prev, size: option.value }))}
+                            className={`rounded-lg border px-2 py-2 text-xs font-semibold transition-colors ${ (hookStyle.size || DEFAULT_HOOK_STYLE.size) === option.value
+                              ? 'border-yellow-300/50 bg-yellow-500/20 text-white'
+                              : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10'
+                              }`}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div>
+                      <label className="block text-sm text-zinc-400 mb-2">Breite</label>
+                      <select
+                        value={hookStyle.widthPreset || DEFAULT_HOOK_STYLE.widthPreset}
+                        onChange={(e) => setHookStyle((prev) => ({ ...prev, widthPreset: e.target.value }))}
+                        className="input-field"
+                      >
+                        {HOOK_WIDTH_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm text-zinc-400 mb-2">Schriftart</label>
+                      <select
+                        value={hookStyle.fontFamily}
+                        onChange={(e) => setHookStyle((prev) => ({ ...prev, fontFamily: e.target.value }))}
+                        className="input-field"
+                      >
+                        {FONT_OPTIONS.map((option) => (
+                          <option key={option} value={option}>{option}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
                   <div>
-                    <label className="block text-sm text-zinc-400 mb-2">Background</label>
+                    <label className="block text-sm text-zinc-400 mb-2">Hintergrund</label>
                     <select
                       value={hookStyle.backgroundStyle}
                       onChange={(e) => setHookStyle((prev) => ({ ...prev, backgroundStyle: e.target.value }))}
@@ -1432,19 +2287,19 @@ function App() {
                   </div>
                 </div>
                 <p className="text-xs text-zinc-500 mt-4">
-                  These defaults prefill the per-short hook dialog and can still be overridden per clip.
+                  Diese Vorgaben befüllen den Hook-Dialog pro Short vor und können pro Clip überschrieben werden.
                 </p>
               </div>
 
               <div className="glass-panel p-6 mt-8">
                 <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-lg font-semibold">Speech Tightening</h2>
+                  <h2 className="text-lg font-semibold">Sprachstraffung</h2>
                   <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Global</span>
                 </div>
                 <p className="text-xs text-zinc-500 mb-4 leading-relaxed">
-                  Generated shorts can automatically cut long speech pauses and simple filler words like
+                  Generierte Shorts können lange Sprechpausen und einfache Füllwörter automatisch schneiden, z.B.
                   <strong> äh</strong>, <strong> ähm</strong>, <strong> um</strong> or <strong> uh</strong>.
-                  The default is intentionally aggressive for short-form pacing.
+                  Die Standardeinstellung ist bewusst aggressiv für Kurzformat-Rhythmus.
                 </p>
                 <label className="block text-sm text-zinc-400 mb-2">Preset</label>
                 <select
@@ -1463,16 +2318,16 @@ function App() {
 
               <div className="glass-panel p-6 mt-8">
                 <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-lg font-semibold">Social Integration</h2>
+                  <h2 className="text-lg font-semibold">Social-Integration</h2>
                   <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Optional</span>
                 </div>
                 <p className="text-xs text-zinc-500 mb-6 leading-relaxed">
-                  Automatically publish your clips to TikTok, Instagram Reels, YouTube Shorts, Facebook, X, Threads and Pinterest via <strong>Upload-Post</strong>.
-                  Includes a <strong>free tier</strong> (no credit card required).
-                  If you prefer, you can skip this and manually download/upload your videos.
+                  Veröffentliche deine Clips automatisch auf TikTok, Instagram Reels, YouTube Shorts, Facebook, X, Threads und Pinterest via <strong>Upload-Post</strong>.
+                  Enthält einen <strong>Free-Tier</strong> (keine Kreditkarte nötig).
+                  Wenn du willst, kannst du das überspringen und Videos manuell herunterladen/hochladen.
                 </p>
                 <div className="space-y-4">
-                  <label className="block text-sm text-zinc-400">Upload-Post API Key</label>
+                  <label className="block text-sm text-zinc-400">Upload-Post API-Key</label>
                   <div className="flex gap-2">
                     <input
                       type="password"
@@ -1482,7 +2337,7 @@ function App() {
                       placeholder="ey..."
                     />
                     <button onClick={fetchUserProfiles} className="btn-primary py-2 px-4 text-sm">
-                      Connect
+                      Verbinden
                     </button>
                   </div>
                   {uploadProfileStatus?.message && (
@@ -1497,25 +2352,25 @@ function App() {
                     </p>
                   )}
                   <div>
-                    <label className="block text-sm text-zinc-400 mb-2">Default Upload-Post Profile</label>
+                    <label className="block text-sm text-zinc-400 mb-2">Standard Upload-Post-Profil</label>
                     <select
                       value={uploadUserId}
                       onChange={(e) => setUploadUserId(e.target.value)}
                       className="input-field"
                       disabled={userProfiles.length === 0}
                     >
-                      <option value="">{userProfiles.length === 0 ? 'Load profiles first' : 'Select profile'}</option>
+                      <option value="">{userProfiles.length === 0 ? 'Profile zuerst laden' : 'Profil wählen'}</option>
                       {userProfiles.map((profile) => (
                         <option key={profile.username} value={profile.username}>{profile.username}</option>
                       ))}
                     </select>
                     <p className="text-xs text-zinc-500 mt-2">
-                      This is the global Upload-Post profile used for publishing. Individual clip dialogs only show the currently active profile.
+                      Das ist das globale Upload-Post-Profil für Veröffentlichungen. In einzelnen Clip-Dialogen wird nur das aktive Profil angezeigt.
                     </p>
                   </div>
                   <div className="border border-white/5 rounded-xl p-4 space-y-4 bg-black/10">
                     <div>
-                      <label className="block text-sm text-zinc-400 mb-2">Default Active Platforms</label>
+                      <label className="block text-sm text-zinc-400 mb-2">Standardmäßig aktive Plattformen</label>
                       <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                         {SOCIAL_PLATFORM_OPTIONS.map((platform) => (
                           <label key={platform.key} className="flex items-center gap-2 text-sm text-zinc-300 p-2 rounded-lg border border-white/5 bg-white/5">
@@ -1538,7 +2393,7 @@ function App() {
                     </div>
                     <div className="grid gap-4 sm:grid-cols-2">
                       <div>
-                        <label className="block text-sm text-zinc-400 mb-2">Default Instagram Mode</label>
+                        <label className="block text-sm text-zinc-400 mb-2">Standard-Instagram-Modus</label>
                         <select
                           value={socialPostSettings.instagramShareMode}
                           onChange={(e) => setSocialPostSettings((prev) => ({ ...prev, instagramShareMode: e.target.value }))}
@@ -1550,7 +2405,7 @@ function App() {
                         </select>
                       </div>
                       <div>
-                        <label className="block text-sm text-zinc-400 mb-2">Default TikTok Post Mode</label>
+                        <label className="block text-sm text-zinc-400 mb-2">Standard TikTok-Post-Modus</label>
                         <select
                           value={socialPostSettings.tiktokPostMode}
                           onChange={(e) => setSocialPostSettings((prev) => ({ ...prev, tiktokPostMode: e.target.value }))}
@@ -1569,11 +2424,11 @@ function App() {
                         onChange={(e) => setSocialPostSettings((prev) => ({ ...prev, tiktokIsAigc: e.target.checked }))}
                         className="w-4 h-4 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary"
                       />
-                      Mark TikTok uploads as AI-generated by default
+                      TikTok-Uploads standardmäßig als KI-generiert markieren
                     </label>
                     <div className="grid gap-4 sm:grid-cols-2">
                       <div>
-                        <label className="block text-sm text-zinc-400 mb-2">Default Facebook Page ID</label>
+                        <label className="block text-sm text-zinc-400 mb-2">Standard Facebook-Page-ID</label>
                         <input
                           type="text"
                           value={socialPostSettings.facebookPageId}
@@ -1583,39 +2438,39 @@ function App() {
                         />
                       </div>
                       <div>
-                        <label className="block text-sm text-zinc-400 mb-2">Default Pinterest Board ID</label>
+                        <label className="block text-sm text-zinc-400 mb-2">Standard Pinterest-Board-ID</label>
                         <input
                           type="text"
                           value={socialPostSettings.pinterestBoardId}
                           onChange={(e) => setSocialPostSettings((prev) => ({ ...prev, pinterestBoardId: e.target.value }))}
                           className="input-field"
-                          placeholder="Required for Pinterest posts"
+                          placeholder="Für Pinterest-Posts erforderlich"
                         />
                       </div>
                     </div>
                     <p className="text-xs text-zinc-500 leading-relaxed">
-                      The detected transcript language is forwarded where Upload-Post currently supports language fields. In the current upload docs that is YouTube, not TikTok.
+                      Die erkannte Transkript-Sprache wird dort übergeben, wo Upload-Post derzeit Sprachfelder unterstützt. Laut aktueller Doku betrifft das YouTube, nicht TikTok.
                     </p>
                   </div>
                   <p className="text-xs text-zinc-500 leading-relaxed">
-                    Connect your Upload-Post account to enable one-click publishing.
+                    Verbinde deinen Upload-Post-Account für Publishing mit einem Klick.
                     <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
                       <a href="https://app.upload-post.com/login" target="_blank" rel="noopener noreferrer" className="p-2 border border-white/5 rounded-lg hover:bg-white/5 transition-colors flex flex-col gap-1">
                         <span className="text-zinc-400 font-medium">1. Login</span>
-                        <span className="text-[10px] text-zinc-600">Register account</span>
+                        <span className="text-[10px] text-zinc-600">Account registrieren</span>
                       </a>
                       <a href="https://app.upload-post.com/manage-users" target="_blank" rel="noopener noreferrer" className="p-2 border border-white/5 rounded-lg hover:bg-white/5 transition-colors flex flex-col gap-1">
-                        <span className="text-zinc-400 font-medium">2. Profiles</span>
-                        <span className="text-[10px] text-zinc-600">Create & Connect</span>
+                        <span className="text-zinc-400 font-medium">2. Profile</span>
+                        <span className="text-[10px] text-zinc-600">Anlegen & verbinden</span>
                       </a>
                       <a href="https://app.upload-post.com/api-keys" target="_blank" rel="noopener noreferrer" className="p-2 border border-white/5 rounded-lg hover:bg-white/5 transition-colors flex flex-col gap-1">
-                        <span className="text-zinc-400 font-medium">3. API Key</span>
-                        <span className="text-[10px] text-zinc-600">Generate key</span>
+                        <span className="text-zinc-400 font-medium">3. API-Key</span>
+                        <span className="text-[10px] text-zinc-600">Key erzeugen</span>
                       </a>
                     </div>
                     <br />
                     <span className="text-zinc-600 italic">
-                      Keys are only stored in your browser. They are sent to the backend only to process your request, never stored server-side.
+                      Keys werden nur im Browser gespeichert. Sie werden nur zur Verarbeitung ans Backend gesendet und nicht serverseitig gespeichert.
                     </span>
                   </p>
                 </div>
@@ -1623,15 +2478,15 @@ function App() {
 
               <div className="glass-panel p-6 mt-8">
                 <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-lg font-semibold">Video Translation</h2>
+                  <h2 className="text-lg font-semibold">Video-Übersetzung</h2>
                   <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Optional</span>
                 </div>
                 <p className="text-xs text-zinc-500 mb-6 leading-relaxed">
-                  Translate your clips to different languages using <strong>ElevenLabs</strong> AI dubbing.
-                  Automatically translates speech while preserving the original voice characteristics.
+                  Übersetze deine Clips mit <strong>ElevenLabs</strong>-Dubbing in andere Sprachen.
+                  Die Sprache wird automatisch übersetzt, während die Voice-Charakteristik erhalten bleibt.
                 </p>
                 <div className="space-y-4">
-                  <label className="block text-sm text-zinc-400">ElevenLabs API Key</label>
+                  <label className="block text-sm text-zinc-400">ElevenLabs API-Key</label>
                   <div className="flex gap-2">
                     <input
                       type="password"
@@ -1644,29 +2499,29 @@ function App() {
                       onClick={() => {
                         if (elevenLabsKey) {
                           localStorage.setItem('elevenLabsKey_v1', encrypt(elevenLabsKey));
-                          alert('ElevenLabs API Key saved!');
+                      alert('ElevenLabs API-Key gespeichert!');
                         }
                       }}
                       className="btn-primary py-2 px-4 text-sm"
                     >
-                      Save
+                      Speichern
                     </button>
                   </div>
                   <p className="text-xs text-zinc-500 leading-relaxed">
-                    Get your API key from ElevenLabs to enable video translation.
+                    Hole deinen API-Key bei ElevenLabs, um Video-Übersetzung zu aktivieren.
                     <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <a href="https://elevenlabs.io/sign-up" target="_blank" rel="noopener noreferrer" className="p-2 border border-white/5 rounded-lg hover:bg-white/5 transition-colors flex flex-col gap-1">
-                        <span className="text-zinc-400 font-medium">1. Sign Up</span>
-                        <span className="text-[10px] text-zinc-600">Create account</span>
+                        <span className="text-zinc-400 font-medium">1. Registrieren</span>
+                        <span className="text-[10px] text-zinc-600">Account erstellen</span>
                       </a>
                       <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noopener noreferrer" className="p-2 border border-white/5 rounded-lg hover:bg-white/5 transition-colors flex flex-col gap-1">
-                        <span className="text-zinc-400 font-medium">2. API Key</span>
-                        <span className="text-[10px] text-zinc-600">Generate key</span>
+                        <span className="text-zinc-400 font-medium">2. API-Key</span>
+                        <span className="text-[10px] text-zinc-600">Key erzeugen</span>
                       </a>
                     </div>
                     <br />
                     <span className="text-zinc-600 italic">
-                      Keys are only stored in your browser. They are sent to the backend only to process your request, never stored server-side.
+                      Keys werden nur im Browser gespeichert. Sie werden nur zur Verarbeitung ans Backend gesendet und nicht serverseitig gespeichert.
                     </span>
                   </p>
                 </div>
@@ -1677,6 +2532,14 @@ function App() {
           {/* View: Thumbnails */}
           {activeTab === 'thumbnails' && (
             <ThumbnailStudio geminiApiKey={apiKey} uploadPostKey={uploadPostKey} uploadUserId={uploadUserId} />
+          )}
+
+          {activeTab === 'social-upload' && (
+            <SocialUploadStudio
+              uploadPostKey={uploadPostKey}
+              uploadUserId={uploadUserId}
+              socialPostSettings={socialPostSettings}
+            />
           )}
 
           {/* View: Gallery */}
@@ -1690,10 +2553,10 @@ function App() {
               <div className="max-w-xl w-full text-center space-y-8">
                 <div className="space-y-4">
                   <h1 className="text-4xl md:text-5xl font-black bg-gradient-to-b from-white to-white/60 bg-clip-text text-transparent">
-                    Create Viral Shorts
+                    Virale Shorts erstellen
                   </h1>
                   <p className="text-zinc-400 text-lg">
-                    Drop your long-form video URL or file below to instantly generate viral clips with AI.
+                    Füge unten deine Longform-Video-URL oder Datei ein und erzeuge sofort virale Clips mit KI.
                   </p>
                 </div>
 
@@ -1717,7 +2580,7 @@ function App() {
                 <div className="mb-4 md:mb-6 flex items-center justify-between gap-3">
                   <h2 className="text-lg font-semibold flex items-center gap-2">
                     <Activity className={`text-primary ${status === 'processing' ? 'animate-pulse' : ''}`} size={20} />
-                    Live Analysis
+                    Live-Analyse
                   </h2>
                   <div className="flex items-center gap-2">
                     <span className={`text-xs px-2 py-1 rounded-full border ${status === 'processing' ? 'bg-primary/10 border-primary/20 text-primary' :
@@ -1736,11 +2599,29 @@ function App() {
                       onClick={() => setIsMobileLiveAnalysisOpen((prev) => !prev)}
                       className="md:hidden inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-zinc-300 hover:text-white hover:bg-white/10"
                     >
-                      <span>{isMobileLiveAnalysisOpen ? 'Hide' : 'Show'}</span>
+                      <span>{isMobileLiveAnalysisOpen ? 'Ausblenden' : 'Einblenden'}</span>
                       <ChevronDown size={13} className={`transition-transform ${isMobileLiveAnalysisOpen ? '' : '-rotate-90'}`} />
                     </button>
                   </div>
                 </div>
+
+                {showMobileProcessingIndicator && (
+                  <div className="md:hidden mb-3 rounded-xl border border-primary/20 bg-primary/5 p-3">
+                    <div className="flex items-center justify-between gap-2 text-[11px]">
+                      <span className="text-primary font-semibold">{mobileProcessingProgress.title}</span>
+                      <span className="text-zinc-300 tabular-nums">{mobileProcessingProgress.percent}%</span>
+                    </div>
+                    <div className="mt-2 h-1.5 w-full rounded-full bg-white/10 overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-cyan-400 via-primary to-yellow-400 transition-all duration-700 ease-out"
+                        style={{ width: `${mobileProcessingProgress.percent}%` }}
+                      />
+                    </div>
+                    <p className="mt-2 text-[10px] text-zinc-400">
+                      {mobileProcessingProgress.hint} Job laeuft weiter, bitte etwas Geduld.
+                    </p>
+                  </div>
+                )}
 
                 <div className={`${isMobileLiveAnalysisOpen ? 'flex' : 'hidden'} md:flex flex-1 min-h-0 flex-col gap-4`}>
                   {/* Video Preview */}
@@ -1766,7 +2647,7 @@ function App() {
                     </div>
                     {logsVisible && (
                       <div className="flex-1 p-4 overflow-y-auto font-mono text-xs space-y-1.5 custom-scrollbar touch-scroll text-zinc-400">
-                        {logs.map((log, i) => (
+                        {displayLogs.map((log, i) => (
                           <div key={i} className={`flex gap-2 ${log.toLowerCase().includes('error') ? 'text-red-400' : 'text-zinc-400'}`}>
                             <span className="text-zinc-700 shrink-0">{new Date().toLocaleTimeString()}</span>
                             <span>{log}</span>
@@ -1785,7 +2666,7 @@ function App() {
               <div className={`${status === 'complete' ? 'w-full md:w-[70%] lg:w-[75%]' : 'w-full md:w-[45%] lg:w-[40%]'} flex-1 min-h-0 md:h-full flex flex-col bg-background p-4 md:p-6 transition-all duration-700 ease-in-out`}>
                 <h2 className="text-lg font-semibold mb-6 flex items-center gap-2 shrink-0">
                   <Sparkles className="text-yellow-400" size={20} />
-                  Generated Shorts
+                  Generierte Shorts
                   {results?.clips?.length > 0 && (
                     <span className="text-xs bg-white/10 text-white px-2 py-0.5 rounded-full ml-auto">
                       {results.clips.length} Clips
@@ -1814,11 +2695,13 @@ function App() {
                           ollamaBaseUrl={ollamaBaseUrl}
                           ollamaModel={ollamaModel}
                           elevenLabsKey={elevenLabsKey}
-                          subtitleStyle={subtitleStyle}
-                          hookStyle={hookStyle}
+                          subtitleStyle={activeJobOverlayDefaults.subtitleStyle}
+                          hookStyle={activeJobOverlayDefaults.hookStyle}
                           tightEditPreset={tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset}
                           socialPostSettings={socialPostSettings}
                           activeUploadProfile={uploadUserId}
+                          onApplySubtitleDefaultsToJob={(style) => applySubtitleDefaultsToJob(jobId, style)}
+                          onApplyHookDefaultsToJob={(style) => applyHookDefaultsToJob(jobId, style)}
                           currentVideoOverride={clipVideoOverrides[getClipVariantKey(jobId, clip, i)]}
                           onVideoVariantChange={(videoUrl) => updateClipVideoOverride(jobId, clip, i, videoUrl)}
                           onClipUpdated={(updatedClip) => updateClipResult(jobId, updatedClip)}
@@ -1831,11 +2714,11 @@ function App() {
                     status === 'processing' ? (
                       <div className="h-full flex flex-col items-center justify-center text-zinc-500 space-y-4 opacity-50">
                         <div className="w-12 h-12 rounded-full border-2 border-zinc-800 border-t-primary animate-spin" />
-                        <p className="text-sm">Waiting for clips...</p>
+                        <p className="text-sm">Warte auf Clips...</p>
                       </div>
                     ) : status === 'error' ? (
                       <div className="h-full flex flex-col items-center justify-center text-red-400 space-y-2">
-                        <p>Generation failed.</p>
+                        <p>Generierung fehlgeschlagen.</p>
                       </div>
                     ) : null
                   )}

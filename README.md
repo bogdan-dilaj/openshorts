@@ -77,9 +77,15 @@ Other reasonable local models for this project are for example:
 - `llama3.1:8b`
 - `gemma3:12b`
 
-### 3. Start the stack
+### 3. Start the stack (GPU default)
 ```bash
 docker compose up --build -d
+```
+`docker-compose.gpu.yml` is no longer required for normal GPU usage.
+
+Force CPU explicitly (for troubleshooting or lower power mode):
+```bash
+docker compose -f docker-compose.cpu.yml up --build -d
 ```
 
 ### 4. Open the dashboard
@@ -399,6 +405,15 @@ docker compose logs -f backend
 docker compose restart backend
 ```
 
+Switch backend mode:
+```bash
+# GPU (default)
+docker compose up -d --force-recreate backend
+
+# CPU (explicit override)
+docker compose -f docker-compose.cpu.yml up -d --force-recreate backend
+```
+
 Stop the stack:
 ```bash
 docker compose down
@@ -410,6 +425,7 @@ docker compose down
 - History
 - Settings
 - YouTube Studio
+- Upload Post
 
 ## Known practical constraints
 

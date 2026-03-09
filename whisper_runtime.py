@@ -141,7 +141,7 @@ def _compute_candidates(device: str, safe_mode: bool) -> List[str]:
     return ["int8"]
 
 
-def _model_candidates(safe_mode: bool, device: str) -> List[str]:
+def _model_candidates(safe_mode: bool, device: str, *, log_cpu_optimization: bool = True) -> List[str]:
     primary = (os.environ.get("WHISPER_MODEL") or "distil-large-v3").strip() or "distil-large-v3"
     cpu_primary = (os.environ.get("WHISPER_CPU_MODEL") or "").strip()
     cpu_auto_distil = _env_bool("WHISPER_CPU_AUTO_DISTIL", True)
@@ -152,7 +152,7 @@ def _model_candidates(safe_mode: bool, device: str) -> List[str]:
             ordered_primary.append(cpu_primary)
         elif cpu_auto_distil and "large-v3" in primary.lower() and "distil" not in primary.lower():
             ordered_primary.append("distil-large-v3")
-        if ordered_primary and ordered_primary[0] != primary:
+        if log_cpu_optimization and ordered_primary and ordered_primary[0] != primary:
             print(
                 "⚙️ Whisper CPU optimization: "
                 f"prioritizing {ordered_primary[0]} before {primary}."
@@ -174,6 +174,8 @@ def _model_candidates(safe_mode: bool, device: str) -> List[str]:
 
 def _estimated_vram_mb(model_name: str) -> int:
     lowered = model_name.lower()
+    if "distil-large-v3" in lowered:
+        return 2600
     if "large-v3" in lowered:
         return 6200
     if "large" in lowered:
@@ -208,14 +210,38 @@ def get_whisper_model() -> Tuple[WhisperModel, Dict[str, Any]]:
     vram_margin_mb = _env_int("WHISPER_SAFE_VRAM_MARGIN_MB", 1800, minimum=0)
 
     attempts: List[Tuple[str, str, str]] = []
-    models = _model_candidates(safe_mode, device)
-    for model_name in models:
-        if device == "cuda":
+    cuda_models = _model_candidates(safe_mode, "cuda")
+    cpu_models = _model_candidates(
+        safe_mode,
+        "cpu",
+        log_cpu_optimization=(device == "cpu"),
+    )
+    seen_attempts = set()
+
+    if device == "cuda":
+        for model_name in cuda_models:
             for compute_type in _compute_candidates("cuda", safe_mode):
-                attempts.append((model_name, "cuda", compute_type))
-        if safe_mode or device == "cpu":
+                attempt = (model_name, "cuda", compute_type)
+                if attempt in seen_attempts:
+                    continue
+                seen_attempts.add(attempt)
+                attempts.append(attempt)
+        if safe_mode:
+            for model_name in cpu_models:
+                for compute_type in _compute_candidates("cpu", safe_mode):
+                    attempt = (model_name, "cpu", compute_type)
+                    if attempt in seen_attempts:
+                        continue
+                    seen_attempts.add(attempt)
+                    attempts.append(attempt)
+    else:
+        for model_name in cpu_models:
             for compute_type in _compute_candidates("cpu", safe_mode):
-                attempts.append((model_name, "cpu", compute_type))
+                attempt = (model_name, "cpu", compute_type)
+                if attempt in seen_attempts:
+                    continue
+                seen_attempts.add(attempt)
+                attempts.append(attempt)
 
     errors: List[str] = []
     had_cuda_failure = False
@@ -266,7 +292,7 @@ def get_whisper_model() -> Tuple[WhisperModel, Dict[str, Any]]:
                 _MODEL_CACHE[key] = model
                 _MODEL_META[key] = meta
                 print(
-                    "🎙️ Whisper runtime ready: "
+                    "🎙️ Faster-Whisper runtime ready: "
                     f"model={model_name}, device={attempt_device}, compute={compute_type}, safe_mode={safe_mode}"
                 )
                 return model, meta
@@ -278,14 +304,16 @@ def get_whisper_model() -> Tuple[WhisperModel, Dict[str, Any]]:
     raise RuntimeError("Failed to initialize Whisper model. Attempts: " + " | ".join(errors[-8:]))
 
 
-def transcribe_with_runtime(audio_path: str, *, word_timestamps: bool = True):
+def transcribe_with_runtime(audio_path: str, *, word_timestamps: bool = True, language: Any = None):
     safe_mode = _env_bool("WHISPER_SAFE_MODE", True)
     beam_size = _env_int("WHISPER_BEAM_SIZE", 5, minimum=1)
     if safe_mode:
         beam_size = min(beam_size, 4)
     vad_filter = _env_bool("WHISPER_VAD_FILTER", safe_mode)
 
-    requested_language = _normalize_language_code(os.environ.get("WHISPER_LANGUAGE"))
+    requested_language = _normalize_language_code(language)
+    if not requested_language:
+        requested_language = _normalize_language_code(os.environ.get("WHISPER_LANGUAGE"))
     hints = _language_hints()
     lang_retry_enabled = _env_bool("WHISPER_LANGUAGE_RETRY_ENABLED", True)
     lang_retry_max_probability = _env_float("WHISPER_LANGUAGE_RETRY_MAX_PROBABILITY", 0.92)

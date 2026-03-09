@@ -1,10 +1,12 @@
 import time
+import copy
 import cv2
 import scenedetect
 import subprocess
 import argparse
 import re
 import sys
+import threading
 import urllib.request
 import urllib.error
 import math
@@ -618,10 +620,83 @@ def _best_accessible_source_edge(info):
 
     return best_format, best_edge
 
+
+def _youtube_download_format_profiles():
+    profiles = []
+    seen = set()
+
+    def add(label, expr):
+        key = (label, expr)
+        if key in seen:
+            return
+        seen.add(key)
+        profiles.append((label, expr))
+
+    add(
+        "target-1080-720-avc1",
+        (
+            f"bestvideo[vcodec^=avc1][ext=mp4][height<={PREFERRED_DOWNLOAD_HEIGHT}][height>={MIN_SOURCE_EDGE}]+bestaudio[ext=m4a]/"
+            f"bestvideo[vcodec^=avc1][ext=mp4][height<={PREFERRED_DOWNLOAD_HEIGHT}]+bestaudio/"
+            f"bestvideo[vcodec^=avc1][height<={PREFERRED_DOWNLOAD_HEIGHT}][height>={MIN_SOURCE_EDGE}]+bestaudio"
+        ),
+    )
+    add(
+        "target-1080-720-mp4",
+        (
+            f"bestvideo[ext=mp4][height<={PREFERRED_DOWNLOAD_HEIGHT}][height>={MIN_SOURCE_EDGE}]+bestaudio[ext=m4a]/"
+            f"best[ext=mp4][height<={PREFERRED_DOWNLOAD_HEIGHT}][height>={MIN_SOURCE_EDGE}]/"
+            f"bestvideo[ext=mp4][height>={MIN_SOURCE_EDGE}]+bestaudio/"
+            f"bestvideo[height<={PREFERRED_DOWNLOAD_HEIGHT}][height>={MIN_SOURCE_EDGE}]+bestaudio/"
+            f"best[height<={PREFERRED_DOWNLOAD_HEIGHT}][height>={MIN_SOURCE_EDGE}]"
+        ),
+    )
+    add(
+        "target-max-1080-mp4",
+        (
+            f"bestvideo[ext=mp4][height<={PREFERRED_DOWNLOAD_HEIGHT}]+bestaudio[ext=m4a]/"
+            f"best[ext=mp4][height<={PREFERRED_DOWNLOAD_HEIGHT}]/"
+            f"bestvideo[height<={PREFERRED_DOWNLOAD_HEIGHT}]+bestaudio/"
+            f"best[height<={PREFERRED_DOWNLOAD_HEIGHT}]"
+        ),
+    )
+    # Final fallback: pick the best downloadable stream combo regardless of height;
+    # final quality gate below still rejects anything below MIN_SOURCE_EDGE.
+    add("best-available", "bestvideo+bestaudio/best")
+    return profiles
+
 # --- MediaPipe Setup ---
 # Use standard Face Detection (BlazeFace) for speed
 mp_face_detection = mp.solutions.face_detection
-face_detection = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+_face_detection_local = threading.local()
+
+
+def _new_face_detector():
+    return mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+
+
+def _close_face_detector(detector):
+    if detector is None:
+        return
+    try:
+        detector.close()
+    except Exception:
+        pass
+
+
+def _get_thread_face_detector():
+    detector = getattr(_face_detection_local, "detector", None)
+    if detector is None:
+        detector = _new_face_detector()
+        _face_detection_local.detector = detector
+    return detector
+
+
+def _reset_thread_face_detector():
+    detector = getattr(_face_detection_local, "detector", None)
+    _close_face_detector(detector)
+    detector = _new_face_detector()
+    _face_detection_local.detector = detector
+    return detector
 
 class SmoothedCameraman:
     """
@@ -862,8 +937,22 @@ def detect_face_candidates(frame):
     """
     height, width, _ = frame.shape
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_detection.process(rgb_frame)
-    
+    active_detector = _get_thread_face_detector()
+
+    try:
+        results = active_detector.process(rgb_frame)
+    except Exception as e:
+        message = str(e)
+        if "Packet timestamp mismatch" not in message and "InputStreamHandler" not in message:
+            raise
+
+        # Recover by recreating detector state to avoid stale graph timestamps.
+        active_detector = _reset_thread_face_detector()
+
+        try:
+            results = active_detector.process(rgb_frame)
+        except Exception:
+            return []
     candidates = []
     
     if not results.detections:
@@ -1053,7 +1142,47 @@ def detect_scenes(video_path):
     video_manager.release()
     return scene_list, fps
 
+
+def probe_video_stream(video_path):
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=codec_name,width,height,pix_fmt",
+        "-of", "json",
+        video_path,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            **subprocess_priority_kwargs(),
+        )
+        payload = json.loads(result.stdout or "{}")
+        streams = payload.get("streams") or []
+        if streams:
+            stream = streams[0] or {}
+            return {
+                "codec_name": (stream.get("codec_name") or "").lower(),
+                "width": int(stream.get("width") or 0),
+                "height": int(stream.get("height") or 0),
+                "pix_fmt": stream.get("pix_fmt") or "",
+            }
+    except Exception:
+        pass
+    return {}
+
+
 def get_video_resolution(video_path):
+    stream_info = probe_video_stream(video_path)
+    width = int(stream_info.get("width") or 0)
+    height = int(stream_info.get("height") or 0)
+    if width > 0 and height > 0:
+        return width, height
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise IOError(f"Could not open video file {video_path}")
@@ -1061,6 +1190,77 @@ def get_video_resolution(video_path):
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()
     return width, height
+
+
+def ensure_cv2_compatible_video(video_path, output_dir):
+    stream_info = probe_video_stream(video_path)
+    codec_name = (stream_info.get("codec_name") or "").lower()
+    ext = os.path.splitext(video_path)[1].lower()
+    needs_safari_safe_source = ext != ".mp4" or codec_name != "h264"
+    if not needs_safari_safe_source:
+        return video_path
+
+    base_name = sanitize_filename(os.path.splitext(os.path.basename(video_path))[0])
+    working_path = os.path.join(output_dir, f"{base_name}_working_h264.mp4")
+
+    if os.path.exists(working_path) and os.path.getsize(working_path) > 0:
+        print(f"♻️  Reusing H.264 working source: {working_path}")
+        return working_path
+
+    reason_parts = []
+    if codec_name and codec_name != "h264":
+        reason_parts.append(f"codec={codec_name}")
+    if ext and ext != ".mp4":
+        reason_parts.append(f"container={ext}")
+    reason = ", ".join(reason_parts) if reason_parts else "unsupported source"
+    print(
+        "⚠️  Source is not Safari/OpenCV-friendly "
+        f"({reason}). Creating H.264 MP4 working copy..."
+    )
+    convert_cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        video_path,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        *ffmpeg_thread_args(),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        working_path,
+    ]
+
+    try:
+        subprocess.run(
+            convert_cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            **subprocess_priority_kwargs(),
+        )
+        width, height = get_video_resolution(working_path)
+        print(f"✅ H.264 working source ready: {working_path} ({width}x{height})")
+        return working_path
+    except subprocess.CalledProcessError as exc:
+        if os.path.exists(working_path):
+            os.remove(working_path)
+        err = exc.stderr.decode("utf-8", errors="ignore")[-500:]
+        print(f"⚠️ Failed to convert source to H.264 MP4. Continuing with original input. Details: {err}")
+        return video_path
 
 
 def sanitize_filename(filename):
@@ -1247,8 +1447,7 @@ def download_youtube_video(url, output_dir="."):
     if extractor_args:
         common_ydl_opts["extractor_args"] = extractor_args
 
-    selected_candidate = None
-    selected_info = None
+    viable_candidates = []
     preflight_errors = []
 
     try:
@@ -1273,13 +1472,18 @@ def download_youtube_video(url, output_dir="."):
                     )
                     continue
 
-                selected_candidate = candidate
-                selected_info = info
-                break
+                viable_candidates.append(
+                    {
+                        "candidate": candidate,
+                        "info": info,
+                        "best_format": best_format,
+                        "best_edge": best_edge,
+                    }
+                )
             except Exception as exc:
                 preflight_errors.append(f"{candidate['label']}: {exc}")
 
-        if not selected_candidate or not selected_info:
+        if not viable_candidates:
             detail = "\n".join(preflight_errors[-5:]) if preflight_errors else "No auth candidate succeeded."
             raise RuntimeError(
                 "Unable to access a high-quality YouTube source.\n"
@@ -1287,7 +1491,7 @@ def download_youtube_video(url, output_dir="."):
                 "Set valid cookies (cookies.txt or pasted cookies), optional visitor data/PO token, or upload the source file manually."
             )
 
-        video_title = selected_info.get("title", "youtube_video")
+        video_title = viable_candidates[0]["info"].get("title", "youtube_video")
         sanitized_title = sanitize_filename(video_title)
         output_template = os.path.join(output_dir, f"{sanitized_title}.%(ext)s")
         existing_file = _find_downloaded_video_file(output_dir, sanitized_title)
@@ -1295,42 +1499,87 @@ def download_youtube_video(url, output_dir="."):
             os.remove(existing_file)
             print("🗑️  Removed existing file to re-download highest available quality")
 
-        ydl_opts = {
-            **common_ydl_opts,
-            **selected_candidate["opts"],
-            "format": (
-                f"bestvideo[height<={PREFERRED_DOWNLOAD_HEIGHT}][height>={MIN_SOURCE_EDGE}]+bestaudio/"
-                f"best[height<={PREFERRED_DOWNLOAD_HEIGHT}][height>={MIN_SOURCE_EDGE}]/"
-                f"bestvideo[height>={MIN_SOURCE_EDGE}]+bestaudio/best[height>={MIN_SOURCE_EDGE}]"
-            ),
-            "outtmpl": output_template,
-            "merge_output_format": "mkv",
-            "overwrites": True,
-        }
+        format_profiles = _youtube_download_format_profiles()
+        download_errors = []
 
-        print(f"⬇️ Downloading with auth={selected_candidate['label']}")
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+        for candidate_entry in viable_candidates:
+            candidate = candidate_entry["candidate"]
+            probe_info = candidate_entry["info"]
+            candidate_label = candidate["label"]
 
-        downloaded_file = _find_downloaded_video_file(output_dir, sanitized_title)
-        if not downloaded_file:
-            raise RuntimeError("yt-dlp finished without a usable video file.")
+            for profile_label, format_expr in format_profiles:
+                stale_file = _find_downloaded_video_file(output_dir, sanitized_title)
+                if stale_file and os.path.exists(stale_file):
+                    os.remove(stale_file)
 
-        width, height = get_video_resolution(downloaded_file)
-        short_edge = min(width, height)
-        print(f"🎞️  Downloaded source resolution: {width}x{height}")
-        if short_edge < MIN_SOURCE_EDGE:
-            if os.path.exists(downloaded_file):
-                os.remove(downloaded_file)
-            raise RuntimeError(
-                f"Downloaded source is only {width}x{height}. "
-                "Aborting to avoid a low-quality 1080x1920 upscale. "
-                "Provide valid YouTube auth cookies/tokens or upload the source video manually."
-            )
+                ydl_opts = {
+                    **common_ydl_opts,
+                    **candidate["opts"],
+                    "format": format_expr,
+                    "outtmpl": output_template,
+                    "merge_output_format": "mp4",
+                    "overwrites": True,
+                }
 
-        step_end_time = time.time()
-        print(f"✅ Video downloaded in {step_end_time - step_start_time:.2f}s: {downloaded_file}")
-        return downloaded_file, sanitized_title
+                print(
+                    "⬇️ Downloading with "
+                    f"auth={candidate_label} format_profile={profile_label}"
+                )
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        # Reuse successfully probed info to avoid a second extraction race.
+                        ydl.process_ie_result(copy.deepcopy(probe_info), download=True)
+                except Exception as exc:
+                    msg = str(exc)
+                    download_errors.append(f"{candidate_label}/{profile_label}: {msg}")
+                    if "Requested format is not available" in msg:
+                        print(
+                            "⚠️ Requested format vanished during download. "
+                            f"Retrying next profile (auth={candidate_label}, profile={profile_label})."
+                        )
+                    else:
+                        print(
+                            f"⚠️ Download attempt failed "
+                            f"(auth={candidate_label}, profile={profile_label}): {msg}"
+                        )
+                    continue
+
+                downloaded_file = _find_downloaded_video_file(output_dir, sanitized_title)
+                if not downloaded_file:
+                    download_errors.append(
+                        f"{candidate_label}/{profile_label}: yt-dlp finished without a usable video file."
+                    )
+                    print(
+                        "⚠️ Download completed but no usable file was found. "
+                        f"Trying next profile (auth={candidate_label}, profile={profile_label})."
+                    )
+                    continue
+
+                width, height = get_video_resolution(downloaded_file)
+                short_edge = min(width, height)
+                print(f"🎞️  Downloaded source resolution: {width}x{height}")
+                if short_edge < MIN_SOURCE_EDGE:
+                    if os.path.exists(downloaded_file):
+                        os.remove(downloaded_file)
+                    download_errors.append(
+                        f"{candidate_label}/{profile_label}: downloaded source too small ({width}x{height})"
+                    )
+                    print(
+                        "⚠️ Downloaded source below minimum quality gate "
+                        f"({width}x{height}, required short edge >= {MIN_SOURCE_EDGE})."
+                    )
+                    continue
+
+                step_end_time = time.time()
+                print(f"✅ Video downloaded in {step_end_time - step_start_time:.2f}s: {downloaded_file}")
+                return downloaded_file, sanitized_title
+
+        detail = "\n".join(download_errors[-8:]) if download_errors else "All download attempts failed."
+        raise RuntimeError(
+            "Unable to download a usable high-quality YouTube source after retries.\n"
+            f"Details:\n{detail}\n"
+            "Set valid cookies (cookies.txt or pasted cookies), optional visitor data/PO token, or upload the source file manually."
+        )
 
     except Exception as e:
         import sys
@@ -1797,22 +2046,42 @@ def get_viral_clips_via_gemini(transcript_result, video_duration, max_clip_durat
 
 
 def _call_ollama(prompt, base_url, model_name):
+    disable_thinking = str(os.environ.get("OLLAMA_DISABLE_THINKING", "true")).strip().lower() in {"1", "true", "yes", "on"}
+    payload = {
+        "model": model_name,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+        "options": {"temperature": 0.2},
+    }
+    # Some reasoning models (e.g. qwen3.*) may put JSON into `thinking` and keep `response` empty.
+    # Disabling thinking keeps output in `response` and avoids empty chunk results.
+    if disable_thinking:
+        payload["think"] = False
+
     req = urllib.request.Request(
         f"{base_url}/api/generate",
-        data=json.dumps({
-            "model": model_name,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
-            "keep_alive": OLLAMA_KEEP_ALIVE,
-            "options": {"temperature": 0.2}
-        }).encode("utf-8"),
+        data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST"
     )
     with urllib.request.urlopen(req, timeout=OLLAMA_REQUEST_TIMEOUT_SECONDS) as response:
         outer = json.loads(response.read().decode("utf-8"))
-    return outer, (outer.get("response") or "").strip()
+
+    text = ""
+    if isinstance(outer.get("response"), str):
+        text = outer.get("response", "").strip()
+    if not text:
+        message = outer.get("message")
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            text = message.get("content", "").strip()
+    if not text and isinstance(outer.get("thinking"), str):
+        text = outer.get("thinking", "").strip()
+        if text:
+            print("ℹ️  Ollama returned content in `thinking`; using it as fallback.")
+
+    return outer, text
 
 
 def _read_http_error_body(exc):
@@ -1835,19 +2104,24 @@ def _ollama_model_not_found(exc, body, model_name):
 
 
 def _warmup_ollama_model(base_url, model_name):
+    disable_thinking = str(os.environ.get("OLLAMA_DISABLE_THINKING", "true")).strip().lower() in {"1", "true", "yes", "on"}
+    payload = {
+        "model": model_name,
+        "prompt": "Reply only with {\"ok\":true}.",
+        "stream": False,
+        "format": "json",
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+        "options": {
+            "temperature": 0,
+            "num_predict": 8,
+        },
+    }
+    if disable_thinking:
+        payload["think"] = False
+
     req = urllib.request.Request(
         f"{base_url}/api/generate",
-        data=json.dumps({
-            "model": model_name,
-            "prompt": "Reply only with {\"ok\":true}.",
-            "stream": False,
-            "format": "json",
-            "keep_alive": OLLAMA_KEEP_ALIVE,
-            "options": {
-                "temperature": 0,
-                "num_predict": 8,
-            },
-        }).encode("utf-8"),
+        data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST"
     )
@@ -1939,7 +2213,12 @@ def get_viral_clips_via_ollama(transcript_result, video_duration, max_clip_durat
             total_output_tokens += outer.get("eval_count") or 0
 
             if not text:
-                print(f"⚠️  Ollama chunk {idx + 1} returned an empty response.")
+                done_reason = outer.get("done_reason") or "unknown"
+                thinking_size = len(outer.get("thinking") or "") if isinstance(outer.get("thinking"), str) else 0
+                print(
+                    f"⚠️  Ollama chunk {idx + 1} returned an empty response "
+                    f"(done_reason={done_reason}, thinking_chars={thinking_size})."
+                )
                 continue
 
             result_json = _extract_json_payload(text)
@@ -2116,12 +2395,16 @@ if __name__ == '__main__':
         })
         sys.exit(1)
 
+    source_input_video = input_video
+    input_video = ensure_cv2_compatible_video(input_video, output_dir)
+
     update_job_manifest(output_dir, {
         "status": "processing",
         "error": None,
         "can_resume": True,
         "pipeline": {
             "input_video": input_video,
+            "source_input_video": source_input_video,
             "video_title": video_title,
             "mode": "whole_video" if args.skip_analysis else "clips",
             "analysis_only": bool(args.analysis_only),
@@ -2235,6 +2518,7 @@ if __name__ == '__main__':
                 clip_filename = clip.get('video_filename') or f"{video_title}_clip_{i+1}.mp4"
                 clip['video_filename'] = clip_filename
                 clip['source_video_filename'] = clip.get('source_video_filename') or source_video_filename
+                clip['original_video_filename'] = clip.get('original_video_filename') or os.path.basename(source_input_video)
                 clip['preview_start'] = round(float(clip.get('start', 0.0)), 3)
                 clip['preview_end'] = round(float(clip.get('end', clip.get('start', 0.0))), 3)
                 clip['display_duration'] = round(max(0.0, clip['preview_end'] - clip['preview_start']), 3)
@@ -2360,6 +2644,7 @@ if __name__ == '__main__':
         "error": None if overall_success else "Pipeline finished without any usable outputs.",
         "pipeline": {
             "input_video": input_video,
+            "source_input_video": source_input_video,
             "video_title": video_title,
             "metadata_file": metadata_file,
             "transcript_file": transcript_file if os.path.exists(transcript_file) else None,
@@ -2374,9 +2659,20 @@ if __name__ == '__main__':
     })
 
     # Clean up original only after a fully successful, non-resumable run.
-    if args.url and not args.keep_original and not args.analysis_only and manifest_status == "completed" and os.path.exists(input_video):
-        os.remove(input_video)
-        print(f"🗑️  Cleaned up downloaded video.")
+    if args.url and not args.keep_original and not args.analysis_only and manifest_status == "completed":
+        cleanup_targets = [source_input_video]
+        if input_video != source_input_video:
+            cleanup_targets.append(input_video)
+        cleaned = 0
+        for cleanup_path in cleanup_targets:
+            try:
+                if cleanup_path and os.path.exists(cleanup_path):
+                    os.remove(cleanup_path)
+                    cleaned += 1
+            except Exception as cleanup_exc:
+                print(f"⚠️  Failed to remove temporary source '{cleanup_path}': {cleanup_exc}")
+        if cleaned:
+            print(f"🗑️  Cleaned up downloaded video source files ({cleaned}).")
 
     total_time = time.time() - script_start_time
     print(f"\n⏱️  Total execution time: {total_time:.2f}s")

@@ -4,37 +4,37 @@ import { X, Loader2, Globe, Languages, AlertCircle } from 'lucide-react';
 import { getApiUrl } from '../config';
 
 const LANGUAGES = {
-    "es": "Spanish",
-    "fr": "French",
-    "de": "German",
-    "it": "Italian",
-    "pt": "Portuguese",
-    "pl": "Polish",
+    "es": "Spanisch",
+    "fr": "Französisch",
+    "de": "Deutsch",
+    "it": "Italienisch",
+    "pt": "Portugiesisch",
+    "pl": "Polnisch",
     "hi": "Hindi",
-    "ja": "Japanese",
-    "ko": "Korean",
-    "zh": "Chinese",
-    "ar": "Arabic",
-    "ru": "Russian",
-    "tr": "Turkish",
-    "nl": "Dutch",
-    "sv": "Swedish",
-    "id": "Indonesian",
+    "ja": "Japanisch",
+    "ko": "Koreanisch",
+    "zh": "Chinesisch",
+    "ar": "Arabisch",
+    "ru": "Russisch",
+    "tr": "Türkisch",
+    "nl": "Niederländisch",
+    "sv": "Schwedisch",
+    "id": "Indonesisch",
     "fil": "Filipino",
-    "ms": "Malay",
-    "vi": "Vietnamese",
-    "th": "Thai",
-    "uk": "Ukrainian",
-    "el": "Greek",
-    "cs": "Czech",
-    "fi": "Finnish",
-    "ro": "Romanian",
-    "da": "Danish",
-    "bg": "Bulgarian",
-    "hr": "Croatian",
-    "sk": "Slovak",
+    "ms": "Malaiisch",
+    "vi": "Vietnamesisch",
+    "th": "Thailändisch",
+    "uk": "Ukrainisch",
+    "el": "Griechisch",
+    "cs": "Tschechisch",
+    "fi": "Finnisch",
+    "ro": "Rumänisch",
+    "da": "Dänisch",
+    "bg": "Bulgarisch",
+    "hr": "Kroatisch",
+    "sk": "Slowakisch",
     "ta": "Tamil",
-    "en": "English",
+    "en": "Englisch",
 };
 
 export default function TranslateModal({ isOpen, onClose, onTranslate, isProcessing, videoUrl, hasApiKey }) {
@@ -63,15 +63,15 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
                         <Languages size={20} className="text-white" />
                     </div>
                     <div>
-                        <h3 className="text-lg font-bold text-white">Dub Voice</h3>
-                        <p className="text-xs text-zinc-500">AI voice translation by ElevenLabs</p>
+                        <h3 className="text-lg font-bold text-white">Stimmen-Dub</h3>
+                        <p className="text-xs text-zinc-500">KI-Sprachübersetzung mit ElevenLabs</p>
                     </div>
                 </div>
 
                 {!hasApiKey && (
                     <div className="mb-4 p-3 bg-yellow-500/10 border border-yellow-500/20 text-yellow-200 text-xs rounded-lg flex items-start gap-2">
                         <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                        <div>Configure ElevenLabs API Key in Settings first.</div>
+                        <div>Bitte zuerst den ElevenLabs API-Key in den Einstellungen setzen.</div>
                     </div>
                 )}
 
@@ -90,7 +90,7 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
                 <div className="mb-6">
                     <label className="block text-sm font-medium text-zinc-400 mb-2">
                         <Globe size={14} className="inline mr-2" />
-                        Target Language
+                        Zielsprache
                     </label>
                     <select
                         value={targetLanguage}
@@ -109,7 +109,7 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
                 {/* Info */}
                 <div className="mb-6 p-3 bg-green-500/10 border border-green-500/20 rounded-lg">
                     <p className="text-xs text-green-400">
-                        The audio will be dubbed with AI-generated voice in the selected language, matching the original speaker's characteristics.
+                        Die Audiospur wird mit KI-Stimme in die gewählte Sprache gedubbt und orientiert sich am ursprünglichen Sprecherprofil.
                     </p>
                 </div>
 
@@ -119,8 +119,8 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
                         <div className="flex items-center gap-3">
                             <Loader2 size={20} className="text-green-400 animate-spin" />
                             <div>
-                                <p className="text-sm text-white font-medium">Dubbing audio...</p>
-                                <p className="text-xs text-zinc-500">This may take a few minutes</p>
+                                <p className="text-sm text-white font-medium">Audio wird gedubbt...</p>
+                                <p className="text-xs text-zinc-500">Kann ein paar Minuten dauern</p>
                             </div>
                         </div>
                     </div>
@@ -133,7 +133,7 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
                         disabled={isProcessing}
                         className="flex-1 py-3 bg-white/5 hover:bg-white/10 text-zinc-300 rounded-xl font-medium transition-colors disabled:opacity-50"
                     >
-                        Cancel
+                        Abbrechen
                     </button>
                     <button
                         onClick={handleSubmit}
@@ -143,12 +143,12 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
                         {isProcessing ? (
                             <>
                                 <Loader2 size={16} className="animate-spin" />
-                                Dubbing...
+                                Dub läuft...
                             </>
                         ) : (
                             <>
                                 <Languages size={16} />
-                                Dub Voice
+                                Stimmen-Dub starten
                             </>
                         )}
                     </button>

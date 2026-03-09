@@ -10,9 +10,24 @@
     height: 100%;
   }
 
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
   body {
     @apply bg-background text-white antialiased;
     margin: 0;
+    overscroll-behavior-y: none;
+  }
+
+  @media (hover: none) and (pointer: coarse) {
+    input,
+    textarea,
+    select {
+      font-size: 16px !important;
+      line-height: 1.35;
+    }
   }
 }
 
@@ -21,7 +36,7 @@
 }
 
 .input-field {
-  @apply w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all text-sm placeholder:text-zinc-500;
+  @apply w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/50 transition-all text-base placeholder:text-zinc-500;
 }
 
 .btn-primary {

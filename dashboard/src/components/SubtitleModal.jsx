@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { X, Type, Loader2 } from 'lucide-react';
 import { BACKGROUND_OPTIONS, DEFAULT_SUBTITLE_STYLE, FONT_OPTIONS } from '../overlayOptions';
 
-export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessing, videoUrl, defaultSettings = DEFAULT_SUBTITLE_STYLE }) {
+export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAsJobDefault, isProcessing, videoUrl, defaultSettings = DEFAULT_SUBTITLE_STYLE }) {
     const [yPosition, setYPosition] = useState(defaultSettings.yPosition ?? 86);
     const [fontSize, setFontSize] = useState(defaultSettings.fontSize || 24);
     const [fontFamily, setFontFamily] = useState(defaultSettings.fontFamily || DEFAULT_SUBTITLE_STYLE.fontFamily);
@@ -86,7 +86,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                 {/* Left: Preview */}
                 <div
                     ref={previewFrameRef}
-                    className="w-full max-w-[420px] mx-auto md:mx-0 md:max-w-none md:flex-1 flex flex-col items-center justify-center bg-black rounded-lg border border-white/5 overflow-hidden relative aspect-[9/16] md:aspect-[9/16]"
+                    className="relative w-full flex-none aspect-[9/16] overflow-hidden rounded-lg border border-white/5 bg-black md:flex-1 md:min-h-0"
                 >
                      <video src={videoUrl} className="w-full h-full object-contain opacity-50" muted playsInline />
                      
@@ -108,21 +108,21 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                 ...previewStyle,
                             }} 
                         >
-                            This is how your subtitles<br/>will appear on the video
+                            So sehen deine Untertitel<br/>im Video aus
                         </span>
                      </div>
                 </div>
 
                 {/* Right: Controls */}
-                <div className="w-full md:w-80 flex flex-col min-h-0">
+                <div className="w-full md:w-80 flex flex-col md:min-h-0">
                     <h3 className="text-lg md:text-xl font-bold text-white mb-4 md:mb-6 flex items-center gap-2">
-                        <Type className="text-primary" /> Auto Subtitles
+                        <Type className="text-primary" /> Auto-Untertitel
                     </h3>
 
-                    <div className="space-y-4 md:space-y-6 flex-1 overflow-y-auto custom-scrollbar touch-scroll pr-1 md:pr-2">
+                    <div className="space-y-4 md:space-y-6 md:flex-1 md:overflow-y-auto custom-scrollbar touch-scroll pr-1 md:pr-2">
                         {/* Position Selector */}
                         <div>
-                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Quick Position</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Schnellposition</label>
                             <div className="grid grid-cols-1 gap-2">
                                 <button 
                                     onClick={() => setYPosition(presetPositions.top)}
@@ -131,7 +131,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                     <div className="w-7 h-7 md:w-8 md:h-8 rounded-lg bg-black/50 border border-white/10 flex items-start justify-center pt-1">
                                         <div className="w-4 h-0.5 bg-white/50 rounded-full"></div>
                                     </div>
-                                    <span className="text-sm md:text-base font-medium">Top</span>
+                                    <span className="text-sm md:text-base font-medium">Oben</span>
                                 </button>
                                 
                                 <button 
@@ -141,7 +141,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                     <div className="w-7 h-7 md:w-8 md:h-8 rounded-lg bg-black/50 border border-white/10 flex items-center justify-center">
                                         <div className="w-4 h-0.5 bg-white/50 rounded-full"></div>
                                     </div>
-                                    <span className="text-sm md:text-base font-medium">Center</span>
+                                    <span className="text-sm md:text-base font-medium">Mitte</span>
                                 </button>
                                 
                                 <button 
@@ -151,13 +151,13 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                     <div className="w-7 h-7 md:w-8 md:h-8 rounded-lg bg-black/50 border border-white/10 flex items-end justify-center pb-1">
                                         <div className="w-4 h-0.5 bg-white/50 rounded-full"></div>
                                     </div>
-                                    <span className="text-sm md:text-base font-medium">Bottom</span>
+                                    <span className="text-sm md:text-base font-medium">Unten</span>
                                 </button>
                             </div>
                         </div>
 
                         <div>
-                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Y Position</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Y-Position</label>
                             <input
                                 type="range"
                                 min="0"
@@ -168,14 +168,14 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                                 className="w-full accent-yellow-500"
                             />
                             <div className="mt-2 flex justify-between text-[11px] text-zinc-500">
-                                <span>Top</span>
+                                <span>Oben</span>
                                 <span>{yPosition}%</span>
-                                <span>Bottom</span>
+                                <span>Unten</span>
                             </div>
                         </div>
 
                         <div>
-                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Font</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Schriftart</label>
                             <select
                                 value={fontFamily}
                                 onChange={(e) => setFontFamily(e.target.value)}
@@ -188,7 +188,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         </div>
 
                         <div>
-                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Background</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Hintergrund</label>
                             <select
                                 value={backgroundStyle}
                                 onChange={(e) => setBackgroundStyle(e.target.value)}
@@ -201,7 +201,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         </div>
 
                         <div>
-                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Size</label>
+                            <label className="text-[11px] md:text-xs font-bold text-zinc-400 uppercase tracking-wider mb-2 md:mb-3 block">Größe</label>
                             <input
                                 type="range"
                                 min="18"
@@ -214,17 +214,27 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, isProcessin
                         </div>
                     </div>
 
+                    {onApplyAsJobDefault && (
+                        <button
+                            onClick={() => onApplyAsJobDefault({ position, yPosition, fontSize, fontFamily, backgroundStyle })}
+                            disabled={isProcessing}
+                            className="w-full py-2.5 md:py-3 mt-4 border border-white/15 bg-white/5 hover:bg-white/10 text-zinc-100 text-sm font-semibold rounded-xl transition-all active:scale-[0.98]"
+                        >
+                            Für alle Clips im Job übernehmen
+                        </button>
+                    )}
+
                     <button
                         onClick={() => onGenerate({ position, yPosition, fontSize, fontFamily, backgroundStyle })}
                         disabled={isProcessing}
-                        className="w-full py-3 md:py-4 mt-4 md:mt-6 bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-400 hover:to-orange-400 text-black text-sm md:text-base font-bold rounded-xl shadow-lg shadow-orange-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2"
+                        className="w-full py-3 md:py-4 mt-3 bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-400 hover:to-orange-400 text-black text-sm md:text-base font-bold rounded-xl shadow-lg shadow-orange-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2"
                     >
                         {isProcessing ? <Loader2 size={20} className="animate-spin" /> : <Type size={20} />}
-                        {isProcessing ? 'Generating...' : 'Generate Subtitles'}
+                        {isProcessing ? 'Generiere...' : 'Untertitel einbrennen'}
                     </button>
                     
                     <p className="text-[10px] text-zinc-500 text-center mt-3">
-                        Uses AI word-level timestamps to sync perfectly.
+                        Nutzt Wort-Timestamps aus der KI für saubere Synchronisation.
                     </p>
                 </div>
             </div>

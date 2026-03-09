@@ -11,31 +11,31 @@ export const SOCIAL_PLATFORM_OPTIONS = [
 export const INSTAGRAM_SHARE_MODES = [
   {
     value: 'CUSTOM',
-    label: 'Regular Reel',
-    description: 'Normal Reel for followers immediately.',
+    label: 'Normales Reel',
+    description: 'Normales Reel, sofort für Follower sichtbar.',
   },
   {
     value: 'TRIAL_REELS_SHARE_TO_FOLLOWERS_IF_LIKED',
-    label: 'Trial Reel Auto-Share',
-    description: 'Show to non-followers first. Instagram shares later if performance is strong.',
+    label: 'Trial Reel mit Auto-Share',
+    description: 'Erst für Nicht-Follower. Bei guter Performance teilt Instagram später an Follower.',
   },
   {
     value: 'TRIAL_REELS_DONT_SHARE_TO_FOLLOWERS',
-    label: 'Trial Reel Only',
-    description: 'Show only to non-followers until you manually share it later.',
+    label: 'Nur Trial Reel',
+    description: 'Nur für Nicht-Follower sichtbar, bis du es später manuell teilst.',
   },
 ];
 
 export const TIKTOK_POST_MODES = [
   {
     value: 'DIRECT_POST',
-    label: 'Direct Post',
-    description: 'Publish directly to the TikTok account.',
+    label: 'Direkt posten',
+    description: 'Direkt auf dem TikTok-Konto veröffentlichen.',
   },
   {
     value: 'MEDIA_UPLOAD',
-    label: 'Draft / Inbox',
-    description: 'Upload to TikTok inbox so the user finishes publishing in the TikTok app.',
+    label: 'Entwurf / Inbox',
+    description: 'In die TikTok-Inbox hochladen, damit der Nutzer den Post in TikTok finalisiert.',
   },
 ];
 

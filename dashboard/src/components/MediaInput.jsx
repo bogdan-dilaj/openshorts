@@ -49,7 +49,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                         }`}
                 >
                     <Upload size={18} />
-                    Upload File
+                    Datei hochladen
                 </button>
             </div>
 
@@ -93,8 +93,8 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                     className="hidden"
                                 />
                                 <Upload className="mx-auto mb-3 text-zinc-500" size={24} />
-                                <p className="text-zinc-400">Click to upload or drag and drop</p>
-                                <p className="text-xs text-zinc-600 mt-1">MP4, MOV up to 500MB</p>
+                                <p className="text-zinc-400">Klicken zum Hochladen oder per Drag & Drop ablegen</p>
+                                <p className="text-xs text-zinc-600 mt-1">MP4, MOV bis 500MB</p>
                             </label>
                         )}
                     </div>
@@ -169,11 +169,11 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     {isProcessing ? (
                         <>
                             <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                            Processing Video...
+                            Video wird verarbeitet...
                         </>
                     ) : (
                         <>
-                            {analysisOnly ? 'Analyze & Build Drafts' : 'Generate Clips'}
+                            {analysisOnly ? 'Analysieren & Entwürfe erstellen' : 'Clips erzeugen'}
                         </>
                     )}
                 </button>

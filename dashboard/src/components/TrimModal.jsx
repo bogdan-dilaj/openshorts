@@ -162,7 +162,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
 
                 <div className="flex-1 bg-black rounded-lg border border-white/5 overflow-hidden flex flex-col min-w-0 min-h-0">
                     <div className="px-4 pt-4 pb-2 border-b border-white/5 bg-[#0b0b0d]">
-                        <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500">Preview</div>
+                        <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500">Vorschau</div>
                         <div className="mt-1 text-xs text-zinc-400">
                             Vorschau mit Scrubbing und direkter Kontrolle der aktuellen Trim-Position.
                         </div>
@@ -266,7 +266,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                                 className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white border border-white/10 flex items-center gap-2"
                             >
                                 {isPlaying ? <Pause size={14} /> : <Play size={14} />}
-                                {isPlaying ? 'Pause' : 'Play'}
+                                {isPlaying ? 'Pause' : 'Abspielen'}
                             </button>
                             <button
                                 type="button"
@@ -282,7 +282,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                                 disabled={!isPreviewReady}
                                 className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white border border-white/10"
                             >
-                                To Start
+                                Zum Start
                             </button>
                             <button
                                 type="button"
@@ -290,7 +290,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                                 disabled={!isPreviewReady}
                                 className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white border border-white/10"
                             >
-                                To End
+                                Zum Ende
                             </button>
                             {videoUrl && (
                                 <a
@@ -299,7 +299,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                                     rel="noreferrer"
                                     className="px-3 py-2 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-xs text-cyan-300 border border-cyan-500/20"
                                 >
-                                    Open Raw Video
+                                    Rohvideo öffnen
                                 </a>
                             )}
                         </div>
@@ -307,15 +307,15 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                     <div className="px-4 py-3 border-t border-white/5 bg-white/5 flex items-center justify-between gap-3 text-xs text-zinc-400 mt-3">
                         <span className="flex items-center gap-2">
                             <Clock size={12} />
-                            Current: {formatTime(currentTime)}
+                            Aktuell: {formatTime(currentTime)}
                         </span>
-                        <span>Output: {formatTime(trimmedDuration)}</span>
+                        <span>Ausgabe: {formatTime(trimmedDuration)}</span>
                     </div>
                 </div>
 
                 <div className="w-full md:w-[360px] flex flex-col min-w-0 min-h-0">
                     <h3 className="text-xl font-bold text-white mb-6 flex items-center gap-2">
-                        <Scissors className="text-cyan-400" /> Trim Clip
+                        <Scissors className="text-cyan-400" /> Clip zuschneiden
                     </h3>
 
                     <div className="space-y-5 flex-1 overflow-y-auto custom-scrollbar touch-scroll pr-1 md:pr-2">
@@ -325,7 +325,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Keep Window Start</label>
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Start behalten ab</label>
                             <input
                                 type="range"
                                 min="0"
@@ -346,13 +346,13 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                                     className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-cyan-500/50"
                                 />
                                 <button type="button" onClick={applyCurrentTimeToStart} className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white border border-white/10">
-                                    Use Current
+                                    Aktuelle Zeit nutzen
                                 </button>
                             </div>
                         </div>
 
                         <div>
-                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Keep Window End</label>
+                            <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3 block">Ende behalten bis</label>
                             <input
                                 type="range"
                                 min="0"
@@ -373,7 +373,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                                     className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-cyan-500/50"
                                 />
                                 <button type="button" onClick={applyCurrentTimeToEnd} className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white border border-white/10">
-                                    Use Current
+                                    Aktuelle Zeit nutzen
                                 </button>
                             </div>
                         </div>
@@ -381,20 +381,20 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                         <div className="rounded-xl border border-white/5 bg-black/20 p-4 space-y-4">
                             <div className="flex items-center justify-between gap-3">
                                 <div>
-                                    <div className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Remove Middle Section</div>
-                                    <div className="text-[11px] text-zinc-500 mt-1">Stack multiple cuts if you want to punch out dead space inside the clip.</div>
+                                    <div className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Mittleren Bereich entfernen</div>
+                                    <div className="text-[11px] text-zinc-500 mt-1">Mehrere Cuts stapeln, um Leerlauf in der Mitte zu entfernen.</div>
                                 </div>
                                 <button
                                     type="button"
                                     onClick={handleAddCut}
                                     className="px-3 py-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-xs text-cyan-300 border border-cyan-500/20"
                                 >
-                                    Add Cut
+                                    Cut hinzufügen
                                 </button>
                             </div>
 
                             <div>
-                                <label className="text-xs text-zinc-400 mb-2 block">Cut Start</label>
+                                <label className="text-xs text-zinc-400 mb-2 block">Cut-Start</label>
                                 <div className="flex gap-2">
                                     <input
                                         type="number"
@@ -406,13 +406,13 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                                         className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-cyan-500/50"
                                     />
                                     <button type="button" onClick={applyCurrentTimeToCutStart} className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white border border-white/10">
-                                        Use Current
+                                        Aktuelle Zeit nutzen
                                     </button>
                                 </div>
                             </div>
 
                             <div>
-                                <label className="text-xs text-zinc-400 mb-2 block">Cut End</label>
+                                <label className="text-xs text-zinc-400 mb-2 block">Cut-Ende</label>
                                 <div className="flex gap-2">
                                     <input
                                         type="number"
@@ -424,14 +424,14 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                                         className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-cyan-500/50"
                                     />
                                     <button type="button" onClick={applyCurrentTimeToCutEnd} className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white border border-white/10">
-                                        Use Current
+                                        Aktuelle Zeit nutzen
                                     </button>
                                 </div>
                             </div>
 
                             <div className="space-y-2">
                                 {normalizedRemoveRanges.length === 0 ? (
-                                    <div className="text-[11px] text-zinc-500">No middle cuts added yet.</div>
+                                    <div className="text-[11px] text-zinc-500">Noch keine mittleren Cuts hinzugefügt.</div>
                                 ) : normalizedRemoveRanges.map(([start, end], index) => (
                                     <div key={`${start}-${end}-${index}`} className="flex items-center justify-between gap-3 rounded-lg bg-white/5 px-3 py-2 text-xs text-zinc-300 border border-white/5">
                                         <span>{formatTime(start)} - {formatTime(end)}</span>
@@ -448,10 +448,10 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                         </div>
 
                         <div className="rounded-xl border border-white/5 bg-black/20 p-3 text-xs text-zinc-400 space-y-1">
-                            <div>Keep Start: <span className="text-white">{formatTime(trimStart)}</span></div>
-                            <div>Keep End: <span className="text-white">{formatTime(safeTrimEnd)}</span></div>
-                            <div>Middle Cuts: <span className="text-white">{normalizedRemoveRanges.length}</span></div>
-                            <div>New Length: <span className="text-white">{formatTime(trimmedDuration)}</span></div>
+                            <div>Start behalten: <span className="text-white">{formatTime(trimStart)}</span></div>
+                            <div>Ende behalten: <span className="text-white">{formatTime(safeTrimEnd)}</span></div>
+                            <div>Mittel-Cuts: <span className="text-white">{normalizedRemoveRanges.length}</span></div>
+                            <div>Neue Länge: <span className="text-white">{formatTime(trimmedDuration)}</span></div>
                         </div>
                     </div>
 
@@ -461,7 +461,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                         className="w-full py-4 mt-6 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold rounded-xl shadow-lg shadow-cyan-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                         {isProcessing ? <Loader2 size={20} className="animate-spin" /> : <Scissors size={20} />}
-                        {isProcessing ? 'Trimming...' : 'Create Trim Version'}
+                        {isProcessing ? 'Schneide...' : 'Trim-Version erstellen'}
                     </button>
                 </div>
             </div>

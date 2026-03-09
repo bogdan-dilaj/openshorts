@@ -64,7 +64,7 @@ const buildDisplayPlatformResults = (result) => {
                 platform: key,
                 success: null,
                 status: 'pending',
-                message: 'Warte auf Rueckmeldung von Upload-Post.',
+                message: 'Warte auf Rückmeldung von Upload-Post.',
             });
             continue;
         }
@@ -72,14 +72,14 @@ const buildDisplayPlatformResults = (result) => {
             platform: key,
             success: null,
             status: 'not_selected',
-            message: 'Nicht fuer diesen Post ausgewaehlt.',
+            message: 'Nicht für diesen Post ausgewählt.',
         });
     }
 
     return rows;
 };
 
-export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, llmProvider, ollamaBaseUrl, ollamaModel, elevenLabsKey, subtitleStyle, hookStyle, tightEditPreset, socialPostSettings = DEFAULT_SOCIAL_POST_SETTINGS, activeUploadProfile, currentVideoOverride, onVideoVariantChange, onClipUpdated, onPlay, onPause }) {
+export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, llmProvider, ollamaBaseUrl, ollamaModel, elevenLabsKey, subtitleStyle, hookStyle, tightEditPreset, socialPostSettings = DEFAULT_SOCIAL_POST_SETTINGS, activeUploadProfile, onApplySubtitleDefaultsToJob, onApplyHookDefaultsToJob, currentVideoOverride, onVideoVariantChange, onClipUpdated, onPlay, onPause }) {
     const [showModal, setShowModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
     const videoRef = React.useRef(null);
@@ -119,6 +119,8 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const [isRenderingClip, setIsRenderingClip] = useState(false);
     const [isSelectingVersion, setIsSelectingVersion] = useState(false);
     const [showHookModal, setShowHookModal] = useState(false);
+    const [showQuickRenderModal, setShowQuickRenderModal] = useState(false);
+    const [quickHookText, setQuickHookText] = useState((clip.viral_hook_text || clip.hook_settings?.text || '').trim());
     const [showTranslateModal, setShowTranslateModal] = useState(false);
     const [showTrimModal, setShowTrimModal] = useState(false);
     const [editError, setEditError] = useState(null);
@@ -132,7 +134,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     useEffect(() => {
         if (showModal) {
             const savedPostStatus = clip.social_post_status || null;
-            setPostTitle(clip.video_title_for_youtube_short || "Viral Short");
+            setPostTitle(clip.video_title_for_youtube_short || "Viraler Short");
             setPostDescription(clip.video_description_for_instagram || clip.video_description_for_tiktok || "");
             setFirstComment("");
             setIsScheduling(false);
@@ -168,6 +170,11 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             postStatusTimeoutRef.current = null;
         }
     }, [showModal]);
+
+    useEffect(() => {
+        if (!showQuickRenderModal) return;
+        setQuickHookText((clip.viral_hook_text || clip.hook_settings?.text || '').trim());
+    }, [showQuickRenderModal, clip.viral_hook_text, clip.hook_settings?.text]);
 
     const isModifiedVideo = activeVersionId ? activeVersionId !== originalVersionId : currentVideoUrl !== originalVideoUrl;
 
@@ -282,10 +289,10 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             );
 
             if (provider === 'gemini' && !apiKey) {
-                throw new Error("Gemini API Key is missing. Please set it in Settings.");
+                throw new Error("Gemini API-Key fehlt. Bitte in den Einstellungen setzen.");
             }
             if (provider === 'ollama' && !resolvedOllamaModel) {
-                throw new Error("Ollama model is missing. Please set it in Settings.");
+                throw new Error("Ollama-Modell fehlt. Bitte in den Einstellungen setzen.");
             }
 
             const res = await fetch(getApiUrl('/api/edit'), {
@@ -410,7 +417,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             console.log('[Translate] API Key available:', !!apiKey);
 
             if (!apiKey) {
-                throw new Error("ElevenLabs API Key is missing. Please set it in Settings.");
+                throw new Error("ElevenLabs API-Key fehlt. Bitte in den Einstellungen setzen.");
             }
 
             const requestBody = {
@@ -531,6 +538,80 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         }
     };
 
+    const handleApplySubtitleDefaultsToJob = (options) => {
+        if (!onApplySubtitleDefaultsToJob) return;
+        const nextY = Number(options?.yPosition);
+        const fallbackY = Number(subtitleStyle?.yPosition ?? 86);
+        const resolvedY = Number.isFinite(nextY) ? nextY : (Number.isFinite(fallbackY) ? fallbackY : 86);
+        onApplySubtitleDefaultsToJob({
+            position: options?.position || subtitleStyle?.position || 'bottom',
+            yPosition: resolvedY,
+            fontSize: Number(options?.fontSize ?? subtitleStyle?.fontSize ?? 24),
+            fontFamily: options?.fontFamily || subtitleStyle?.fontFamily,
+            backgroundStyle: options?.backgroundStyle || subtitleStyle?.backgroundStyle,
+        });
+        setEditError('Untertitel-Vorgaben für alle Clips dieses Jobs gesetzt.');
+        setTimeout(() => setEditError(null), 2500);
+    };
+
+    const handleApplyHookDefaultsToJob = (hookData) => {
+        if (!onApplyHookDefaultsToJob) return;
+        const payload = typeof hookData === 'string'
+            ? { text: hookData, xPosition: 50, yPosition: 12, textAlign: 'center', size: 'M', widthPreset: 'wide' }
+            : (hookData || {});
+        onApplyHookDefaultsToJob({
+            position: payload.position,
+            horizontalPosition: payload.horizontalPosition,
+            xPosition: payload.xPosition,
+            yPosition: payload.yPosition,
+            textAlign: payload.textAlign,
+            size: payload.size,
+            widthPreset: payload.widthPreset,
+            fontFamily: payload.fontFamily,
+            backgroundStyle: payload.backgroundStyle,
+        });
+        setEditError('Hook-Vorgaben für alle Clips dieses Jobs gesetzt.');
+        setTimeout(() => setEditError(null), 2500);
+    };
+
+    const buildSubtitleSettingsPayload = () => {
+        const fallbackPosition = (subtitleStyle?.position || 'bottom').toLowerCase();
+        const normalizedPosition = fallbackPosition === 'center' ? 'middle' : fallbackPosition;
+        const yPosition = Number(subtitleStyle?.yPosition);
+        const fontSize = Number(subtitleStyle?.fontSize);
+        return {
+            position: ['top', 'middle', 'bottom'].includes(normalizedPosition) ? normalizedPosition : 'bottom',
+            y_position: Number.isFinite(yPosition) ? Math.max(0, Math.min(100, yPosition)) : undefined,
+            font_size: Number.isFinite(fontSize) ? Math.max(10, Math.min(120, Math.round(fontSize))) : 24,
+            font_family: subtitleStyle?.fontFamily,
+            background_style: subtitleStyle?.backgroundStyle,
+        };
+    };
+
+    const buildHookSettingsPayload = (hookText) => {
+        const x = Number(hookStyle?.xPosition);
+        const y = Number(hookStyle?.yPosition);
+        const xPosition = Number.isFinite(x) ? Math.max(0, Math.min(100, x)) : 50;
+        const yPosition = Number.isFinite(y) ? Math.max(0, Math.min(100, y)) : 12;
+        const fallbackPosition = yPosition < 34 ? 'top' : yPosition > 66 ? 'bottom' : 'center';
+        const fallbackHorizontal = xPosition < 34 ? 'left' : xPosition > 66 ? 'right' : 'center';
+        const position = (hookStyle?.position || fallbackPosition).toLowerCase();
+        const horizontalPosition = (hookStyle?.horizontalPosition || fallbackHorizontal).toLowerCase();
+        const textAlign = (hookStyle?.textAlign || horizontalPosition || 'center').toLowerCase();
+        return {
+            text: hookText,
+            position: ['top', 'center', 'bottom'].includes(position) ? position : fallbackPosition,
+            horizontal_position: ['left', 'center', 'right'].includes(horizontalPosition) ? horizontalPosition : fallbackHorizontal,
+            x_position: xPosition,
+            y_position: yPosition,
+            text_align: ['left', 'center', 'right'].includes(textAlign) ? textAlign : 'center',
+            size: ['S', 'M', 'L'].includes(hookStyle?.size) ? hookStyle.size : 'M',
+            width_preset: hookStyle?.widthPreset || 'wide',
+            font_family: hookStyle?.fontFamily,
+            background_style: hookStyle?.backgroundStyle,
+        };
+    };
+
     const handleRenderClip = async () => {
         setIsRenderingClip(true);
         setEditError(null);
@@ -562,9 +643,54 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         }
     };
 
-    const handlePreviewRender = async () => {
-        setIsPreviewRendering(true);
+    const openQuickRenderModal = () => {
+        setQuickHookText((clip.viral_hook_text || clip.hook_settings?.text || '').trim());
+        setShowQuickRenderModal(true);
+    };
+
+    const handleQuickRenderWithDefaults = async () => {
+        const hookText = (quickHookText || '').trim();
+        if (!hookText) {
+            setEditError('Hook-Text darf nicht leer sein.');
+            return;
+        }
+
+        setIsRenderingClip(true);
         setEditError(null);
+        try {
+            const res = await fetch(getApiUrl('/api/clip/render'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    job_id: jobId,
+                    clip_index: clipIndex,
+                    apply_tight_edit: true,
+                    tight_edit_preset: tightEditPreset || 'aggressive',
+                    apply_subtitles: true,
+                    subtitle_settings: buildSubtitleSettingsPayload(),
+                    apply_hook: true,
+                    hook_settings: buildHookSettingsPayload(hookText),
+                })
+            });
+
+            if (!res.ok) {
+                throw new Error(await readErrorText(res));
+            }
+
+            const data = await res.json();
+            applyClipResponse(data);
+            setShowQuickRenderModal(false);
+        } catch (e) {
+            setEditError(e.message);
+            setTimeout(() => setEditError(null), 6000);
+        } finally {
+            setIsRenderingClip(false);
+        }
+    };
+
+    const handlePreviewRender = async ({ applySubtitles = true, applyHook = true, quiet = false } = {}) => {
+        setIsPreviewRendering(true);
+        if (!quiet) setEditError(null);
         try {
             const res = await fetch(getApiUrl('/api/clip/preview/render'), {
                 method: 'POST',
@@ -574,8 +700,8 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     clip_index: clipIndex,
                     apply_tight_edit: false,
                     tight_edit_preset: tightEditPreset || 'aggressive',
-                    apply_subtitles: true,
-                    apply_hook: true,
+                    apply_subtitles: applySubtitles,
+                    apply_hook: applyHook,
                 })
             });
 
@@ -586,8 +712,12 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             const data = await res.json();
             applyClipResponse(data);
         } catch (e) {
-            setEditError(e.message);
-            setTimeout(() => setEditError(null), 6000);
+            if (!quiet) {
+                setEditError(e.message);
+                setTimeout(() => setEditError(null), 6000);
+                return;
+            }
+            throw e;
         } finally {
             setIsPreviewRendering(false);
         }
@@ -595,28 +725,28 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
     const handlePost = async () => {
         if (!uploadPostKey || !uploadUserId) {
-            setPostResult({ success: false, status: 'failed', message: "Missing API Key or User ID.", platform_results: [] });
+            setPostResult({ success: false, status: 'failed', message: "API-Key oder User-ID fehlt.", platform_results: [] });
             return;
         }
 
         const selectedPlatforms = Object.keys(platforms).filter(k => platforms[k]);
         if (selectedPlatforms.length === 0) {
-            setPostResult({ success: false, status: 'failed', message: "Select at least one platform.", platform_results: [] });
+            setPostResult({ success: false, status: 'failed', message: "Mindestens eine Plattform auswählen.", platform_results: [] });
             return;
         }
 
         if (!activeUploadProfile && !uploadUserId) {
-            setPostResult({ success: false, status: 'failed', message: "No Upload-Post profile selected in Settings.", platform_results: [] });
+            setPostResult({ success: false, status: 'failed', message: "Kein Upload-Post-Profil in den Einstellungen ausgewählt.", platform_results: [] });
             return;
         }
 
         if (selectedPlatforms.includes('pinterest') && !pinterestBoardId.trim()) {
-            setPostResult({ success: false, status: 'failed', message: "Pinterest requires a board ID.", platform_results: [] });
+            setPostResult({ success: false, status: 'failed', message: "Pinterest benötigt eine Board-ID.", platform_results: [] });
             return;
         }
 
         if (isScheduling && !scheduleDate) {
-            setPostResult({ success: false, status: 'failed', message: "Please select a date and time.", platform_results: [] });
+            setPostResult({ success: false, status: 'failed', message: "Bitte Datum und Uhrzeit auswählen.", platform_results: [] });
             return;
         }
 
@@ -672,7 +802,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             setPostResult({
                 success: false,
                 status: 'failed',
-                message: `Failed: ${e.message}`,
+                message: `Fehlgeschlagen: ${e.message}`,
                 platform_results: [],
                 requested_platforms: selectedPlatforms,
                 scheduled: isScheduling,
@@ -703,6 +833,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     controls
                     className="w-full h-full object-contain"
                     playsInline
+                    preload="metadata"
                     onLoadedMetadata={() => {
                         if (isPreviewOnly && videoRef.current) {
                             videoRef.current.currentTime = previewStart;
@@ -750,8 +881,8 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         Clip {index + 1}
                     </span>
                     {isPreviewOnly && (
-                        <span className="bg-cyan-500/20 backdrop-blur-md text-cyan-200 text-[10px] font-bold px-2 py-1 rounded-md border border-cyan-400/30 uppercase tracking-wide">
-                            Draft Preview
+                            <span className="bg-cyan-500/20 backdrop-blur-md text-cyan-200 text-[10px] font-bold px-2 py-1 rounded-md border border-cyan-400/30 uppercase tracking-wide">
+                            Vorschau-Entwurf
                         </span>
                     )}
                 </div>
@@ -767,8 +898,8 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 {isEditing && (
                     <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center z-10 p-4 text-center">
                         <Loader2 size={32} className="text-primary animate-spin mb-3" />
-                        <span className="text-xs font-bold text-white uppercase tracking-wider">AI Magic in Progress...</span>
-                        <span className="text-[10px] text-zinc-400 mt-1">Applying viral edits & zooms</span>
+                        <span className="text-xs font-bold text-white uppercase tracking-wider">KI-Bearbeitung läuft...</span>
+                        <span className="text-[10px] text-zinc-400 mt-1">Virale Edits & Zooms werden angewendet</span>
                     </div>
                 )}
                 </div>
@@ -778,7 +909,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             <div className="flex-1 p-4 md:p-5 flex flex-col bg-[#121214] overflow-y-auto md:overflow-hidden custom-scrollbar touch-scroll min-w-0">
                 <div className="mb-4">
                     <h3 className="text-base font-bold text-white leading-tight line-clamp-2 mb-2 break-words" title={clip.video_title_for_youtube_short}>
-                        {clip.video_title_for_youtube_short || "Viral Clip Generated"}
+                        {clip.video_title_for_youtube_short || "Viraler Clip erzeugt"}
                     </h3>
                     <div className="flex flex-wrap gap-2 text-[10px] text-zinc-500 font-mono">
                         <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">{Math.round(clipDuration)}s</span>
@@ -789,7 +920,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
                 <div className="mb-4 p-3 bg-black/20 rounded-lg border border-white/5">
                     <div className="flex items-center justify-between gap-3 mb-2">
-                        <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Version Chain</span>
+                        <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Versionen</span>
                         <span className="text-[10px] text-zinc-500 font-mono">
                             {clipVersions.length ? `${clipVersions.length} Versionen` : 'Original'}
                         </span>
@@ -809,7 +940,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         </select>
                     ) : (
                         <div className="text-xs text-zinc-400">
-                            {clipVersions[0]?.label || (isPreviewOnly ? 'Draft (not rendered yet)' : 'Original')}
+                            {clipVersions[0]?.label || (isPreviewOnly ? 'Entwurf (noch nicht gerendert)' : 'Original')}
                         </div>
                     )}
                 </div>
@@ -819,10 +950,10 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     {/* YouTube */}
                     <div className="bg-black/20 rounded-lg p-3 border border-white/5">
                         <div className="flex items-center gap-2 text-[10px] font-bold text-red-400 mb-1.5 uppercase tracking-wider">
-                            <Youtube size={12} className="shrink-0" /> <span className="truncate">YouTube Title</span>
+                            <Youtube size={12} className="shrink-0" /> <span className="truncate">YouTube-Titel</span>
                         </div>
                         <p className="text-xs text-zinc-300 select-all break-words">
-                            {clip.video_title_for_youtube_short || "Viral Short Video"}
+                            {clip.video_title_for_youtube_short || "Virales Short-Video"}
                         </p>
                     </div>
 
@@ -832,7 +963,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                             <Video size={12} className="text-cyan-400 shrink-0" />
                             <span className="text-zinc-500">/</span>
                             <Instagram size={12} className="text-pink-400 shrink-0" />
-                            <span className="truncate">Caption</span>
+                            <span className="truncate">Beschreibung</span>
                         </div>
                         <p className="text-xs text-zinc-300 line-clamp-3 hover:line-clamp-none transition-all cursor-pointer select-all break-words">
                             {clip.video_description_for_tiktok || clip.video_description_for_instagram}
@@ -851,18 +982,18 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 {/* Actions Footer */}
                 {isPreviewOnly && (
                     <div className="mb-3 rounded-lg border border-cyan-400/20 bg-cyan-500/10 px-3 py-2 text-[11px] text-cyan-100">
-                        Preview-Modus: Untertitel/Hook koennen als Stil gespeichert werden. <b>Preview Render</b> rendert absichtlich nur ein kurzes 1s-Sample (Turbo) fuer Positionierung, danach <b>Final Render</b>.
+                        Vorschau-Modus: Untertitel/Hook können als Stil gespeichert werden. <b>Vorschau-Render</b> rendert absichtlich nur ein kurzes 1s-Sample (Turbo) zur Positionierung, danach <b>Final-Render</b>.
                     </div>
                 )}
                 <div className="grid grid-cols-2 gap-3 mt-auto pt-4 border-t border-white/5">
                     {isPreviewOnly && (
                         <button
-                            onClick={handlePreviewRender}
+                            onClick={() => handlePreviewRender()}
                             disabled={isBusy}
                             className="col-span-2 py-2 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-emerald-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 disabled:opacity-60"
                         >
                             {isPreviewRendering ? <Loader2 size={14} className="animate-spin" /> : <Video size={14} />}
-                            {isPreviewRendering ? 'Rendering Preview...' : 'Preview Render (1s Turbo)'}
+                            {isPreviewRendering ? 'Vorschau wird gerendert...' : 'Vorschau-Render (1s Turbo)'}
                         </button>
                     )}
                     {isPreviewOnly && (
@@ -872,16 +1003,24 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                             className="col-span-2 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-cyan-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 disabled:opacity-60"
                         >
                             {isRenderingClip ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                            {isRenderingClip ? 'Rendering...' : 'Final Render (Version erstellen)'}
+                            {isRenderingClip ? 'Rendern...' : 'Final-Render (Version erstellen)'}
                         </button>
                     )}
+                    <button
+                        onClick={openQuickRenderModal}
+                        disabled={isBusy}
+                        className="col-span-2 py-2 bg-gradient-to-r from-fuchsia-600 to-pink-600 hover:from-fuchsia-500 hover:to-pink-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-fuchsia-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 disabled:opacity-60"
+                    >
+                        {isRenderingClip ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                        {isRenderingClip ? 'Rendern...' : 'Schnell-Render (Hook + Untertitel-Vorgaben)'}
+                    </button>
                     <button
                         onClick={handleAutoEdit}
                         disabled={isBusy || isPreviewOnly}
                         className="col-span-1 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-purple-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
                     >
                         {isEditing ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
-                        {isEditing ? 'Editing...' : 'Auto Edit'}
+                        {isEditing ? 'Bearbeite...' : 'Auto-Schnitt'}
                     </button>
 
                     <button
@@ -890,7 +1029,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         className="col-span-1 py-2 bg-gradient-to-r from-yellow-600 to-orange-600 hover:from-yellow-500 hover:to-orange-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-orange-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
                     >
                         {isSubtitling ? <Loader2 size={14} className="animate-spin" /> : <Type size={14} />}
-                        {isSubtitling ? 'Adding...' : (isPreviewOnly ? 'Save Subtitle Style' : 'Subtitles')}
+                        {isSubtitling ? 'Füge ein...' : (isPreviewOnly ? 'Untertitel-Stil speichern' : 'Untertitel')}
                     </button>
 
                     <button
@@ -899,7 +1038,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         className="col-span-1 py-2 bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-black rounded-lg text-xs font-bold shadow-lg shadow-yellow-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
                     >
                         {isHooking ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
-                        {isHooking ? 'Adding...' : (isPreviewOnly ? 'Save Hook Style' : 'Viral Hook')}
+                        {isHooking ? 'Füge ein...' : (isPreviewOnly ? 'Hook-Stil speichern' : 'Viraler Hook')}
                     </button>
 
                     <button
@@ -908,7 +1047,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         className="col-span-1 py-2 bg-gradient-to-r from-blue-500 to-cyan-600 hover:from-blue-400 hover:to-cyan-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-cyan-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
                     >
                         {isTrimming ? <Loader2 size={14} className="animate-spin" /> : <Scissors size={14} />}
-                        {isTrimming ? 'Trimming...' : 'Trim'}
+                        {isTrimming ? 'Schneide...' : 'Zuschneiden'}
                     </button>
 
                     <button
@@ -917,7 +1056,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         className="col-span-1 py-2 bg-gradient-to-r from-green-500 to-teal-600 hover:from-green-400 hover:to-teal-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-green-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
                     >
                         {isTranslating ? <Loader2 size={14} className="animate-spin" /> : <Languages size={14} />}
-                        {isTranslating ? 'Translating...' : 'Dub Voice'}
+                        {isTranslating ? 'Übersetze...' : 'Stimmen-Dub'}
                     </button>
 
                     <button
@@ -925,7 +1064,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         disabled={isPreviewOnly}
                         className="col-span-1 py-2 bg-primary hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-xs font-bold shadow-lg shadow-primary/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2"
                     >
-                        <Share2 size={14} className="shrink-0" /> Post
+                        <Share2 size={14} className="shrink-0" /> Posten
                     </button>
                     <button
                         onClick={async (e) => {
@@ -951,7 +1090,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         disabled={isPreviewOnly}
                         className="col-span-1 py-2 bg-white/5 hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed text-zinc-300 hover:text-white rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-white/5 truncate px-2"
                     >
-                        <Download size={14} className="shrink-0" /> Download
+                        <Download size={14} className="shrink-0" /> Herunterladen
                     </button>
 
                     <button
@@ -963,6 +1102,56 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     </button>
                 </div>
             </div>
+
+            {showQuickRenderModal && (
+                createPortal(
+                <div className="fixed inset-0 z-[1100] flex items-center justify-center p-3 md:p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out] overflow-y-auto touch-scroll">
+                    <div className="bg-[#121214] border border-white/10 p-5 rounded-2xl w-full max-w-lg shadow-2xl relative my-4 max-h-[calc(100dvh-1.5rem)] overflow-y-auto custom-scrollbar touch-scroll">
+                        <button
+                            onClick={() => setShowQuickRenderModal(false)}
+                            className="absolute top-4 right-4 text-zinc-500 hover:text-white"
+                        >
+                            <X size={20} />
+                        </button>
+
+                        <h3 className="text-lg font-bold text-white mb-2">Schnell-Render mit Vorgaben</h3>
+                        <p className="text-xs text-zinc-400 mb-4">
+                            Hook-Text anpassen und direkt mit globalen Hook-/Untertitel-Vorgaben als neue Version rendern.
+                        </p>
+
+                        <label className="block text-xs font-bold text-zinc-400 mb-2">Hook-Text</label>
+                        <textarea
+                            value={quickHookText}
+                            onChange={(e) => setQuickHookText(e.target.value)}
+                            rows={5}
+                            className="w-full bg-black/40 border border-white/10 rounded-lg p-3 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600 resize-y"
+                            placeholder="POV: ..."
+                        />
+
+                        <div className="mt-4 flex flex-wrap gap-2 justify-end">
+                            <button
+                                type="button"
+                                onClick={() => setShowQuickRenderModal(false)}
+                                disabled={isRenderingClip}
+                                className="px-4 py-2 rounded-lg border border-white/10 bg-white/5 text-sm text-zinc-200 hover:bg-white/10 disabled:opacity-50"
+                            >
+                                Abbrechen
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleQuickRenderWithDefaults}
+                                disabled={isRenderingClip || !quickHookText.trim()}
+                                className="px-4 py-2 rounded-lg bg-gradient-to-r from-fuchsia-600 to-pink-600 hover:from-fuchsia-500 hover:to-pink-500 text-white text-sm font-semibold disabled:opacity-60 flex items-center gap-2"
+                            >
+                                {isRenderingClip ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                                {isRenderingClip ? 'Rendern...' : 'Jetzt rendern'}
+                            </button>
+                        </div>
+                    </div>
+                </div>,
+                document.body
+                )
+            )}
 
             {/* Post Modal */}
             {showModal && (
@@ -976,51 +1165,51 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                             <X size={20} />
                         </button>
 
-                        <h3 className="text-lg font-bold text-white mb-4">Post / Schedule</h3>
+                        <h3 className="text-lg font-bold text-white mb-4">Posten / Planen</h3>
 
                         <div className="mb-4 rounded-lg border border-white/5 bg-white/5 px-3 py-2 text-xs text-zinc-400">
-                            Active profile: <span className="text-white font-medium">{activeUploadProfile || uploadUserId || 'No profile selected'}</span>
+                            Aktives Profil: <span className="text-white font-medium">{activeUploadProfile || uploadUserId || 'Kein Profil ausgewählt'}</span>
                         </div>
 
                         {!uploadPostKey && (
                             <div className="mb-4 p-3 bg-yellow-500/10 border border-yellow-500/20 text-yellow-200 text-xs rounded-lg flex items-start gap-2">
                                 <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                                <div>Configure API Key in Settings first.</div>
+                                <div>Bitte zuerst API-Key in den Einstellungen setzen.</div>
                             </div>
                         )}
 
                         <div className="space-y-4 mb-6">
                             {/* Title & Description */}
                             <div>
-                                <label className="block text-xs font-bold text-zinc-400 mb-1">Video Title</label>
+                                <label className="block text-xs font-bold text-zinc-400 mb-1">Video-Titel</label>
                                 <input
                                     type="text"
                                     value={postTitle}
                                     onChange={(e) => setPostTitle(e.target.value)}
                                     className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600"
-                                    placeholder="Enter a catchy title..."
+                                    placeholder="Einen starken Titel eingeben..."
                                 />
                             </div>
 
                             <div>
-                                <label className="block text-xs font-bold text-zinc-400 mb-1">Caption / Description</label>
+                                <label className="block text-xs font-bold text-zinc-400 mb-1">Beschreibung</label>
                                 <textarea
                                     value={postDescription}
                                     onChange={(e) => setPostDescription(e.target.value)}
                                     rows={4}
                                     className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600 resize-none"
-                                    placeholder="Write a caption for your post..."
+                                    placeholder="Beschreibung für den Post schreiben..."
                                 />
                             </div>
 
                             <div>
-                                <label className="block text-xs font-bold text-zinc-400 mb-1">First Comment (optional)</label>
+                                <label className="block text-xs font-bold text-zinc-400 mb-1">Erster Kommentar (optional)</label>
                                 <textarea
                                     value={firstComment}
                                     onChange={(e) => setFirstComment(e.target.value)}
                                     rows={3}
                                     className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600 resize-none"
-                                    placeholder="Will be sent where Upload-Post supports first comments."
+                                    placeholder="Wird gesendet, wo Upload-Post erste Kommentare unterstützt."
                                 />
                             </div>
 
@@ -1028,7 +1217,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                             <div className="p-3 bg-white/5 rounded-lg border border-white/5">
                                 <div className="flex items-center justify-between mb-2">
                                     <div className="flex items-center gap-2 text-sm text-white font-medium">
-                                        <Calendar size={16} className="text-purple-400" /> Schedule Post
+                                        <Calendar size={16} className="text-purple-400" /> Post planen
                                     </div>
                                     <label className="relative inline-flex items-center cursor-pointer">
                                         <input type="checkbox" checked={isScheduling} onChange={(e) => setIsScheduling(e.target.checked)} className="sr-only peer" />
@@ -1038,7 +1227,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
                                 {isScheduling && (
                                     <div className="mt-3 animate-[fadeIn_0.2s_ease-out]">
-                                        <label className="block text-xs text-zinc-400 mb-1">Select Date & Time</label>
+                                        <label className="block text-xs text-zinc-400 mb-1">Datum & Uhrzeit wählen</label>
                                         <div className="relative">
                                             <input
                                                 type="datetime-local"
@@ -1054,7 +1243,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
                             {/* Platforms */}
                             <div>
-                                <label className="block text-xs font-bold text-zinc-400 mb-2">Select Platforms</label>
+                                <label className="block text-xs font-bold text-zinc-400 mb-2">Plattformen auswählen</label>
                                 <div className="grid grid-cols-1 gap-2">
                                     {SOCIAL_PLATFORM_OPTIONS.map((platform) => (
                                         <label key={platform.key} className="flex items-center gap-3 p-3 bg-white/5 rounded-lg cursor-pointer hover:bg-white/10 transition-colors border border-white/5">
@@ -1077,7 +1266,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
                             {platforms.instagram && (
                                 <div className="p-3 bg-white/5 rounded-lg border border-white/5">
-                                    <label className="block text-xs font-bold text-zinc-400 mb-2">Instagram Share Mode</label>
+                                    <label className="block text-xs font-bold text-zinc-400 mb-2">Instagram-Share-Mode</label>
                                     <select
                                         value={instagramShareMode}
                                         onChange={(e) => setInstagramShareMode(e.target.value)}
@@ -1093,7 +1282,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                         {INSTAGRAM_SHARE_MODES.find((mode) => mode.value === instagramShareMode)?.description}
                                     </p>
                                     <p className="mt-2 text-[11px] text-zinc-600 leading-relaxed">
-                                        Upload-Post uses the embedded original audio. The shared text for Instagram is sent via the Reel title field, not the global description field.
+                                        Upload-Post nutzt das eingebettete Original-Audio. Der Text für Instagram wird über das Reel-Titel-Feld gesendet, nicht über das globale Beschreibungsfeld.
                                     </p>
                                 </div>
                             )}
@@ -1101,7 +1290,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                             {platforms.tiktok && (
                                 <div className="p-3 bg-white/5 rounded-lg border border-white/5 space-y-3">
                                     <div>
-                                        <label className="block text-xs font-bold text-zinc-400 mb-2">TikTok Post Mode</label>
+                                        <label className="block text-xs font-bold text-zinc-400 mb-2">TikTok-Post-Mode</label>
                                         <select
                                             value={tiktokPostMode}
                                             onChange={(e) => setTiktokPostMode(e.target.value)}
@@ -1122,33 +1311,33 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                             onChange={(e) => setTiktokIsAigc(e.target.checked)}
                                             className="w-4 h-4 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary"
                                         />
-                                        Mark this TikTok upload as AI-generated
+                                        Diesen TikTok-Upload als KI-generiert markieren
                                     </label>
                                 </div>
                             )}
 
                             {platforms.facebook && (
                                 <div className="p-3 bg-white/5 rounded-lg border border-white/5">
-                                    <label className="block text-xs font-bold text-zinc-400 mb-2">Facebook Page ID</label>
+                                    <label className="block text-xs font-bold text-zinc-400 mb-2">Facebook-Page-ID</label>
                                     <input
                                         type="text"
                                         value={facebookPageId}
                                         onChange={(e) => setFacebookPageId(e.target.value)}
                                         className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50"
-                                        placeholder="Optional if only one page is connected"
+                                        placeholder="Optional, wenn nur eine Seite verbunden ist"
                                     />
                                 </div>
                             )}
 
                             {platforms.pinterest && (
                                 <div className="p-3 bg-white/5 rounded-lg border border-white/5">
-                                    <label className="block text-xs font-bold text-zinc-400 mb-2">Pinterest Board ID</label>
+                                    <label className="block text-xs font-bold text-zinc-400 mb-2">Pinterest-Board-ID</label>
                                     <input
                                         type="text"
                                         value={pinterestBoardId}
                                         onChange={(e) => setPinterestBoardId(e.target.value)}
                                         className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50"
-                                        placeholder="Required by Upload-Post for Pinterest"
+                                        placeholder="Für Pinterest von Upload-Post erforderlich"
                                     />
                                 </div>
                             )}
@@ -1177,19 +1366,19 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                     <div className="min-w-0 flex-1">
                                         <div className="font-semibold text-white">{postResult.message}</div>
                                         <div className="mt-1 text-[11px] text-zinc-300">
-                                            Status: <span className="uppercase tracking-wide">{postResult.status || 'unknown'}</span>
+                                            Status: <span className="uppercase tracking-wide">{postResult.status || 'unbekannt'}</span>
                                             {' · '}
-                                            Success {postResult.success_count || 0}
+                                            Erfolgreich {postResult.success_count || 0}
                                             {' · '}
-                                            Failed {postResult.failure_count || 0}
+                                            Fehlgeschlagen {postResult.failure_count || 0}
                                             {' · '}
-                                            Pending {postResult.pending_count || 0}
+                                            Offen {postResult.pending_count || 0}
                                         </div>
                                         {(postResult.request_id || postResult.job_id) && (
                                             <div className="mt-1 text-[10px] text-zinc-400 break-all">
-                                                {postResult.request_id ? `Request ID: ${postResult.request_id}` : null}
+                                                {postResult.request_id ? `Request-ID: ${postResult.request_id}` : null}
                                                 {postResult.request_id && postResult.job_id ? ' · ' : null}
-                                                {postResult.job_id ? `Vendor Job ID: ${postResult.job_id}` : null}
+                                                {postResult.job_id ? `Vendor-Job-ID: ${postResult.job_id}` : null}
                                             </div>
                                         )}
                                         {postResult.poll_error && (
@@ -1221,12 +1410,12 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                                             {isPending ? <Loader2 size={13} className="text-cyan-300 animate-spin" /> : null}
                                                             {isNotSelected ? <span className="text-zinc-500">-</span> : null}
                                                             <span className="uppercase tracking-wide text-zinc-300">
-                                                                {isNotSelected ? 'not_selected' : (item.status || (isPending ? 'pending' : item.success ? 'success' : 'failed'))}
+                                                                {isNotSelected ? 'nicht_ausgewählt' : (item.status || (isPending ? 'offen' : item.success ? 'erfolgreich' : 'fehlgeschlagen'))}
                                                             </span>
                                                         </div>
                                                     </div>
                                                     <div className="mt-1 text-[11px] text-zinc-300">
-                                                        {item.message || item.error || (isPending ? 'Warte auf Rueckmeldung von Upload-Post.' : (isNotSelected ? 'Nicht ausgewaehlt.' : 'Completed'))}
+                                                        {item.message || item.error || (isPending ? 'Warte auf Rückmeldung von Upload-Post.' : (isNotSelected ? 'Nicht ausgewählt.' : 'Abgeschlossen'))}
                                                     </div>
                                                     {(item.url || item.link) && (
                                                         <a
@@ -1235,7 +1424,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                                             rel="noreferrer"
                                                             className="mt-2 inline-flex text-[11px] text-cyan-300 hover:text-cyan-200"
                                                         >
-                                                            Open post
+                                                            Post öffnen
                                                         </a>
                                                     )}
                                                 </div>
@@ -1253,7 +1442,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                             className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-[11px] text-white hover:bg-white/10 disabled:opacity-50"
                                         >
                                             {isRefreshingPostStatus ? <Loader2 size={12} className="animate-spin" /> : <Clock size={12} />}
-                                            Refresh Status
+                                            Status aktualisieren
                                         </button>
                                     </div>
                                 )}
@@ -1265,7 +1454,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                             disabled={posting || !uploadPostKey}
                             className="w-full py-3 bg-primary hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-white font-bold transition-all flex items-center justify-center gap-2"
                         >
-                            {posting ? <><Loader2 size={16} className="animate-spin" /> {isScheduling ? 'Scheduling...' : 'Publishing...'}</> : <><Share2 size={16} /> {isScheduling ? 'Schedule Post' : 'Publish Now'}</>}
+                            {posting ? <><Loader2 size={16} className="animate-spin" /> {isScheduling ? 'Plane...' : 'Veröffentliche...'}</> : <><Share2 size={16} /> {isScheduling ? 'Post planen' : 'Jetzt veröffentlichen'}</>}
                         </button>
                     </div>
                 </div>,
@@ -1277,6 +1466,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 isOpen={showSubtitleModal}
                 onClose={() => setShowSubtitleModal(false)}
                 onGenerate={handleSubtitle}
+                onApplyAsJobDefault={handleApplySubtitleDefaultsToJob}
                 isProcessing={isSubtitling}
                 videoUrl={currentVideoUrl}
                 defaultSettings={subtitleStyle}
@@ -1286,6 +1476,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 isOpen={showHookModal}
                 onClose={() => setShowHookModal(false)}
                 onGenerate={handleHook}
+                onApplyAsJobDefault={handleApplyHookDefaultsToJob}
                 isProcessing={isHooking}
                 videoUrl={currentVideoUrl}
                 initialText={clip.viral_hook_text}

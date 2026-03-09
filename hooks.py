@@ -1,11 +1,15 @@
 import os
+import re
 import subprocess
 import tempfile
 import time
+import urllib.request
+from typing import Dict, Optional, Tuple
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from overlay_styles import (
     DEFAULT_BACKGROUND_STYLE,
     DEFAULT_HOOK_FONT,
+    FONT_DIR,
     get_background_preset,
     get_font_path,
 )
@@ -38,6 +42,31 @@ LEGACY_Y_POSITIONS = {
     "bottom": 88.0,
 }
 
+EMOJI_FONT_FILE = os.environ.get("EMOJI_FONT_FILE", "").strip()
+EMOJI_FONT_URL = os.environ.get(
+    "EMOJI_FONT_URL",
+    "https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji.ttf",
+).strip()
+EMOJI_FONT_FILENAME = os.environ.get("EMOJI_FONT_FILENAME", "NotoColorEmoji.ttf").strip() or "NotoColorEmoji.ttf"
+EMOJI_FONT_FALLBACK_URLS = [
+    "https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji-emojicompat.ttf",
+    "https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji_WindowsCompatible.ttf",
+]
+EMOJI_SYSTEM_FONT_PATHS = [
+    "/tmp/openshorts_fonts/NotoColorEmoji.ttf",
+    os.path.join(FONT_DIR, "NotoColorEmoji.ttf"),
+    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+    "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+    "/usr/share/fonts/google-noto-color-emoji/NotoColorEmoji.ttf",
+]
+EMOJI_NATIVE_SIZE_HINTS = [109, 128, 72]
+_RESAMPLE = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+_EMOJI_GLYPH_CACHE: Dict[Tuple[str, int], Optional[Image.Image]] = {}
+
+_EMOJI_JOINERS = {0x200D, 0xFE0F, 0xFE0E, 0x20E3}
+_EMOJI_SKIN_TONE_MIN = 0x1F3FB
+_EMOJI_SKIN_TONE_MAX = 0x1F3FF
+
 
 def _load_font(font_name, font_size):
     font_path = get_font_path(font_name)
@@ -48,6 +77,204 @@ def _load_font(font_name, font_size):
     except Exception as e:
         print(f"⚠️ Warning: Could not load font {font_name}, using default. Error: {e}")
         return ImageFont.load_default()
+
+
+def _normalize_emoji_text(value: str) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+
+    try:
+        if any(0xD800 <= ord(ch) <= 0xDFFF for ch in text):
+            text = text.encode("utf-16", "surrogatepass").decode("utf-16")
+    except Exception:
+        pass
+
+    if re.search(r"\\u[0-9a-fA-F]{4}", text):
+        try:
+            decoded = text.encode("utf-8").decode("unicode_escape")
+            if decoded and any(ord(ch) > 127 for ch in decoded):
+                text = decoded
+        except Exception:
+            pass
+
+    return text
+
+
+def _ensure_emoji_font_file():
+    if EMOJI_FONT_FILE and os.path.exists(EMOJI_FONT_FILE):
+        return EMOJI_FONT_FILE
+
+    for candidate in EMOJI_SYSTEM_FONT_PATHS:
+        if candidate and os.path.exists(candidate):
+            return candidate
+
+    os.makedirs(FONT_DIR, exist_ok=True)
+    target_path = os.path.join(FONT_DIR, EMOJI_FONT_FILENAME)
+    if os.path.exists(target_path):
+        return target_path
+
+    sources = []
+    if EMOJI_FONT_URL:
+        sources.append(EMOJI_FONT_URL)
+    sources.extend(EMOJI_FONT_FALLBACK_URLS)
+    if not sources:
+        return None
+
+    for source in sources:
+        print(f"⬇️ Downloading emoji font from {source}...")
+        try:
+            req = urllib.request.Request(
+                source,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as response, open(target_path, "wb") as out_file:
+                out_file.write(response.read())
+            print(f"✅ Emoji font downloaded to {target_path}")
+            return target_path
+        except Exception as e:
+            print(f"⚠️ Failed to download emoji font from {source}: {e}")
+    return None
+
+
+def _load_emoji_font(font_size):
+    emoji_font_path = _ensure_emoji_font_file()
+    if not emoji_font_path:
+        return None
+    size_candidates = [max(16, int(font_size))]
+    for size_hint in EMOJI_NATIVE_SIZE_HINTS:
+        if size_hint not in size_candidates:
+            size_candidates.append(size_hint)
+
+    for size_candidate in size_candidates:
+        try:
+            return ImageFont.truetype(emoji_font_path, size_candidate)
+        except Exception:
+            continue
+
+    print("⚠️ Could not load emoji font, continuing without emoji fallback.")
+    return None
+
+
+def _render_emoji_cluster(cluster: str, emoji_font, target_height: int) -> Optional[Image.Image]:
+    if not cluster or not emoji_font:
+        return None
+
+    normalized_target = max(12, int(target_height or 12))
+    cache_key = (cluster, normalized_target)
+    if cache_key in _EMOJI_GLYPH_CACHE:
+        cached = _EMOJI_GLYPH_CACHE[cache_key]
+        return cached.copy() if cached is not None else None
+
+    native_size = max(16, int(getattr(emoji_font, "size", 109) or 109))
+    canvas_size = max(256, native_size * 4)
+
+    canvas = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+
+    # `embedded_color=True` is required for color emoji fonts.
+    draw.text((0, 0), cluster, font=emoji_font, embedded_color=True)
+    bbox = canvas.getbbox()
+    if not bbox:
+        _EMOJI_GLYPH_CACHE[cache_key] = None
+        return None
+
+    glyph = canvas.crop(bbox)
+    source_width, source_height = glyph.size
+    if source_width < 1 or source_height < 1:
+        _EMOJI_GLYPH_CACHE[cache_key] = None
+        return None
+
+    scale = normalized_target / float(source_height)
+    out_width = max(1, int(round(source_width * scale)))
+    out_height = max(1, int(round(source_height * scale)))
+    resized = glyph.resize((out_width, out_height), _RESAMPLE)
+    _EMOJI_GLYPH_CACHE[cache_key] = resized
+    return resized.copy()
+
+
+def _is_emoji_codepoint(value):
+    return (
+        0x1F300 <= value <= 0x1FAFF or
+        0x2600 <= value <= 0x27BF or
+        0x1F1E6 <= value <= 0x1F1FF
+    )
+
+
+def _split_graphemeish(text):
+    clusters = []
+    index = 0
+    length = len(text)
+    while index < length:
+        cluster = text[index]
+        index += 1
+        while index < length:
+            codepoint = ord(text[index])
+            if (
+                codepoint in _EMOJI_JOINERS
+                or _EMOJI_SKIN_TONE_MIN <= codepoint <= _EMOJI_SKIN_TONE_MAX
+            ):
+                cluster += text[index]
+                index += 1
+                if codepoint == 0x200D and index < length:
+                    cluster += text[index]
+                    index += 1
+                continue
+            break
+        clusters.append(cluster)
+    return clusters
+
+
+def _cluster_contains_emoji(cluster):
+    for character in cluster:
+        if _is_emoji_codepoint(ord(character)):
+            return True
+    return False
+
+
+def _line_segments_with_fonts(line, base_font, emoji_font):
+    if not line:
+        return [("", base_font, False)]
+    if not emoji_font:
+        return [(line, base_font, False)]
+
+    clusters = _split_graphemeish(line)
+    segments = []
+    buffer = ""
+    current_font = None
+    current_is_emoji = False
+
+    for cluster in clusters:
+        use_emoji_font = _cluster_contains_emoji(cluster)
+        font = emoji_font if use_emoji_font else base_font
+        if current_font is None:
+            buffer = cluster
+            current_font = font
+            current_is_emoji = use_emoji_font
+            continue
+        if font is current_font and use_emoji_font == current_is_emoji:
+            buffer += cluster
+            continue
+        segments.append((buffer, current_font, current_is_emoji))
+        buffer = cluster
+        current_font = font
+        current_is_emoji = use_emoji_font
+
+    if buffer or not segments:
+        segments.append((buffer, current_font or base_font, current_is_emoji))
+    return segments
+
+
+def _measure_text(draw, text, font, stroke_width=0):
+    if not text:
+        return 0, 0
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+    except Exception:
+        fallback_width = int(max(1, len(text)) * max(8, getattr(font, "size", 18)) * 0.55)
+        fallback_height = int(max(12, getattr(font, "size", 18)))
+        return fallback_width, fallback_height
 
 
 def _wrap_text(text, font, max_text_width):
@@ -115,6 +342,7 @@ def create_hook_image(
     """
     Generates a full-frame transparent overlay whose hook layout matches the UI preview closely.
     """
+    text = _normalize_emoji_text(text)
     style = get_background_preset(background_style)
 
     target_ratio = WIDTH_PRESETS.get(width_preset, WIDTH_PRESETS["wide"])
@@ -129,6 +357,7 @@ def create_hook_image(
 
     font_size = max(28, int((video_width / 1080.0) * base_font_size * font_scale))
     font = _load_font(font_name, font_size)
+    emoji_font = _load_emoji_font(font_size)
 
     padding_x = max(24, int(font_size * 0.75))
     padding_y = max(18, int(font_size * 0.52))
@@ -150,11 +379,46 @@ def create_hook_image(
         if not line:
             line_height = font_size
             line_width = 0
+            line_segments = [("", font, False)]
         else:
-            bbox = probe_draw.textbbox((0, 0), line, font=font, stroke_width=style.get("hook_stroke_width", 0))
-            line_width = bbox[2] - bbox[0]
-            line_height = bbox[3] - bbox[1]
-        line_metrics.append((line, line_width, line_height))
+            line_segments = _line_segments_with_fonts(line, font, emoji_font)
+            segment_widths = []
+            segment_heights = []
+            for segment_text, segment_font, is_emoji_segment in line_segments:
+                if is_emoji_segment and emoji_font:
+                    emoji_target_height = max(18, int(font_size * 1.02))
+                    cluster_width = 0
+                    cluster_height = emoji_target_height
+                    for cluster in _split_graphemeish(segment_text):
+                        emoji_glyph = _render_emoji_cluster(cluster, emoji_font, emoji_target_height)
+                        if emoji_glyph:
+                            glyph_width, glyph_height = emoji_glyph.size
+                            cluster_width += glyph_width
+                            cluster_height = max(cluster_height, glyph_height)
+                        else:
+                            fallback_width, fallback_height = _measure_text(
+                                probe_draw,
+                                cluster,
+                                font,
+                                stroke_width=style.get("hook_stroke_width", 0),
+                            )
+                            cluster_width += fallback_width
+                            cluster_height = max(cluster_height, fallback_height)
+                    segment_width = cluster_width
+                    segment_height = cluster_height
+                else:
+                    segment_stroke_width = 0 if is_emoji_segment else style.get("hook_stroke_width", 0)
+                    segment_width, segment_height = _measure_text(
+                        probe_draw,
+                        segment_text,
+                        segment_font,
+                        stroke_width=segment_stroke_width,
+                    )
+                segment_widths.append(segment_width)
+                segment_heights.append(segment_height)
+            line_width = sum(segment_widths)
+            line_height = max(segment_heights) if segment_heights else font_size
+        line_metrics.append((line_segments, line_width, line_height))
         max_line_width = max(max_line_width, line_width)
         total_text_height += line_height
 
@@ -211,18 +475,66 @@ def create_hook_image(
     else:
         text_anchor_x = box_x + (final_box_width / 2)
 
-    for line, _, line_height in line_metrics:
-        if line:
-            draw.text(
-                (text_anchor_x, current_y),
-                line,
-                font=font,
-                fill=style["hook_text"],
-                align=text_align,
-                anchor={"left": "lt", "center": "mt", "right": "rt"}[text_align],
-                stroke_width=style.get("hook_stroke_width", 0),
-                stroke_fill=style.get("hook_stroke_fill"),
-            )
+    for line_segments, line_width, line_height in line_metrics:
+        if line_segments and any(segment_text for segment_text, _, _ in line_segments):
+            if text_align == "left":
+                segment_x = text_anchor_x
+            elif text_align == "right":
+                segment_x = text_anchor_x - line_width
+            else:
+                segment_x = text_anchor_x - (line_width / 2.0)
+
+            for segment_text, segment_font, is_emoji_segment in line_segments:
+                if not segment_text:
+                    continue
+                if is_emoji_segment and emoji_font:
+                    emoji_target_height = max(18, int(font_size * 1.02))
+                    for cluster in _split_graphemeish(segment_text):
+                        emoji_glyph = _render_emoji_cluster(cluster, emoji_font, emoji_target_height)
+                        if emoji_glyph:
+                            glyph_x = int(round(segment_x))
+                            glyph_y = int(round(current_y + max(0.0, (line_height - emoji_glyph.height) / 2.0)))
+                            overlay.alpha_composite(emoji_glyph, (glyph_x, glyph_y))
+                            segment_x += emoji_glyph.width
+                            continue
+
+                        fallback_stroke = style.get("hook_stroke_width", 0)
+                        draw.text(
+                            (segment_x, current_y),
+                            cluster,
+                            font=font,
+                            fill=style["hook_text"],
+                            align="left",
+                            anchor="lt",
+                            stroke_width=fallback_stroke,
+                            stroke_fill=style.get("hook_stroke_fill"),
+                        )
+                        fallback_width, _ = _measure_text(
+                            draw,
+                            cluster,
+                            font,
+                            stroke_width=fallback_stroke,
+                        )
+                        segment_x += fallback_width
+                else:
+                    segment_stroke_width = 0 if is_emoji_segment else style.get("hook_stroke_width", 0)
+                    draw.text(
+                        (segment_x, current_y),
+                        segment_text,
+                        font=segment_font,
+                        fill=style["hook_text"],
+                        align="left",
+                        anchor="lt",
+                        stroke_width=segment_stroke_width,
+                        stroke_fill=style.get("hook_stroke_fill"),
+                    )
+                    segment_width, _ = _measure_text(
+                        draw,
+                        segment_text,
+                        segment_font,
+                        stroke_width=segment_stroke_width,
+                    )
+                    segment_x += segment_width
         current_y += line_height + line_spacing
 
     overlay.save(output_image_path)
@@ -249,6 +561,7 @@ def add_hook_to_video(
     """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video {video_path} not found")
+    text = _normalize_emoji_text(text)
 
     # 1. Probe video width to scale text properly
     try:

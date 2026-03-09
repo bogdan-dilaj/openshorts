@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertCircle, CheckCircle2, Clock3, Loader2, Play, RefreshCcw, RotateCcw, Square } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Clock3, Loader2, Play, RefreshCcw, RotateCcw, Square, Trash2 } from 'lucide-react';
 
 const statusClasses = {
     completed: 'bg-green-500/10 border-green-500/20 text-green-400',
@@ -11,21 +11,21 @@ const statusClasses = {
 };
 
 const formatTimestamp = (value) => {
-    if (!value) return 'Unknown';
+    if (!value) return 'Unbekannt';
     return new Intl.DateTimeFormat(undefined, {
         dateStyle: 'medium',
         timeStyle: 'short',
     }).format(new Date(value * 1000));
 };
 
-export default function JobHistory({ jobs, loading, error, currentJobId, cancelingJobId, onRefresh, onOpenJob, onResumeJob, onCancelJob }) {
+export default function JobHistory({ jobs, loading, error, currentJobId, cancelingJobId, deletingJobId, onRefresh, onOpenJob, onResumeJob, onCancelJob, onDeleteJob }) {
     return (
         <div className="h-full overflow-y-auto touch-scroll p-5 md:p-8 max-w-5xl mx-auto animate-[fadeIn_0.3s_ease-out]">
             <div className="flex items-center justify-between mb-8 gap-4">
                 <div>
-                    <h1 className="text-2xl font-bold text-white">Job History</h1>
+                    <h1 className="text-2xl font-bold text-white">Job-Verlauf</h1>
                     <p className="text-sm text-zinc-500 mt-1">
-                        Resume failed or partial runs without retranscribing and recutting everything from zero.
+                        Fehlgeschlagene oder teilweise fertige Jobs fortsetzen, ohne alles neu zu transkribieren und zu schneiden.
                     </p>
                 </div>
                 <button
@@ -34,14 +34,14 @@ export default function JobHistory({ jobs, loading, error, currentJobId, canceli
                     className="px-4 py-2 rounded-xl border border-white/10 text-sm text-zinc-300 hover:text-white hover:bg-white/5 transition-colors flex items-center gap-2 disabled:opacity-50"
                 >
                     {loading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCcw size={16} />}
-                    Refresh
+                    Aktualisieren
                 </button>
             </div>
 
             {loading && jobs.length === 0 && (
                 <div className="glass-panel p-10 flex items-center justify-center text-zinc-400 gap-3">
                     <Loader2 size={18} className="animate-spin" />
-                    Loading jobs...
+                    Lade Jobs...
                 </div>
             )}
 
@@ -54,7 +54,7 @@ export default function JobHistory({ jobs, loading, error, currentJobId, canceli
 
             {!loading && !error && jobs.length === 0 && (
                 <div className="glass-panel p-10 text-center text-zinc-500">
-                    No jobs found yet.
+                    Noch keine Jobs gefunden.
                 </div>
             )}
 
@@ -65,7 +65,9 @@ export default function JobHistory({ jobs, loading, error, currentJobId, canceli
                     const statusClass = statusClasses[job.status] || statusClasses.failed;
                     const isCurrentJob = currentJobId === job.job_id;
                     const isStopping = cancelingJobId === job.job_id;
+                    const isDeleting = deletingJobId === job.job_id;
                     const canCancel = job.status === 'queued' || job.status === 'processing';
+                    const canDelete = !canCancel;
                     const lastLog = job.error || job.logs?.[job.logs.length - 1];
 
                     return (
@@ -89,7 +91,7 @@ export default function JobHistory({ jobs, loading, error, currentJobId, canceli
                                         )}
                                         {job.can_resume && (
                                             <span className="px-2 py-1 rounded-full border border-amber-500/20 bg-amber-500/10 text-[10px] uppercase tracking-wider text-amber-400">
-                                                resumable
+                                                fortsetzbar
                                             </span>
                                         )}
                                     </div>
@@ -100,11 +102,11 @@ export default function JobHistory({ jobs, loading, error, currentJobId, canceli
                                     <div className="mt-3 grid gap-2 text-xs text-zinc-500 sm:grid-cols-2">
                                         <div className="flex items-center gap-2">
                                             <Clock3 size={12} />
-                                            Updated {formatTimestamp(job.updated_at)}
+                                            Aktualisiert {formatTimestamp(job.updated_at)}
                                         </div>
                                         <div className="flex items-center gap-2">
                                             <CheckCircle2 size={12} />
-                                            {clipCount} output{clipCount === 1 ? '' : 's'}
+                                            {clipCount} Ergebnis{clipCount === 1 ? '' : 'se'}
                                         </div>
                                     </div>
                                     {lastLog && (
@@ -120,7 +122,7 @@ export default function JobHistory({ jobs, loading, error, currentJobId, canceli
                                         className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-sm text-white transition-colors flex items-center justify-center gap-2"
                                     >
                                         <Play size={16} />
-                                        {isCurrentJob ? 'Open Current Job' : 'Open Job'}
+                                        {isCurrentJob ? 'Aktuellen Job öffnen' : 'Job öffnen'}
                                     </button>
                                     {job.can_resume && (
                                         <button
@@ -128,7 +130,7 @@ export default function JobHistory({ jobs, loading, error, currentJobId, canceli
                                             className="px-4 py-2 rounded-xl bg-primary hover:bg-blue-600 text-sm text-white transition-colors flex items-center justify-center gap-2"
                                         >
                                             <RotateCcw size={16} />
-                                            Resume Job
+                                            Job fortsetzen
                                         </button>
                                     )}
                                     {canCancel && (
@@ -138,9 +140,17 @@ export default function JobHistory({ jobs, loading, error, currentJobId, canceli
                                             className="px-4 py-2 rounded-xl bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-sm text-red-300 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
                                         >
                                             {isStopping ? <Loader2 size={16} className="animate-spin" /> : <Square size={16} />}
-                                            Stop Job
+                                            Job stoppen
                                         </button>
                                     )}
+                                    <button
+                                        onClick={() => onDeleteJob(job)}
+                                        disabled={isDeleting || !canDelete}
+                                        className="px-4 py-2 rounded-xl bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-sm text-red-300 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                                    >
+                                        {isDeleting ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+                                        Job löschen
+                                    </button>
                                 </div>
                             </div>
                         </div>

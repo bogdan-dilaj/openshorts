@@ -19,7 +19,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from dotenv import load_dotenv
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -141,6 +141,20 @@ def _get_job_output_dir(job_id: str) -> str:
     return os.path.join(OUTPUT_DIR, job_id)
 
 
+def _resolve_safe_job_output_dir(job_id: str) -> tuple[str, str]:
+    normalized_job_id = (job_id or "").strip()
+    if not normalized_job_id:
+        raise HTTPException(status_code=400, detail="Invalid job id")
+    if normalized_job_id != os.path.basename(normalized_job_id):
+        raise HTTPException(status_code=400, detail="Invalid job id")
+
+    output_root_abs = os.path.abspath(OUTPUT_DIR)
+    output_dir_abs = os.path.abspath(_get_job_output_dir(normalized_job_id))
+    if output_dir_abs == output_root_abs or not output_dir_abs.startswith(output_root_abs + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid job id")
+    return normalized_job_id, output_dir_abs
+
+
 def _get_job_record_or_404(job_id: str) -> Dict:
     job = jobs.get(job_id)
     if not job:
@@ -199,6 +213,469 @@ def _clip_video_url(job_id: str, filename: Optional[str]) -> Optional[str]:
     if not filename:
         return None
     return f"/videos/{job_id}/{os.path.basename(filename)}"
+
+
+def _normalize_language_hint(value: Any) -> str:
+    if value is None:
+        return ""
+    normalized = str(value).strip().lower().replace("_", "-")
+    if not normalized or normalized == "auto":
+        return ""
+    normalized = normalized.split("-")[0]
+    if re.fullmatch(r"[a-z]{2,3}", normalized):
+        return normalized
+    return ""
+
+
+def _language_from_translated_filename(filename: Optional[str]) -> str:
+    name = os.path.basename(filename or "")
+    if not name:
+        return ""
+    match = re.search(r"(?:^|_)translated_\d+_([A-Za-z_-]+)_", name)
+    if not match:
+        return ""
+    return _normalize_language_hint(match.group(1))
+
+
+def _normalize_unicode_text(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    if not text:
+        return text
+    try:
+        if any(0xD800 <= ord(ch) <= 0xDFFF for ch in text):
+            text = text.encode("utf-16", "surrogatepass").decode("utf-16")
+    except Exception:
+        pass
+    return text
+
+
+def _resolve_transcription_language_hint(
+    metadata_data: Optional[Dict[str, Any]] = None,
+    clip_data: Optional[Dict[str, Any]] = None,
+    source_version: Optional[Dict[str, Any]] = None,
+    fallback_filename: Optional[str] = None,
+) -> str:
+    if source_version:
+        from_version = _normalize_language_hint(source_version.get("language"))
+        if from_version:
+            return from_version
+        from_version_name = _language_from_translated_filename(
+            source_version.get("filename") or source_version.get("video_filename")
+        )
+        if from_version_name:
+            return from_version_name
+
+    from_filename = _language_from_translated_filename(fallback_filename)
+    if from_filename:
+        return from_filename
+
+    metadata = metadata_data or {}
+    transcript = metadata.get("transcript") if isinstance(metadata, dict) else None
+    if isinstance(transcript, dict):
+        from_transcript = _normalize_language_hint(transcript.get("language"))
+        if from_transcript:
+            return from_transcript
+
+    if isinstance(metadata, dict):
+        from_metadata = _normalize_language_hint(metadata.get("language"))
+        if from_metadata:
+            return from_metadata
+
+    if clip_data:
+        from_clip = _normalize_language_hint(clip_data.get("language"))
+        if from_clip:
+            return from_clip
+
+    return ""
+
+
+def _infer_language_from_clip_copy(clip_data: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(clip_data, dict):
+        return ""
+
+    text_parts = [
+        clip_data.get("video_title_for_youtube_short"),
+        clip_data.get("video_description_for_tiktok"),
+        clip_data.get("video_description_for_instagram"),
+        clip_data.get("viral_hook_text"),
+    ]
+    text = " ".join(str(part or "") for part in text_parts).strip().lower()
+    if not text:
+        return ""
+
+    tokens = re.findall(r"[a-zA-ZäöüÄÖÜßñáéíóúàèìòùç]+", text)
+    if not tokens:
+        return ""
+
+    language_markers = {
+        "de": {
+            "und", "nicht", "ich", "du", "der", "die", "das", "mit", "für",
+            "fuer", "ist", "auf", "ein", "eine", "zum", "den", "dass",
+        },
+        "es": {
+            "que", "para", "con", "una", "como", "pero", "esto", "esta",
+            "tiktok", "viral", "haz", "sin", "más", "mas", "porque",
+        },
+        "fr": {
+            "pour", "avec", "dans", "une", "est", "pas", "vous", "mais",
+            "plus", "comment", "vidéo", "video",
+        },
+        "it": {
+            "con", "per", "non", "una", "come", "questo", "video", "italia",
+            "solo", "anche",
+        },
+        "pt": {
+            "com", "para", "não", "nao", "uma", "como", "isso", "você",
+            "voce", "mais", "video",
+        },
+        "en": {
+            "the", "and", "you", "your", "with", "this", "that", "for",
+            "from", "how", "why", "what", "viral",
+        },
+    }
+
+    token_count = max(1, len(tokens))
+    scores: Dict[str, float] = {}
+    for language_code, markers in language_markers.items():
+        hits = sum(1 for token in tokens if token in markers)
+        score = hits / token_count
+        if language_code == "de" and any(ch in text for ch in ("ä", "ö", "ü", "ß")):
+            score += 0.08
+        scores[language_code] = score
+
+    sorted_scores = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    top_lang, top_score = sorted_scores[0]
+    second_score = sorted_scores[1][1] if len(sorted_scores) > 1 else 0.0
+
+    if top_score < 0.045:
+        return ""
+    if (top_score - second_score) < 0.02:
+        return ""
+    return top_lang
+
+
+def _resolve_subtitle_language_hint(
+    metadata_data: Optional[Dict[str, Any]] = None,
+    clip_data: Optional[Dict[str, Any]] = None,
+    source_version: Optional[Dict[str, Any]] = None,
+    fallback_filename: Optional[str] = None,
+) -> str:
+    resolved = _resolve_transcription_language_hint(
+        metadata_data=metadata_data,
+        clip_data=clip_data,
+        source_version=source_version,
+        fallback_filename=fallback_filename,
+    )
+    metadata_transcript_language = _normalize_language_hint(
+        ((metadata_data or {}).get("transcript") or {}).get("language")
+    )
+    inferred_from_transcript = _infer_language_from_transcript_content(metadata_data)
+    inferred_from_copy = _infer_language_from_clip_copy(clip_data)
+
+    if (
+        metadata_transcript_language
+        and resolved in {"", "en"}
+        and metadata_transcript_language != resolved
+    ):
+        print(
+            "🗣️ Subtitle language hint override from metadata transcript: "
+            f"{resolved or 'auto'} -> {metadata_transcript_language}"
+        )
+        resolved = metadata_transcript_language
+
+    if inferred_from_transcript and resolved in {"", "en"} and inferred_from_transcript != resolved:
+        print(
+            "🗣️ Subtitle language hint override from transcript content: "
+            f"{resolved or 'auto'} -> {inferred_from_transcript}"
+        )
+        resolved = inferred_from_transcript
+
+    if inferred_from_copy and resolved in {"", "en"} and inferred_from_copy != resolved:
+        print(
+            "🗣️ Subtitle language hint override from clip copy: "
+            f"{resolved or 'auto'} -> {inferred_from_copy}"
+        )
+        return inferred_from_copy
+
+    return resolved
+
+
+def _infer_language_from_transcript_content(metadata_data: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(metadata_data, dict):
+        return ""
+    transcript = metadata_data.get("transcript")
+    if not isinstance(transcript, dict):
+        return ""
+
+    text = _collect_transcript_text_for_range(transcript, 0.0, 1e9).lower()
+    if not text:
+        return ""
+
+    tokens = re.findall(r"[a-zA-ZäöüÄÖÜß]+", text)
+    if len(tokens) < 16:
+        return ""
+
+    english_markers = {
+        "the", "and", "you", "that", "is", "to", "of", "it",
+        "in", "for", "on", "with", "this", "are", "be", "your",
+        "from", "as", "have", "just",
+    }
+    german_markers = {
+        "und", "ich", "nicht", "das", "die", "der", "du", "ist",
+        "es", "wir", "sie", "ein", "zu", "mit", "dass", "aber",
+        "wie", "auch", "wenn", "auf", "den", "dem", "im", "für", "fuer",
+    }
+
+    english_hits = sum(1 for token in tokens if token in english_markers)
+    german_hits = sum(1 for token in tokens if token in german_markers)
+    has_umlaut = any(ch in text for ch in ("ä", "ö", "ü", "ß"))
+
+    if has_umlaut and german_hits >= english_hits:
+        return "de"
+    if german_hits >= 6 and german_hits >= (english_hits + 2):
+        return "de"
+    if english_hits >= 6 and english_hits >= (german_hits + 2):
+        return "en"
+    return ""
+
+
+def _collect_transcript_text_for_range(
+    transcript: Optional[Dict[str, Any]],
+    clip_start: float,
+    clip_end: float,
+) -> str:
+    if not isinstance(transcript, dict):
+        return ""
+    segments = transcript.get("segments")
+    if not isinstance(segments, list):
+        return ""
+    texts: List[str] = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        try:
+            seg_start = float(segment.get("start", 0.0) or 0.0)
+            seg_end = float(segment.get("end", seg_start) or seg_start)
+        except (TypeError, ValueError):
+            continue
+        if seg_end <= clip_start or seg_start >= clip_end:
+            continue
+        text = str(segment.get("text") or "").strip()
+        if text:
+            texts.append(text)
+    return " ".join(texts).strip()
+
+
+def _looks_mismatched_to_expected_language(
+    transcript: Optional[Dict[str, Any]],
+    clip_start: float,
+    clip_end: float,
+    expected_language: str,
+) -> bool:
+    lang = _normalize_language_hint(expected_language)
+    if not lang:
+        return False
+
+    transcript_language = ""
+    if isinstance(transcript, dict):
+        transcript_language = _normalize_language_hint(transcript.get("language"))
+    if lang == "de" and transcript_language == "en":
+        return True
+
+    text = _collect_transcript_text_for_range(transcript, clip_start, clip_end).lower()
+    if not text:
+        return False
+
+    tokens = re.findall(r"[a-zA-ZäöüÄÖÜß]+", text)
+    if len(tokens) < 6:
+        return False
+
+    if lang != "de":
+        return False
+
+    english_markers = {
+        "the", "and", "you", "that", "is", "to", "of", "it",
+        "in", "for", "on", "with", "this", "are", "be", "your",
+        "from", "as", "have", "just",
+    }
+    german_markers = {
+        "und", "ich", "nicht", "das", "die", "der", "du", "ist",
+        "es", "wir", "sie", "ein", "zu", "mit", "dass", "aber",
+        "wie", "auch", "wenn", "auf", "den", "dem", "im",
+    }
+
+    english_hits = sum(1 for token in tokens if token in english_markers)
+    german_hits = sum(1 for token in tokens if token in german_markers)
+    english_ratio = english_hits / max(1, len(tokens))
+    german_ratio = german_hits / max(1, len(tokens))
+
+    return english_hits >= 4 and english_ratio > 0.06 and english_ratio > (german_ratio * 1.2)
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_transcript_window_for_range(
+    transcript: Optional[Dict[str, Any]],
+    clip_start: float,
+    clip_end: float,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(transcript, dict):
+        return None
+    segments = transcript.get("segments")
+    if not isinstance(segments, list):
+        return None
+    if clip_end <= clip_start:
+        return None
+
+    window_segments: List[Dict[str, Any]] = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        seg_start = _coerce_float(segment.get("start"))
+        seg_end = _coerce_float(segment.get("end"))
+        if seg_start is None:
+            seg_start = 0.0
+        if seg_end is None:
+            seg_end = seg_start
+        if seg_end <= clip_start or seg_start >= clip_end:
+            continue
+
+        text = str(segment.get("text") or "").strip()
+        words_payload: List[Dict[str, Any]] = []
+        words = segment.get("words")
+        if isinstance(words, list):
+            for word in words:
+                if not isinstance(word, dict):
+                    continue
+                word_text = str(word.get("word") or "").strip()
+                if not word_text:
+                    continue
+                word_start = _coerce_float(word.get("start"))
+                word_end = _coerce_float(word.get("end"))
+                if word_start is None:
+                    word_start = seg_start
+                if word_end is None:
+                    word_end = word_start
+                if word_end <= clip_start or word_start >= clip_end:
+                    continue
+                words_payload.append({
+                    "word": word_text,
+                    "start": max(clip_start, word_start),
+                    "end": min(clip_end, word_end),
+                })
+
+        if not words_payload and not text:
+            continue
+
+        window_segments.append({
+            "start": max(clip_start, seg_start),
+            "end": min(clip_end, seg_end),
+            "text": text,
+            "words": words_payload,
+        })
+
+    if not window_segments:
+        return None
+
+    return {
+        "language": transcript.get("language"),
+        "segments": window_segments,
+    }
+
+
+def _resolve_subtitle_transcript_payload(
+    *,
+    metadata_data: Optional[Dict[str, Any]],
+    clip_data: Optional[Dict[str, Any]],
+    input_path: str,
+    preferred_language: str,
+    transcript_source_hint: Optional[str] = None,
+    transcript_start: Optional[float] = None,
+    transcript_end: Optional[float] = None,
+) -> Tuple[Dict[str, Any], float, float, str]:
+    resolved_language = _normalize_language_hint(preferred_language)
+    source_hint = str(transcript_source_hint or "").strip().lower()
+    original_transcript = (metadata_data or {}).get("transcript")
+
+    range_start = _coerce_float(transcript_start)
+    range_end = _coerce_float(transcript_end)
+    if range_start is None and isinstance(clip_data, dict):
+        range_start = _coerce_float(clip_data.get("start"))
+    if range_end is None and isinstance(clip_data, dict):
+        range_end = _coerce_float(clip_data.get("end"))
+
+    if source_hint == "original":
+        if range_start is not None and range_end is not None and range_end > range_start:
+            window = _build_transcript_window_for_range(
+                original_transcript,
+                range_start,
+                range_end,
+            )
+            if window:
+                if resolved_language and _looks_mismatched_to_expected_language(window, range_start, range_end, resolved_language):
+                    print(
+                        "⚠️ Original transcript window language mismatch. "
+                        "Falling back to fresh audio transcription."
+                    )
+                else:
+                    print(
+                        "♻️ Subtitle transcript source: original transcript window "
+                        f"({range_start:.2f}s - {range_end:.2f}s)."
+                    )
+                    return window, float(range_start), float(range_end), "original"
+
+    subtitle_transcript = transcribe_audio(input_path, preferred_language=resolved_language or None)
+    clip_start = 0.0
+    clip_end = _probe_video_duration(input_path)
+    expected_language = resolved_language or _normalize_language_hint(
+        (original_transcript or {}).get("language")
+    )
+
+    if expected_language and _looks_mismatched_to_expected_language(
+        subtitle_transcript,
+        clip_start,
+        clip_end,
+        expected_language,
+    ):
+        print(
+            "⚠️ Subtitle transcript language mismatch after audio transcription. "
+            "Trying stricter language fallback..."
+        )
+        strict_language = _normalize_language_hint((original_transcript or {}).get("language"))
+        if strict_language and strict_language != resolved_language:
+            print(f"🔁 Retrying subtitle transcription with strict language hint: {strict_language}")
+            retried_transcript = transcribe_audio(input_path, preferred_language=strict_language)
+            if not _looks_mismatched_to_expected_language(
+                retried_transcript,
+                clip_start,
+                clip_end,
+                strict_language,
+            ):
+                return retried_transcript, clip_start, clip_end, "audio-retry"
+
+        if (
+            source_hint == "original"
+            and range_start is not None
+            and range_end is not None
+            and range_end > range_start
+        ):
+            window = _build_transcript_window_for_range(
+                original_transcript,
+                range_start,
+                range_end,
+            )
+            if window:
+                print("♻️ Using original transcript window fallback for subtitles.")
+                return window, float(range_start), float(range_end), "original-fallback"
+
+    return subtitle_transcript, clip_start, clip_end, "audio"
 
 
 def _strip_overlay_prefixes(filename: Optional[str]) -> Optional[str]:
@@ -522,6 +999,92 @@ def _probe_video_duration(video_path: str) -> float:
     return max(0.0, float(result))
 
 
+def _probe_video_codec(video_path: str) -> str:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_name",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        video_path,
+    ]
+    try:
+        return (subprocess.check_output(cmd).decode().strip() or "").lower()
+    except Exception:
+        return ""
+
+
+def _ensure_mp4_h264_source(video_path: str, output_dir: str) -> str:
+    if not video_path or not os.path.exists(video_path):
+        return video_path
+
+    ext = os.path.splitext(video_path)[1].lower()
+    codec = _probe_video_codec(video_path)
+    if ext == ".mp4" and codec == "h264":
+        return video_path
+
+    base_name = os.path.splitext(os.path.basename(video_path))[0]
+    safe_base = re.sub(r"[^a-zA-Z0-9_.-]+", "_", base_name).strip("._") or "source"
+    working_path = os.path.join(output_dir, f"{safe_base}_working_h264.mp4")
+    if os.path.exists(working_path) and os.path.getsize(working_path) > 0:
+        return working_path
+
+    print(
+        "⚠️ Preview source is not Safari-compatible. "
+        f"Converting to H.264 MP4 ({os.path.basename(video_path)})..."
+    )
+    convert_cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        video_path,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        *ffmpeg_thread_args(),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+        working_path,
+    ]
+    try:
+        subprocess.run(
+            convert_cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            **subprocess_priority_kwargs(),
+        )
+        if os.path.exists(working_path) and os.path.getsize(working_path) > 0:
+            print(f"✅ Safari-compatible source ready: {working_path}")
+            return working_path
+    except Exception as exc:
+        print(f"⚠️ Failed to convert preview source to H.264 MP4: {exc}")
+
+    if os.path.exists(working_path):
+        try:
+            os.remove(working_path)
+        except Exception:
+            pass
+    return video_path
+
+
 def _video_has_audio(video_path: str) -> bool:
     cmd = [
         "ffprobe",
@@ -561,7 +1124,8 @@ def _build_subtitle_settings(req, clip_data: Dict) -> Optional[Dict]:
 
 def _build_hook_settings(req, clip_data: Dict) -> Optional[Dict]:
     existing = clip_data.get("hook_settings")
-    text = (req.text or "").strip() if hasattr(req, "text") else (existing or {}).get("text", "").strip()
+    raw_text = (req.text or "") if hasattr(req, "text") else (existing or {}).get("text", "")
+    text = _normalize_unicode_text(raw_text).strip()
     if not text:
         return None
 
@@ -606,7 +1170,7 @@ def _sanitize_hook_settings_dict(settings: Optional[Dict[str, Any]], clip_data: 
     if not isinstance(settings, dict):
         return clip_data.get("hook_settings")
 
-    text = (settings.get("text") or "").strip()
+    text = _normalize_unicode_text(settings.get("text") or "").strip()
     if not text:
         return clip_data.get("hook_settings")
 
@@ -650,7 +1214,7 @@ def _resolve_clip_source_input_path(job_id: str, output_dir: str, clip: Dict[str
             continue
         seen.add(normalized)
         if os.path.exists(normalized):
-            return normalized
+            return _ensure_mp4_h264_source(normalized, output_dir)
     return None
 
 
@@ -682,15 +1246,29 @@ def _render_subtitle_and_hook_stack(
                 temp_paths.append(subtitle_output_path)
 
             is_dubbed = os.path.basename(base_input_path).startswith("translated_")
-            subtitle_transcript = transcript
+            preferred_language = _resolve_subtitle_language_hint(
+                metadata_data={"transcript": transcript} if isinstance(transcript, dict) else None,
+                clip_data=clip_data,
+                fallback_filename=os.path.basename(base_input_path),
+            )
+            subtitle_transcript, subtitle_clip_start, subtitle_clip_end, subtitle_source_mode = _resolve_subtitle_transcript_payload(
+                metadata_data={"transcript": transcript} if isinstance(transcript, dict) else None,
+                clip_data=clip_data,
+                input_path=base_input_path,
+                preferred_language=preferred_language,
+                transcript_source_hint="original",
+                transcript_start=clip_data.get("start"),
+                transcript_end=clip_data.get("end"),
+            )
+            print(f"📝 Stack subtitle transcript mode: {subtitle_source_mode}")
             if is_dubbed:
-                subtitle_transcript = transcribe_audio(base_input_path)
+                print("🗣️ Dubbed source detected: subtitle transcription runs directly on dubbed audio.")
 
             success = burn_subtitles(
                 current_input,
                 subtitle_transcript,
-                0 if is_dubbed else clip_data["start"],
-                clip_data["end"] - clip_data["start"] if is_dubbed else clip_data["end"],
+                subtitle_clip_start,
+                subtitle_clip_end,
                 subtitle_output_path,
                 alignment=subtitle_settings.get("position", "bottom"),
                 y_position=subtitle_settings.get("y_position"),
@@ -1857,6 +2435,30 @@ async def get_job_history(
     }
 
 
+@app.delete("/api/jobs/{job_id}")
+async def delete_job(job_id: str):
+    normalized_job_id, output_dir_abs = _resolve_safe_job_output_dir(job_id)
+
+    active_job = jobs.get(normalized_job_id)
+    if active_job:
+        active_state = str(active_job.get("job_state", active_job.get("status", ""))).lower()
+        if active_state in {"queued", "processing"}:
+            raise HTTPException(status_code=409, detail="Cannot delete an active job. Stop it first.")
+
+    if not os.path.isdir(output_dir_abs):
+        raise HTTPException(status_code=404, detail="Job folder not found")
+
+    try:
+        shutil.rmtree(output_dir_abs)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to delete job folder: {exc}")
+
+    if normalized_job_id in jobs:
+        del jobs[normalized_job_id]
+
+    return {"success": True, "job_id": normalized_job_id}
+
+
 @app.post("/api/jobs/{job_id}/cancel")
 async def cancel_job(job_id: str):
     job = jobs.get(job_id)
@@ -2200,16 +2802,22 @@ async def add_subtitles(req: SubtitleRequest):
 
     try:
         subtitle_settings = _build_subtitle_settings(req, clip_data)
-        if source_version.get("transcript_source") == "audio":
-            subtitle_transcript = transcribe_audio(input_path)
-            clip_start = 0.0
-            clip_end = _probe_video_duration(input_path)
-        else:
-            subtitle_transcript = data.get("transcript")
-            if not subtitle_transcript:
-                raise HTTPException(status_code=400, detail="Transcript not found in metadata. Please process a new video.")
-            clip_start = float(source_version.get("transcript_start", clip_data.get("start", 0.0)))
-            clip_end = float(source_version.get("transcript_end", clip_data.get("end", clip_start)))
+        preferred_language = _resolve_subtitle_language_hint(
+            metadata_data=data,
+            clip_data=clip_data,
+            source_version=source_version,
+            fallback_filename=source_version.get("filename"),
+        )
+        subtitle_transcript, clip_start, clip_end, subtitle_source_mode = _resolve_subtitle_transcript_payload(
+            metadata_data=data,
+            clip_data=clip_data,
+            input_path=input_path,
+            preferred_language=preferred_language,
+            transcript_source_hint=source_version.get("transcript_source"),
+            transcript_start=source_version.get("transcript_start"),
+            transcript_end=source_version.get("transcript_end"),
+        )
+        print(f"📝 Subtitle transcript mode: {subtitle_source_mode}")
 
         def run_burn():
             return burn_subtitles(
@@ -2630,14 +3238,21 @@ async def render_clip_preview(req: RenderClipRequest):
         if apply_subtitles:
             subtitle_filename = f"preview_subtitled_{request_token}_clip_{req.clip_index + 1}.mp4"
             subtitle_path = os.path.join(output_dir, subtitle_filename)
-            if transcript and len(keep_segments) == 1:
-                subtitle_transcript = transcript
-                subtitle_clip_start = float(keep_segments[0][0])
-                subtitle_clip_end = float(keep_segments[0][1])
-            else:
-                subtitle_transcript = transcribe_audio(current_path)
-                subtitle_clip_start = 0.0
-                subtitle_clip_end = _probe_video_duration(current_path)
+            preferred_language = _resolve_subtitle_language_hint(
+                metadata_data=data,
+                clip_data=clip_data,
+                fallback_filename=os.path.basename(current_path),
+            )
+            subtitle_transcript, subtitle_clip_start, subtitle_clip_end, subtitle_source_mode = _resolve_subtitle_transcript_payload(
+                metadata_data=data,
+                clip_data=clip_data,
+                input_path=current_path,
+                preferred_language=preferred_language,
+                transcript_source_hint="original",
+                transcript_start=preview_source_start,
+                transcript_end=preview_source_end,
+            )
+            print(f"📝 Preview subtitle transcript mode: {subtitle_source_mode}")
 
             def run_subtitles():
                 return burn_subtitles(
@@ -2869,17 +3484,27 @@ async def render_clip(req: RenderClipRequest):
     if apply_subtitles:
         subtitle_filename = f"subtitled_{int(time.time() * 1000)}_{current_filename}"
         subtitle_path = os.path.join(output_dir, subtitle_filename)
-        if active_transcript_source == "audio" or not transcript:
-            subtitle_transcript = transcribe_audio(current_path)
-            subtitle_clip_start = 0.0
-            subtitle_clip_end = _probe_video_duration(current_path)
+        preferred_language = _resolve_subtitle_language_hint(
+            metadata_data=data,
+            clip_data=clip_data,
+            fallback_filename=os.path.basename(current_path),
+        )
+        subtitle_transcript, subtitle_clip_start, subtitle_clip_end, subtitle_source_mode = _resolve_subtitle_transcript_payload(
+            metadata_data=data,
+            clip_data=clip_data,
+            input_path=current_path,
+            preferred_language=preferred_language,
+            transcript_source_hint=active_transcript_source,
+            transcript_start=active_transcript_start,
+            transcript_end=active_transcript_end,
+        )
+        print(f"📝 Render subtitle transcript mode: {subtitle_source_mode}")
+        if subtitle_source_mode.startswith("original"):
+            active_transcript_source = "original"
+        else:
             active_transcript_source = "audio"
             active_transcript_start = None
             active_transcript_end = None
-        else:
-            subtitle_transcript = transcript
-            subtitle_clip_start = float(active_transcript_start or source_start)
-            subtitle_clip_end = float(active_transcript_end or source_end)
 
         def run_subtitles():
             return burn_subtitles(
@@ -3320,6 +3945,148 @@ def _normalize_upload_post_response(
     }
 
 
+def _parse_social_platforms_form_value(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_platforms = list(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        raw_platforms: List[str]
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                raw_platforms = [str(item) for item in parsed]
+            elif isinstance(parsed, str):
+                raw_platforms = [parsed]
+            else:
+                raw_platforms = [item.strip() for item in text.split(",") if item.strip()]
+        except json.JSONDecodeError:
+            raw_platforms = [item.strip() for item in text.split(",") if item.strip()]
+    else:
+        raw_platforms = [str(value)]
+    return _normalize_social_platforms(raw_platforms)
+
+
+def _build_upload_post_data_payload(
+    *,
+    user_id: str,
+    requested_platforms: List[str],
+    final_title: str,
+    final_description: str,
+    first_comment: str = "",
+    scheduled_date: Optional[str] = None,
+    timezone: Optional[str] = "UTC",
+    instagram_share_mode: Optional[str] = "CUSTOM",
+    tiktok_post_mode: Optional[str] = "DIRECT_POST",
+    tiktok_is_aigc: Optional[bool] = False,
+    facebook_page_id: Optional[str] = None,
+    pinterest_board_id: Optional[str] = None,
+    transcript_language: Optional[str] = None,
+) -> Dict[str, Any]:
+    requested_platform_set = set(requested_platforms)
+    data_payload: Dict[str, Any] = {
+        "user": user_id,
+        "title": final_title,
+        "platform[]": requested_platforms,
+        "async_upload": "true",
+    }
+    if first_comment:
+        data_payload["first_comment"] = first_comment
+    if scheduled_date:
+        data_payload["scheduled_date"] = scheduled_date
+        if timezone:
+            data_payload["timezone"] = timezone
+
+    if "tiktok" in requested_platform_set:
+        data_payload["tiktok_title"] = final_description
+        data_payload["post_mode"] = tiktok_post_mode or "DIRECT_POST"
+        data_payload["is_aigc"] = "true" if tiktok_is_aigc else "false"
+
+    if "instagram" in requested_platform_set:
+        data_payload["instagram_title"] = final_description
+        data_payload["media_type"] = "REELS"
+        data_payload["share_mode"] = instagram_share_mode or "CUSTOM"
+        if first_comment:
+            data_payload["instagram_first_comment"] = first_comment
+
+    if "youtube" in requested_platform_set:
+        data_payload["youtube_title"] = final_title
+        data_payload["youtube_description"] = final_description
+        data_payload["privacyStatus"] = "public"
+        data_payload.update(_resolve_upload_post_language_fields(transcript_language))
+        if first_comment:
+            data_payload["youtube_first_comment"] = first_comment
+
+    if "facebook" in requested_platform_set:
+        data_payload["facebook_title"] = final_title
+        data_payload["facebook_description"] = final_description
+        data_payload["facebook_media_type"] = "REELS"
+        if facebook_page_id:
+            data_payload["facebook_page_id"] = facebook_page_id
+        if first_comment:
+            data_payload["facebook_first_comment"] = first_comment
+
+    if "x" in requested_platform_set:
+        data_payload["x_title"] = final_description
+        if first_comment:
+            data_payload["x_first_comment"] = first_comment
+
+    if "threads" in requested_platform_set:
+        data_payload["threads_title"] = final_description
+        if first_comment:
+            data_payload["threads_first_comment"] = first_comment
+
+    if "pinterest" in requested_platform_set:
+        data_payload["pinterest_title"] = final_title
+        data_payload["pinterest_description"] = final_description
+        if pinterest_board_id:
+            data_payload["pinterest_board_id"] = pinterest_board_id
+
+    return data_payload
+
+
+def _send_upload_post_video(
+    *,
+    api_key: str,
+    requested_platforms: List[str],
+    data_payload: Dict[str, Any],
+    video_filename: str,
+    video_bytes: bytes,
+    video_content_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    url = "https://api.upload-post.com/api/upload"
+    files = {
+        "video": (video_filename, video_bytes, video_content_type or "application/octet-stream"),
+    }
+
+    with httpx.Client(timeout=300.0) as client:
+        print(f"📡 Sending to Upload-Post for platforms: {requested_platforms}")
+        response = _upload_post_sync_request(client, "POST", url, api_key, data=data_payload, files=files)
+
+    if response.status_code not in {200, 201, 202}:
+        print(f"❌ Upload-Post Error: {response.text}")
+        raise HTTPException(status_code=response.status_code, detail=f"Vendor API Error: {response.text}")
+
+    try:
+        vendor_payload = response.json()
+    except Exception:
+        vendor_payload = {
+            "success": True,
+            "status": "pending",
+            "message": response.text,
+        }
+
+    normalized_payload = vendor_payload if isinstance(vendor_payload, dict) else {"success": True, "results": vendor_payload}
+    return _normalize_upload_post_response(
+        normalized_payload,
+        requested_platforms=requested_platforms,
+        is_scheduled=bool(data_payload.get("scheduled_date")),
+    )
+
+
 def _persist_social_post_status_to_clip(job_id: str, clip_index: int, status_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     try:
         output_dir, metadata_path, data = _load_job_metadata_or_404(job_id)
@@ -3348,23 +4115,17 @@ def _persist_social_post_status_to_clip(job_id: str, clip_index: int, status_pay
 @app.post("/api/social/post")
 async def post_to_socials(req: SocialPostRequest):
     _, result, _ = _get_job_result_or_400(req.job_id)
-        
+
     try:
         _, _, metadata_data = _load_job_metadata_or_404(req.job_id)
         clip = _find_result_clip(result, req.clip_index)
-        # Video URL is relative /videos/..., we need absolute file path
-        # clip['video_url'] is like "/videos/{job_id}/{filename}"
-        # We constructed it as: f"/videos/{job_id}/{clip_filename}"
-        # And file is at f"{OUTPUT_DIR}/{job_id}/{clip_filename}"
-        
+
         filename = clip['video_url'].split('/')[-1]
         file_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
-        
-        if not os.path.exists(file_path):
-             raise HTTPException(status_code=404, detail=f"Video file not found: {file_path}")
 
-        # Construct parameters for Upload-Post API
-        # Fallbacks
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail=f"Video file not found: {file_path}")
+
         final_title = req.title or clip.get('video_title_for_youtube_short') or clip.get('title', 'Viral Short')
         final_description = req.description or clip.get('video_description_for_instagram') or clip.get('video_description_for_tiktok') or "Check this out!"
         first_comment = (req.first_comment or "").strip()
@@ -3374,99 +4135,37 @@ async def post_to_socials(req: SocialPostRequest):
             or clip.get("language")
         )
         requested_platforms = _normalize_social_platforms(req.platforms)
-        requested_platform_set = set(requested_platforms)
-        
-        # Prepare form data
-        url = "https://api.upload-post.com/api/upload"
-        
-        # Prepare data as dict (httpx handles lists for multiple values)
-        data_payload = {
-            "user": req.user_id,
-            "title": final_title,
-            "platform[]": requested_platforms,
-            "async_upload": "true"  # Enable async upload
-        }
-        if first_comment:
-            data_payload["first_comment"] = first_comment
+        if not requested_platforms:
+            raise HTTPException(status_code=400, detail="Select at least one platform.")
+        if "pinterest" in requested_platforms and not (req.pinterest_board_id or "").strip():
+            raise HTTPException(status_code=400, detail="Pinterest requires a board ID.")
 
-        # Add scheduling if present
-        if req.scheduled_date:
-            data_payload["scheduled_date"] = req.scheduled_date
-            if req.timezone:
-                data_payload["timezone"] = req.timezone
-        
-        # Add Platform specifics
-        if "tiktok" in requested_platform_set:
-             data_payload["tiktok_title"] = final_description
-             data_payload["post_mode"] = req.tiktok_post_mode or "DIRECT_POST"
-             data_payload["is_aigc"] = "true" if req.tiktok_is_aigc else "false"
-             
-        if "instagram" in requested_platform_set:
-             data_payload["instagram_title"] = final_description
-             data_payload["media_type"] = "REELS"
-             data_payload["share_mode"] = req.instagram_share_mode or "CUSTOM"
+        data_payload = _build_upload_post_data_payload(
+            user_id=req.user_id,
+            requested_platforms=requested_platforms,
+            final_title=final_title,
+            final_description=final_description,
+            first_comment=first_comment,
+            scheduled_date=req.scheduled_date,
+            timezone=req.timezone,
+            instagram_share_mode=req.instagram_share_mode,
+            tiktok_post_mode=req.tiktok_post_mode,
+            tiktok_is_aigc=req.tiktok_is_aigc,
+            facebook_page_id=req.facebook_page_id,
+            pinterest_board_id=req.pinterest_board_id,
+            transcript_language=transcript_language,
+        )
 
-        if "youtube" in requested_platform_set:
-             yt_title = req.title or clip.get('video_title_for_youtube_short', final_title)
-             data_payload["youtube_title"] = yt_title
-             data_payload["youtube_description"] = final_description
-             data_payload["privacyStatus"] = "public"
-             data_payload.update(_resolve_upload_post_language_fields(transcript_language))
-             if first_comment:
-                 data_payload["youtube_first_comment"] = first_comment
-
-        if "facebook" in requested_platform_set:
-             data_payload["facebook_title"] = final_title
-             data_payload["facebook_description"] = final_description
-             data_payload["facebook_media_type"] = "REELS"
-             if req.facebook_page_id:
-                 data_payload["facebook_page_id"] = req.facebook_page_id
-             if first_comment:
-                 data_payload["facebook_first_comment"] = first_comment
-
-        if "x" in requested_platform_set:
-             data_payload["x_title"] = final_description
-             if first_comment:
-                 data_payload["x_first_comment"] = first_comment
-
-        if "threads" in requested_platform_set:
-             data_payload["threads_title"] = final_description
-             if first_comment:
-                 data_payload["threads_first_comment"] = first_comment
-
-        if "pinterest" in requested_platform_set:
-             data_payload["pinterest_title"] = final_title
-             data_payload["pinterest_description"] = final_description
-             if req.pinterest_board_id:
-                 data_payload["pinterest_board_id"] = req.pinterest_board_id
-
-        if "instagram" in requested_platform_set and first_comment:
-             data_payload["instagram_first_comment"] = first_comment
-
-        # Send File
-        # httpx AsyncClient requires async file reading or bytes. 
-        # Since we have MAX_FILE_SIZE_MB, reading into memory is safe-ish.
         with open(file_path, "rb") as f:
             file_content = f.read()
-            
-        files = {
-            "video": (filename, file_content, "video/mp4")
-        }
 
-        # Switch to synchronous Client to avoid "sync request with AsyncClient" error with multipart/files
-        with httpx.Client(timeout=120.0) as client:
-            print(f"📡 Sending to Upload-Post for platforms: {requested_platforms}")
-            response = _upload_post_sync_request(client, "POST", url, req.api_key, data=data_payload, files=files)
-            
-        if response.status_code not in [200, 201, 202]: # Added 201
-             print(f"❌ Upload-Post Error: {response.text}")
-             raise HTTPException(status_code=response.status_code, detail=f"Vendor API Error: {response.text}")
-
-        vendor_payload = response.json()
-        normalized = _normalize_upload_post_response(
-            vendor_payload if isinstance(vendor_payload, dict) else {"success": True, "results": vendor_payload},
+        normalized = _send_upload_post_video(
+            api_key=req.api_key,
             requested_platforms=requested_platforms,
-            is_scheduled=bool(req.scheduled_date),
+            data_payload=data_payload,
+            video_filename=filename,
+            video_bytes=file_content,
+            video_content_type="video/mp4",
         )
         normalized["clip_index"] = req.clip_index
 
@@ -3480,6 +4179,77 @@ async def post_to_socials(req: SocialPostRequest):
         raise
     except Exception as e:
         print(f"❌ Social Post Exception: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/social/post/upload")
+async def post_uploaded_video_to_socials(
+    video: UploadFile = File(...),
+    api_key: str = Form(...),
+    user_id: str = Form(...),
+    platforms: str = Form(...),
+    title: str = Form(...),
+    description: Optional[str] = Form(""),
+    first_comment: Optional[str] = Form(None),
+    scheduled_date: Optional[str] = Form(None),
+    timezone: Optional[str] = Form("UTC"),
+    instagram_share_mode: Optional[str] = Form("CUSTOM"),
+    tiktok_post_mode: Optional[str] = Form("DIRECT_POST"),
+    tiktok_is_aigc: Optional[bool] = Form(False),
+    facebook_page_id: Optional[str] = Form(None),
+    pinterest_board_id: Optional[str] = Form(None),
+    language: Optional[str] = Form(None),
+):
+    requested_platforms = _parse_social_platforms_form_value(platforms)
+    if not requested_platforms:
+        raise HTTPException(status_code=400, detail="Select at least one platform.")
+    if "pinterest" in requested_platforms and not (pinterest_board_id or "").strip():
+        raise HTTPException(status_code=400, detail="Pinterest requires a board ID.")
+
+    filename = os.path.basename(video.filename or f"upload_{uuid.uuid4().hex}.mp4")
+    final_title = (title or "").strip() or "Uploaded Video"
+    final_description = (description or "").strip()
+    first_comment_value = (first_comment or "").strip()
+
+    file_content = await video.read()
+    if not file_content:
+        raise HTTPException(status_code=400, detail="Uploaded video is empty.")
+
+    max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+    if len(file_content) > max_bytes:
+        raise HTTPException(status_code=400, detail=f"File too large. Max size is {MAX_FILE_SIZE_MB}MB.")
+
+    try:
+        data_payload = _build_upload_post_data_payload(
+            user_id=user_id,
+            requested_platforms=requested_platforms,
+            final_title=final_title,
+            final_description=final_description,
+            first_comment=first_comment_value,
+            scheduled_date=scheduled_date,
+            timezone=timezone,
+            instagram_share_mode=instagram_share_mode,
+            tiktok_post_mode=tiktok_post_mode,
+            tiktok_is_aigc=tiktok_is_aigc,
+            facebook_page_id=facebook_page_id,
+            pinterest_board_id=pinterest_board_id,
+            transcript_language=language,
+        )
+        normalized = _send_upload_post_video(
+            api_key=api_key,
+            requested_platforms=requested_platforms,
+            data_payload=data_payload,
+            video_filename=filename,
+            video_bytes=file_content,
+            video_content_type=video.content_type or "application/octet-stream",
+        )
+        normalized["source"] = "uploaded_video"
+        normalized["filename"] = filename
+        return normalized
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Social Upload Exception: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

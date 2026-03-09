@@ -149,7 +149,7 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
             className={`w-full h-full ${isSyncedPlaying ? '' : 'pointer-events-none scale-110'}`}
             // Add enablejsapi=1 for postMessage control
             src={`https://www.youtube.com/embed/${videoSrc}?autoplay=1&mute=1&controls=0&loop=1&playlist=${videoSrc}&modestbranding=1&showinfo=0&rel=0&enablejsapi=1`}
-            title="Processing Video"
+            title="Verarbeitungsvideo"
             frameBorder="0"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
           />
@@ -184,11 +184,11 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
           <div className={`absolute top-4 left-4 z-30 flex items-center gap-2 px-3 py-1.5 backdrop-blur-md rounded-lg border text-xs font-mono font-bold uppercase transition-all duration-500 ${isComplete ? 'bg-green-500/10 border-green-500/20 text-green-400' : 'bg-black/60 border-primary/30 text-primary animate-pulse'}`}>
             {isComplete ? (
                 <>
-                    <CheckCircle size={14} /> Analysis Complete
+                    <CheckCircle size={14} /> Analyse abgeschlossen
                 </>
             ) : (
                 <>
-                    <Scan size={14} /> Scanning Content...
+                    <Scan size={14} /> Inhalt wird analysiert...
                 </>
             )}
           </div>
@@ -196,7 +196,7 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
       
       {!isSyncedPlaying && !isComplete && (
           <div className="absolute top-4 right-4 z-30 flex items-center gap-2 px-3 py-1.5 bg-black/60 backdrop-blur-md rounded-lg border border-white/10 text-white/50 text-[10px] font-mono">
-            AI_MODEL: GEMINI-2.5-PRO
+            KI_MODELL: GEMINI-2.5-PRO
           </div>
       )}
       
@@ -217,7 +217,7 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
        {/* Synced Playing Indicator */}
        {isSyncedPlaying && (
            <div className="absolute top-4 right-4 z-30 flex items-center gap-2 px-3 py-1.5 bg-red-600/90 backdrop-blur text-white rounded-lg shadow-lg animate-pulse font-bold text-[10px] uppercase tracking-wider border border-white/20">
-               <Activity size={12} /> Live Sync
+               <Activity size={12} /> Live-Sync
            </div>
        )}
       
@@ -225,8 +225,8 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
       {!isSyncedPlaying && !isComplete && (
           <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/90 to-transparent z-30 flex justify-between items-end border-t border-white/5">
               <div className="font-mono text-[10px] text-primary/80 space-y-1">
-                 <div className="flex items-center gap-2"><Activity size={10} className="animate-bounce" /> {'>'} ANALYSIS_THREAD_01: ACTIVE</div>
-                 <div className="flex items-center gap-2"><Radio size={10} /> {'>'} AUDIO_TRANSCRIPT: PROCESSING</div>
+                 <div className="flex items-center gap-2"><Activity size={10} className="animate-bounce" /> {'>'} ANALYSE_THREAD_01: AKTIV</div>
+                 <div className="flex items-center gap-2"><Radio size={10} /> {'>'} AUDIO_TRANSKRIPT: VERARBEITUNG</div>
               </div>
               <div className="flex gap-1">
                  <div className="w-1 h-3 bg-primary/40 animate-[pulse_0.5s_infinite]"></div>
