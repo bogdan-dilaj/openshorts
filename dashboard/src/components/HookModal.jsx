@@ -4,7 +4,7 @@ import { X, Sparkles, Loader2, Maximize, MoveVertical, MoveHorizontal, Columns3,
 import { BACKGROUND_OPTIONS, DEFAULT_HOOK_STYLE, FONT_OPTIONS, GRID_OPTIONS, HOOK_WIDTH_OPTIONS } from '../overlayOptions';
 
 export default function HookModal({ isOpen, onClose, onGenerate, onApplyAsJobDefault, isProcessing, videoUrl, initialText, defaultSettings = DEFAULT_HOOK_STYLE }) {
-    const [text, setText] = useState(initialText || 'POV: Das darfst du nicht verpassen');
+    const [text, setText] = useState(initialText || '');
     const [size, setSize] = useState(defaultSettings.size || 'M'); // S, M, L
     const [widthPreset, setWidthPreset] = useState(defaultSettings.widthPreset || 'wide');
     const [fontFamily, setFontFamily] = useState(defaultSettings.fontFamily || DEFAULT_HOOK_STYLE.fontFamily);
@@ -30,7 +30,7 @@ export default function HookModal({ isOpen, onClose, onGenerate, onApplyAsJobDef
 
     useEffect(() => {
         if (!isOpen) return;
-        setText(initialText || 'POV: Das darfst du nicht verpassen');
+        setText(initialText || '');
         setSize(defaultSettings.size || 'M');
         setWidthPreset(defaultSettings.widthPreset || 'wide');
         setFontFamily(defaultSettings.fontFamily || DEFAULT_HOOK_STYLE.fontFamily);

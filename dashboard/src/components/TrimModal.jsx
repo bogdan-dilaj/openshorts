@@ -60,6 +60,31 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
         setPreviewError(videoUrl ? '' : 'Keine Videoquelle gefunden.');
     }, [isOpen, videoUrl]);
 
+    useEffect(() => {
+        if (!isOpen || !videoUrl || !videoRef.current) return;
+        const video = videoRef.current;
+        setIsPreviewLoading(true);
+        setIsPreviewReady(false);
+        setPreviewError('');
+        setIsPlaying(false);
+        try {
+            video.pause();
+        } catch (error) {
+            // no-op
+        }
+        video.currentTime = 0;
+        video.load();
+    }, [isOpen, videoUrl]);
+
+    useEffect(() => {
+        if (!isOpen || !videoUrl || !isPreviewLoading || isPreviewReady) return;
+        const timeout = window.setTimeout(() => {
+            setIsPreviewLoading(false);
+            setPreviewError('Die gewählte Version konnte im Trim-Dialog nicht geladen werden.');
+        }, 12000);
+        return () => window.clearTimeout(timeout);
+    }, [isOpen, videoUrl, isPreviewLoading, isPreviewReady]);
+
     const safeTrimEnd = trimEnd || duration || 0;
     const normalizedRemoveRanges = useMemo(
         () => normalizeRanges(removeRanges, trimStart, safeTrimEnd),
@@ -67,6 +92,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
     );
     const removedDuration = normalizedRemoveRanges.reduce((sum, [start, end]) => sum + (end - start), 0);
     const trimmedDuration = Math.max(0, (safeTrimEnd - trimStart) - removedDuration);
+    const canUseControls = !!videoUrl && !previewError && (isPreviewReady || duration > 0);
 
     if (!isOpen) return null;
 
@@ -77,6 +103,9 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
         setTrimEnd(nextDuration);
         setCutStart(0);
         setCutEnd(nextDuration);
+        setIsPreviewLoading(false);
+        setIsPreviewReady(true);
+        setPreviewError('');
     };
 
     const handlePreviewCanPlay = () => {
@@ -88,7 +117,15 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
     const handlePreviewError = () => {
         setIsPreviewLoading(false);
         setIsPreviewReady(false);
-        setPreviewError('Die Trim-Vorschau konnte nicht geladen werden.');
+        setPreviewError('Die gewählte Version konnte im Trim-Dialog nicht geladen werden.');
+    };
+
+    const handleDurationChange = () => {
+        const nextDuration = videoRef.current?.duration || 0;
+        if (!nextDuration) return;
+        setDuration(nextDuration);
+        setTrimEnd((prev) => (prev > 0 ? Math.min(prev, nextDuration) : nextDuration));
+        setCutEnd((prev) => (prev > 0 ? Math.min(prev, nextDuration) : nextDuration));
     };
 
     const seekTo = (value) => {
@@ -102,7 +139,12 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
     const togglePlayback = () => {
         if (!videoRef.current) return;
         if (videoRef.current.paused) {
-            videoRef.current.play();
+            const playPromise = videoRef.current.play();
+            if (playPromise && typeof playPromise.catch === 'function') {
+                playPromise.catch(() => {
+                    setPreviewError('Wiedergabe konnte nicht gestartet werden.');
+                });
+            }
         } else {
             videoRef.current.pause();
         }
@@ -150,8 +192,8 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
     };
 
     return createPortal(
-        <div className="fixed inset-0 z-[1000] flex items-start md:items-center justify-center p-3 md:p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out] overflow-y-auto touch-scroll">
-            <div className="bg-[#121214] border border-white/10 p-6 rounded-2xl w-full max-w-6xl shadow-2xl relative flex flex-col md:flex-row gap-6 my-4 md:my-0 max-h-[calc(100dvh-1.5rem)] md:max-h-[90vh] overflow-y-auto md:overflow-hidden touch-scroll">
+        <div className="fixed inset-0 z-[1000] flex items-start md:items-center justify-center p-2 md:p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out] overflow-y-auto touch-scroll">
+            <div className="bg-[#121214] border border-white/10 p-4 md:p-6 rounded-2xl w-full max-w-6xl shadow-2xl relative flex flex-col md:flex-row gap-4 md:gap-6 my-2 md:my-0 max-h-[calc(100dvh-1rem)] md:max-h-[90vh] overflow-y-auto md:overflow-hidden touch-scroll">
                 <button
                     onClick={onClose}
                     disabled={isProcessing}
@@ -160,7 +202,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                     <X size={20} />
                 </button>
 
-                <div className="flex-1 bg-black rounded-lg border border-white/5 overflow-hidden flex flex-col min-w-0 min-h-0">
+                <div className="w-full md:flex-1 bg-black rounded-lg border border-white/5 overflow-visible md:overflow-hidden flex flex-col min-w-0 md:min-h-0">
                     <div className="px-4 pt-4 pb-2 border-b border-white/5 bg-[#0b0b0d]">
                         <div className="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500">Vorschau</div>
                         <div className="mt-1 text-xs text-zinc-400">
@@ -168,7 +210,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                         </div>
                     </div>
 
-                    <div className="relative bg-black min-h-[280px] md:min-h-[520px] flex items-center justify-center">
+                    <div className="relative w-full flex-none aspect-[9/16] md:aspect-auto md:min-h-[520px] bg-black flex items-center justify-center overflow-hidden">
                         <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(34,211,238,0.16),_transparent_38%),linear-gradient(180deg,_rgba(255,255,255,0.04),_rgba(255,255,255,0))]" />
 
                         {!videoUrl && (
@@ -184,38 +226,34 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
 
                         {videoUrl && (
                             <>
-                                <div className="relative z-10 w-full h-full flex items-center justify-center px-4 py-5">
-                                    <div className="relative w-full max-w-[420px]">
-                                        <div className="rounded-[28px] border border-white/10 bg-black shadow-[0_24px_80px_rgba(0,0,0,0.55)] p-2">
-                                            <div className="rounded-[22px] overflow-hidden bg-black aspect-[9/16] relative">
-                                                <video
-                                                    key={videoUrl}
-                                                    ref={videoRef}
-                                                    src={videoUrl}
-                                                    controls
-                                                    preload="metadata"
-                                                    className="w-full h-full object-contain"
-                                                    onLoadedMetadata={handleLoadedMetadata}
-                                                    onLoadedData={handlePreviewCanPlay}
-                                                    onCanPlay={handlePreviewCanPlay}
-                                                    onError={handlePreviewError}
-                                                    onWaiting={() => setIsPreviewLoading(true)}
-                                                    onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime || 0)}
-                                                    onPlay={() => setIsPlaying(true)}
-                                                    onPause={() => setIsPlaying(false)}
-                                                    playsInline
-                                                />
-                                                {isPreviewLoading && !previewError && (
-                                                    <div className="absolute inset-0 flex items-center justify-center bg-black/55 backdrop-blur-sm">
-                                                        <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-black/60 px-4 py-3 text-sm text-white">
-                                                            <Loader2 size={16} className="animate-spin text-cyan-400" />
-                                                            Lade Vorschau...
-                                                        </div>
-                                                    </div>
-                                                )}
+                                <div className="relative z-10 w-full h-full">
+                                    <video
+                                        key={videoUrl}
+                                        ref={videoRef}
+                                        src={videoUrl}
+                                        controls
+                                        preload="metadata"
+                                        className="w-full h-full object-contain"
+                                        onLoadedMetadata={handleLoadedMetadata}
+                                        onLoadedData={handlePreviewCanPlay}
+                                        onCanPlay={handlePreviewCanPlay}
+                                        onCanPlayThrough={handlePreviewCanPlay}
+                                        onError={handlePreviewError}
+                                        onWaiting={() => setIsPreviewLoading(true)}
+                                        onDurationChange={handleDurationChange}
+                                        onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime || 0)}
+                                        onPlay={() => setIsPlaying(true)}
+                                        onPause={() => setIsPlaying(false)}
+                                        playsInline
+                                    />
+                                    {isPreviewLoading && !previewError && (
+                                        <div className="absolute inset-0 flex items-center justify-center bg-black/55 backdrop-blur-sm">
+                                            <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-black/60 px-4 py-3 text-sm text-white">
+                                                <Loader2 size={16} className="animate-spin text-cyan-400" />
+                                                Lade Vorschau...
                                             </div>
                                         </div>
-                                    </div>
+                                    )}
                                 </div>
 
                                 {previewError && (
@@ -247,14 +285,14 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                             step="0.1"
                             value={currentTime}
                             onChange={(e) => seekTo(e.target.value)}
-                            disabled={!duration || !isPreviewReady}
+                            disabled={!duration || !!previewError}
                             className="w-full accent-cyan-500 disabled:opacity-40"
                         />
                         <div className="flex flex-wrap gap-2">
                             <button
                                 type="button"
                                 onClick={() => seekTo((videoRef.current?.currentTime || 0) - 1)}
-                                disabled={!isPreviewReady}
+                                disabled={!canUseControls}
                                 className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white border border-white/10 flex items-center gap-2"
                             >
                                 <SkipBack size={14} /> -1s
@@ -262,7 +300,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                             <button
                                 type="button"
                                 onClick={togglePlayback}
-                                disabled={!isPreviewReady}
+                                disabled={!canUseControls}
                                 className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white border border-white/10 flex items-center gap-2"
                             >
                                 {isPlaying ? <Pause size={14} /> : <Play size={14} />}
@@ -271,7 +309,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                             <button
                                 type="button"
                                 onClick={() => seekTo((videoRef.current?.currentTime || 0) + 1)}
-                                disabled={!isPreviewReady}
+                                disabled={!canUseControls}
                                 className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white border border-white/10 flex items-center gap-2"
                             >
                                 <SkipForward size={14} /> +1s
@@ -279,7 +317,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                             <button
                                 type="button"
                                 onClick={() => seekTo(trimStart)}
-                                disabled={!isPreviewReady}
+                                disabled={!canUseControls}
                                 className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white border border-white/10"
                             >
                                 Zum Start
@@ -287,7 +325,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                             <button
                                 type="button"
                                 onClick={() => seekTo(safeTrimEnd)}
-                                disabled={!isPreviewReady}
+                                disabled={!canUseControls}
                                 className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white border border-white/10"
                             >
                                 Zum Ende
@@ -313,12 +351,12 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                     </div>
                 </div>
 
-                <div className="w-full md:w-[360px] flex flex-col min-w-0 min-h-0">
-                    <h3 className="text-xl font-bold text-white mb-6 flex items-center gap-2">
+                <div className="w-full md:w-[360px] flex flex-col min-w-0 md:min-h-0">
+                    <h3 className="text-lg md:text-xl font-bold text-white mb-4 md:mb-6 flex items-center gap-2">
                         <Scissors className="text-cyan-400" /> Clip zuschneiden
                     </h3>
 
-                    <div className="space-y-5 flex-1 overflow-y-auto custom-scrollbar touch-scroll pr-1 md:pr-2">
+                    <div className="space-y-5 md:flex-1 md:overflow-y-auto custom-scrollbar touch-scroll pr-1 md:pr-2">
                         <div className="p-3 bg-white/5 rounded-xl border border-white/5 text-xs text-zinc-400">
                             Schneide vorne oder hinten weg und markiere optional mehrere Bereiche in der Mitte, die entfernt werden sollen.
                             Jede Speicherung erzeugt eine neue Version.
@@ -458,7 +496,7 @@ export default function TrimModal({ isOpen, onClose, onTrim, isProcessing, video
                     <button
                         onClick={handleSubmit}
                         disabled={isProcessing || !duration || trimmedDuration < MIN_TRIM_DURATION}
-                        className="w-full py-4 mt-6 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold rounded-xl shadow-lg shadow-cyan-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="w-full py-3 md:py-4 mt-4 md:mt-6 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold rounded-xl shadow-lg shadow-cyan-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                         {isProcessing ? <Loader2 size={20} className="animate-spin" /> : <Scissors size={20} />}
                         {isProcessing ? 'Schneide...' : 'Trim-Version erstellen'}

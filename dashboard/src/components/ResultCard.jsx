@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { Download, Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Copy, Wand2, Type, Calendar, Clock, Languages, RotateCcw, Scissors, Sparkles } from 'lucide-react';
+import { Download, Share2, Instagram, Youtube, Video, CheckCircle, AlertCircle, X, Loader2, Copy, Wand2, Type, Calendar, Clock, Languages, RotateCcw, Scissors, Sparkles, ChevronDown } from 'lucide-react';
 import { getApiUrl } from '../config';
 import SubtitleModal from './SubtitleModal';
 import HookModal from './HookModal';
@@ -11,6 +11,19 @@ import { DEFAULT_SOCIAL_POST_SETTINGS, INSTAGRAM_SHARE_MODES, SOCIAL_PLATFORM_OP
 const resolveVideoUrl = (value) => {
     if (!value) return '';
     return value.startsWith('http://') || value.startsWith('https://') ? value : getApiUrl(value);
+};
+
+const extractFilenameFromVideoUrl = (value) => {
+    if (!value) return '';
+    try {
+        const parsed = new URL(value, window.location.origin);
+        const pathname = parsed.pathname || '';
+        const filename = pathname.split('/').pop() || '';
+        return decodeURIComponent(filename);
+    } catch (error) {
+        const [withoutQuery] = String(value).split('?');
+        return decodeURIComponent((withoutQuery.split('/').pop() || '').trim());
+    }
 };
 
 const POST_STATUS_POLL_INTERVAL_MS = 4000;
@@ -79,7 +92,61 @@ const buildDisplayPlatformResults = (result) => {
     return rows;
 };
 
-export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, llmProvider, ollamaBaseUrl, ollamaModel, elevenLabsKey, subtitleStyle, hookStyle, tightEditPreset, socialPostSettings = DEFAULT_SOCIAL_POST_SETTINGS, activeUploadProfile, onApplySubtitleDefaultsToJob, onApplyHookDefaultsToJob, currentVideoOverride, onVideoVariantChange, onClipUpdated, onPlay, onPause }) {
+const resolveClipPostHighlight = (clip) => {
+    const status = clip?.social_post_status;
+    if (!status) return null;
+
+    const pendingCount = Number(status.pending_count || 0);
+    const successCount = Number(status.success_count || 0);
+    const failureCount = Number(status.failure_count || 0);
+    const normalizedStatus = String(status.status || '').toLowerCase();
+
+    if (normalizedStatus === 'scheduled' || pendingCount > 0) {
+        return {
+            label: 'Gequeued',
+            badgeClass: 'border-cyan-500/30 bg-cyan-500/10 text-cyan-100',
+            cardClass: 'border-cyan-500/25 bg-cyan-950/35 shadow-[0_0_0_1px_rgba(34,211,238,0.08)]',
+            previewClass: 'bg-cyan-950/55 border-b border-cyan-500/20',
+            contentClass: 'bg-cyan-950/35',
+        };
+    }
+    if (successCount > 0 && failureCount === 0) {
+        return {
+            label: 'Gepostet',
+            badgeClass: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100',
+            cardClass: 'border-emerald-500/30 bg-emerald-950/55 shadow-[0_0_0_1px_rgba(16,185,129,0.10)]',
+            previewClass: 'bg-emerald-950/75 border-b border-emerald-500/20',
+            contentClass: 'bg-emerald-950/55',
+        };
+    }
+    if (successCount > 0 && failureCount > 0) {
+        return {
+            label: 'Teilweise',
+            badgeClass: 'border-amber-500/30 bg-amber-500/10 text-amber-100',
+            cardClass: 'border-amber-500/25 bg-amber-950/35 shadow-[0_0_0_1px_rgba(245,158,11,0.08)]',
+            previewClass: 'bg-amber-950/55 border-b border-amber-500/20',
+            contentClass: 'bg-amber-950/30',
+        };
+    }
+    if (failureCount > 0 || normalizedStatus === 'failed') {
+        return {
+            label: 'Fehlgeschlagen',
+            badgeClass: 'border-red-500/30 bg-red-500/10 text-red-100',
+            cardClass: 'border-red-500/25 bg-red-950/35 shadow-[0_0_0_1px_rgba(239,68,68,0.08)]',
+            previewClass: 'bg-red-950/55 border-b border-red-500/20',
+            contentClass: 'bg-red-950/30',
+        };
+    }
+    return {
+        label: 'Upload aktiv',
+        badgeClass: 'border-cyan-500/30 bg-cyan-500/10 text-cyan-100',
+        cardClass: 'border-cyan-500/25 bg-cyan-950/35 shadow-[0_0_0_1px_rgba(34,211,238,0.08)]',
+        previewClass: 'bg-cyan-950/55 border-b border-cyan-500/20',
+        contentClass: 'bg-cyan-950/35',
+    };
+};
+
+export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, llmProvider, ollamaBaseUrl, ollamaModel, elevenLabsKey, subtitleStyle, hookStyle, tightEditPreset, socialPostSettings = DEFAULT_SOCIAL_POST_SETTINGS, activeUploadProfile, onApplySubtitleDefaultsToJob, onApplyHookDefaultsToJob, currentVideoOverride, onVideoVariantChange, onClipUpdated, onPlay, onPause, hookDraftText, onHookDraftChange, isSelected = false, onToggleSelect }) {
     const [showModal, setShowModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
     const videoRef = React.useRef(null);
@@ -92,6 +159,10 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const isPreviewOnly = !clip.video_url && !!clip.preview_video_url;
     const previewStart = Math.max(0, Number(clip.preview_start ?? clip.start ?? 0));
     const previewEnd = Math.max(previewStart + 0.15, Number(clip.preview_end ?? clip.end ?? previewStart + 15));
+    const resolvedHookDraftText = hookDraftText ?? clip.hook_settings?.text ?? clip.viral_hook_text ?? '';
+    const resolvedClipTitle = clip.video_title_for_youtube_short || "Viraler Clip erzeugt";
+    const resolvedClipDescription = clip.video_description_for_instagram || clip.video_description_for_tiktok || "";
+    const clipPostHighlight = resolveClipPostHighlight(clip);
 
     const [platforms, setPlatforms] = useState({ ...DEFAULT_SOCIAL_POST_SETTINGS.platforms, ...(socialPostSettings.platforms || {}) });
     const [postTitle, setPostTitle] = useState("");
@@ -108,6 +179,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const [posting, setPosting] = useState(false);
     const [postResult, setPostResult] = useState(null);
     const [isRefreshingPostStatus, setIsRefreshingPostStatus] = useState(false);
+    const [retryingPlatformAction, setRetryingPlatformAction] = useState('');
     const postStatusTimeoutRef = React.useRef(null);
 
     const [isEditing, setIsEditing] = useState(false);
@@ -120,15 +192,27 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const [isSelectingVersion, setIsSelectingVersion] = useState(false);
     const [showHookModal, setShowHookModal] = useState(false);
     const [showQuickRenderModal, setShowQuickRenderModal] = useState(false);
-    const [quickHookText, setQuickHookText] = useState((clip.viral_hook_text || clip.hook_settings?.text || '').trim());
+    const [quickHookText, setQuickHookText] = useState(resolvedHookDraftText.trim());
     const [showTranslateModal, setShowTranslateModal] = useState(false);
     const [showTrimModal, setShowTrimModal] = useState(false);
+    const [trimDialogVideoUrl, setTrimDialogVideoUrl] = useState('');
     const [editError, setEditError] = useState(null);
+    const [showMoreOptions, setShowMoreOptions] = useState(false);
+    const [titleDraft, setTitleDraft] = useState(resolvedClipTitle);
+    const [descriptionDraft, setDescriptionDraft] = useState(resolvedClipDescription);
+    const [isSavingTextMetadata, setIsSavingTextMetadata] = useState(false);
+    const [textMetadataStatus, setTextMetadataStatus] = useState(null);
     const isBusy = isEditing || isSubtitling || isHooking || isTranslating || isTrimming || isPreviewRendering || isRenderingClip || isSelectingVersion;
     const clipDuration = Number.isFinite(Number(clip.display_duration))
         ? Number(clip.display_duration)
         : Math.max(0, (clip.end || 0) - (clip.start || 0));
     const displayPlatformResults = buildDisplayPlatformResults(postResult);
+    const resolvedUploadUserId = activeUploadProfile || uploadUserId;
+
+    useEffect(() => {
+        setTitleDraft(resolvedClipTitle);
+        setDescriptionDraft(resolvedClipDescription);
+    }, [resolvedClipTitle, resolvedClipDescription]);
 
     // Initialize/Reset form when modal opens
     useEffect(() => {
@@ -146,7 +230,12 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             setFacebookPageId(socialPostSettings.facebookPageId || '');
             setPinterestBoardId(socialPostSettings.pinterestBoardId || '');
             setPostResult(savedPostStatus);
-            if (savedPostStatus && (savedPostStatus.request_id || savedPostStatus.job_id)) {
+            if (savedPostStatus && (savedPostStatus.request_id || savedPostStatus.job_id) && (
+                savedPostStatus.pending_count > 0
+                || savedPostStatus.status === 'pending'
+                || savedPostStatus.status === 'in_progress'
+                || savedPostStatus.status === 'scheduled'
+            )) {
                 refreshPostStatus(savedPostStatus, { silent: true });
             }
         }
@@ -173,8 +262,19 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
     useEffect(() => {
         if (!showQuickRenderModal) return;
-        setQuickHookText((clip.viral_hook_text || clip.hook_settings?.text || '').trim());
-    }, [showQuickRenderModal, clip.viral_hook_text, clip.hook_settings?.text]);
+        setQuickHookText((resolvedHookDraftText || '').trim());
+    }, [showQuickRenderModal]);
+
+    useEffect(() => {
+        if (!showQuickRenderModal) return undefined;
+
+        const previousOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+
+        return () => {
+            document.body.style.overflow = previousOverflow;
+        };
+    }, [showQuickRenderModal]);
 
     const isModifiedVideo = activeVersionId ? activeVersionId !== originalVersionId : currentVideoUrl !== originalVideoUrl;
 
@@ -188,6 +288,54 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         }
     };
 
+    useEffect(() => {
+        if (!textMetadataStatus || textMetadataStatus.type !== 'success') return undefined;
+        const timer = window.setTimeout(() => setTextMetadataStatus(null), 2200);
+        return () => window.clearTimeout(timer);
+    }, [textMetadataStatus]);
+
+    const persistClipTextMetadata = async () => {
+        const normalizedTitle = String(titleDraft || '').trim();
+        const normalizedDescription = String(descriptionDraft || '').trim();
+        const currentTitle = String(clip.video_title_for_youtube_short || '').trim();
+        const currentDescription = String(resolvedClipDescription || '').trim();
+
+        if (normalizedTitle === currentTitle && normalizedDescription === currentDescription) {
+            return;
+        }
+
+        setIsSavingTextMetadata(true);
+        setTextMetadataStatus({ type: 'saving', message: 'Speichert...' });
+
+        try {
+            const res = await fetch(getApiUrl('/api/clip/text-metadata'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    job_id: jobId,
+                    clip_index: clipIndex,
+                    video_title_for_youtube_short: normalizedTitle,
+                    video_description_for_tiktok: normalizedDescription,
+                    video_description_for_instagram: normalizedDescription,
+                })
+            });
+
+            if (!res.ok) {
+                throw new Error(await readErrorText(res));
+            }
+
+            const data = await res.json();
+            if (data?.clip && onClipUpdated) {
+                onClipUpdated(data.clip);
+            }
+            setTextMetadataStatus({ type: 'success', message: 'Gespeichert' });
+        } catch (e) {
+            setTextMetadataStatus({ type: 'error', message: e.message || 'Konnte nicht gespeichert werden.' });
+        } finally {
+            setIsSavingTextMetadata(false);
+        }
+    };
+
     const applyClipResponse = (data) => {
         if (data?.clip && onClipUpdated) {
             onClipUpdated(data.clip);
@@ -198,6 +346,17 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             onVideoVariantChange && onVideoVariantChange(data.new_video_url);
         }
     };
+
+    const shouldPollPostStatus = (data) => Boolean(
+        data
+        && (data.request_id || data.job_id)
+        && (
+            data.pending_count > 0
+            || data.status === 'pending'
+            || data.status === 'in_progress'
+            || data.status === 'scheduled'
+        )
+    );
 
     const normalizeOllamaModelName = (value) => {
         const trimmed = (value || '').trim();
@@ -232,7 +391,10 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             const params = new URLSearchParams();
             if (tracking.request_id) params.set('request_id', tracking.request_id);
             if (tracking.job_id) params.set('vendor_job_id', tracking.job_id);
-            if (tracking.requested_platforms?.length) params.set('platforms', tracking.requested_platforms.join(','));
+            const trackingPlatforms = tracking.tracking_platforms?.length
+                ? tracking.tracking_platforms
+                : tracking.requested_platforms;
+            if (trackingPlatforms?.length) params.set('platforms', trackingPlatforms.join(','));
             if (tracking.scheduled) params.set('scheduled', 'true');
             params.set('job_id', jobId);
             params.set('clip_index', String(clipIndex));
@@ -251,7 +413,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             setPostResult(data);
             applyClipResponse(data);
 
-            if (showModal && (data.status === 'pending' || data.status === 'in_progress' || data.pending_count > 0)) {
+            if (showModal && shouldPollPostStatus(data)) {
                 stopPostStatusPolling();
                 postStatusTimeoutRef.current = window.setTimeout(() => {
                     refreshPostStatus(data, { silent: true });
@@ -371,6 +533,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             const payload = typeof hookData === 'string'
                 ? { text: hookData, xPosition: 50, yPosition: 12, textAlign: 'center', size: 'M', widthPreset: 'wide' }
                 : hookData;
+            onHookDraftChange && onHookDraftChange(payload.text || '');
 
             const res = await fetch(getApiUrl('/api/hook'), {
                 method: 'POST',
@@ -509,6 +672,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const handleTrim = async ({ trimStart, trimEnd, removeRanges }) => {
         setIsTrimming(true);
         setEditError(null);
+        const trimSourceFilename = extractFilenameFromVideoUrl(trimDialogVideoUrl || currentVideoUrl);
         try {
             const res = await fetch(getApiUrl('/api/trim'), {
                 method: 'POST',
@@ -516,7 +680,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 body: JSON.stringify({
                     job_id: jobId,
                     clip_index: clipIndex,
-                    input_filename: currentVideoUrl.split('/').pop(),
+                    input_filename: trimSourceFilename,
                     trim_start: trimStart,
                     trim_end: trimEnd,
                     remove_ranges: removeRanges || [],
@@ -530,12 +694,18 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             const data = await res.json();
             applyClipResponse(data);
             setShowTrimModal(false);
+            setTrimDialogVideoUrl('');
         } catch (e) {
             setEditError(e.message);
             setTimeout(() => setEditError(null), 5000);
         } finally {
             setIsTrimming(false);
         }
+    };
+
+    const openTrimModal = () => {
+        setTrimDialogVideoUrl(currentVideoUrl);
+        setShowTrimModal(true);
     };
 
     const handleApplySubtitleDefaultsToJob = (options) => {
@@ -644,7 +814,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     };
 
     const openQuickRenderModal = () => {
-        setQuickHookText((clip.viral_hook_text || clip.hook_settings?.text || '').trim());
+        setQuickHookText((resolvedHookDraftText || '').trim());
         setShowQuickRenderModal(true);
     };
 
@@ -657,6 +827,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
         setIsRenderingClip(true);
         setEditError(null);
+        onHookDraftChange && onHookDraftChange(hookText);
         try {
             const res = await fetch(getApiUrl('/api/clip/render'), {
                 method: 'POST',
@@ -724,7 +895,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     };
 
     const handlePost = async () => {
-        if (!uploadPostKey || !uploadUserId) {
+        if (!uploadPostKey || !resolvedUploadUserId) {
             setPostResult({ success: false, status: 'failed', message: "API-Key oder User-ID fehlt.", platform_results: [] });
             return;
         }
@@ -732,11 +903,6 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         const selectedPlatforms = Object.keys(platforms).filter(k => platforms[k]);
         if (selectedPlatforms.length === 0) {
             setPostResult({ success: false, status: 'failed', message: "Mindestens eine Plattform auswählen.", platform_results: [] });
-            return;
-        }
-
-        if (!activeUploadProfile && !uploadUserId) {
-            setPostResult({ success: false, status: 'failed', message: "Kein Upload-Post-Profil in den Einstellungen ausgewählt.", platform_results: [] });
             return;
         }
 
@@ -759,7 +925,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 job_id: jobId,
                 clip_index: clipIndex,
                 api_key: uploadPostKey,
-                user_id: activeUploadProfile || uploadUserId,
+                user_id: resolvedUploadUserId,
                 platforms: selectedPlatforms,
                 title: postTitle,
                 description: postDescription,
@@ -792,7 +958,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             setPostResult(data);
             applyClipResponse(data);
 
-            if (data.request_id || data.job_id) {
+            if (shouldPollPostStatus(data)) {
                 postStatusTimeoutRef.current = window.setTimeout(() => {
                     refreshPostStatus(data, { silent: true });
                 }, POST_STATUS_POLL_INTERVAL_MS);
@@ -812,6 +978,65 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         }
     };
 
+    const handleRetryPlatform = async (platform, retryMode) => {
+        if (!uploadPostKey || !resolvedUploadUserId) {
+            setPostResult((prev) => prev ? {
+                ...prev,
+                poll_error: 'API-Key oder User-ID fehlt.',
+            } : {
+                success: false,
+                status: 'failed',
+                message: 'API-Key oder User-ID fehlt.',
+                platform_results: [],
+            });
+            return;
+        }
+
+        setRetryingPlatformAction(`${platform}:${retryMode}`);
+        stopPostStatusPolling();
+
+        try {
+            const res = await fetch(getApiUrl('/api/social/post/retry'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    job_id: jobId,
+                    clip_index: clipIndex,
+                    api_key: uploadPostKey,
+                    user_id: resolvedUploadUserId,
+                    platform,
+                    retry_mode: retryMode,
+                })
+            });
+
+            if (!res.ok) {
+                throw new Error(await readErrorText(res));
+            }
+
+            const data = await res.json();
+            setPostResult(data);
+            applyClipResponse(data);
+
+            if (shouldPollPostStatus(data)) {
+                postStatusTimeoutRef.current = window.setTimeout(() => {
+                    refreshPostStatus(data, { silent: true });
+                }, POST_STATUS_POLL_INTERVAL_MS);
+            }
+        } catch (e) {
+            setPostResult((prev) => prev ? {
+                ...prev,
+                poll_error: `${getPlatformLabel(platform)} Retry fehlgeschlagen: ${e.message}`,
+            } : {
+                success: false,
+                status: 'failed',
+                message: e.message,
+                platform_results: [],
+            });
+        } finally {
+            setRetryingPlatformAction('');
+        }
+    };
+
     const handleReplayFromStart = () => {
         if (!videoRef.current) return;
         const startTime = isPreviewOnly ? previewStart : 0;
@@ -823,9 +1048,11 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     };
 
     return (
-        <div className="bg-surface border border-white/5 rounded-2xl overflow-hidden flex flex-col group hover:border-white/10 transition-all animate-[fadeIn_0.5s_ease-out] min-h-[300px] h-auto" style={{ animationDelay: `${index * 0.1}s` }}>
+        <div className={`bg-surface border rounded-2xl overflow-hidden flex flex-col group transition-all animate-[fadeIn_0.5s_ease-out] min-h-[300px] h-auto ${
+            clipPostHighlight?.cardClass || 'border-white/5 hover:border-white/10'
+        }`} style={{ animationDelay: `${index * 0.1}s` }}>
             {/* Top: Video Preview (Full Width) */}
-            <div className="w-full bg-black/40 border-b border-white/5 p-3">
+            <div className={`w-full p-3 ${clipPostHighlight?.previewClass || 'bg-black/40 border-b border-white/5'}`}>
                 <div className="mx-auto w-full max-w-[360px] aspect-[9/16] bg-black rounded-xl overflow-hidden relative group/video">
                 <video
                     ref={videoRef}
@@ -906,15 +1133,92 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             </div>
 
             {/* Bottom: Content & Details */}
-            <div className="flex-1 p-4 md:p-5 flex flex-col bg-[#121214] overflow-y-auto md:overflow-hidden custom-scrollbar touch-scroll min-w-0">
-                <div className="mb-4">
-                    <h3 className="text-base font-bold text-white leading-tight line-clamp-2 mb-2 break-words" title={clip.video_title_for_youtube_short}>
-                        {clip.video_title_for_youtube_short || "Viraler Clip erzeugt"}
-                    </h3>
-                    <div className="flex flex-wrap gap-2 text-[10px] text-zinc-500 font-mono">
-                        <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">{Math.round(clipDuration)}s</span>
-                        <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">#shorts</span>
-                        <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">#viral</span>
+            <div className={`flex-1 p-4 md:p-5 flex flex-col overflow-y-auto md:overflow-hidden custom-scrollbar touch-scroll min-w-0 ${
+                clipPostHighlight?.contentClass || 'bg-[#121214]'
+            }`}>
+                <div className="mb-4 space-y-3">
+                    <div className="flex items-start gap-3">
+                        <label className="mt-0.5 flex shrink-0 items-center">
+                            <input
+                                type="checkbox"
+                                checked={!!isSelected}
+                                onChange={() => onToggleSelect && onToggleSelect()}
+                                className="h-4 w-4 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary"
+                            />
+                        </label>
+                        <div className="min-w-0 flex-1">
+                            <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0 flex-1">
+                                    <input
+                                        type="text"
+                                        value={titleDraft}
+                                        onChange={(e) => setTitleDraft(e.target.value)}
+                                        onBlur={persistClipTextMetadata}
+                                        className="w-full rounded-lg border border-white/10 bg-black/35 px-3 py-2 text-sm font-bold text-white focus:outline-none focus:border-primary/50"
+                                        placeholder="Titel fuer YouTube Shorts"
+                                    />
+                                </div>
+                                <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                                    {clipPostHighlight && (
+                                        <span className={`rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wide ${clipPostHighlight.badgeClass}`}>
+                                            {clipPostHighlight.label}
+                                        </span>
+                                    )}
+                                    <span className={`rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wide ${
+                                        isSelected
+                                            ? 'border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-200'
+                                            : 'border-white/10 bg-white/5 text-zinc-500'
+                                    }`}>
+                                        {isSelected ? 'Ausgewaehlt' : 'Auswaehlbar'}
+                                    </span>
+                                </div>
+                            </div>
+                            <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-zinc-500 font-mono">
+                                <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">{Math.round(clipDuration)}s</span>
+                                <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">#shorts</span>
+                                <span className="bg-white/5 px-1.5 py-0.5 rounded border border-white/5 shrink-0">#viral</span>
+                                {textMetadataStatus && (
+                                    <span className={`px-1.5 py-0.5 rounded border shrink-0 ${
+                                        textMetadataStatus.type === 'error'
+                                            ? 'border-red-500/20 bg-red-500/10 text-red-300'
+                                            : textMetadataStatus.type === 'success'
+                                                ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-300'
+                                                : 'border-white/10 bg-white/5 text-zinc-400'
+                                    }`}>
+                                        {textMetadataStatus.message}
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                        <div className="mb-3">
+                            <div className="mb-2 flex items-center justify-between gap-3">
+                                <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Beschreibung</span>
+                                <span className="text-[10px] text-zinc-500">Wird fuer TikTok und Instagram gemeinsam gespeichert</span>
+                            </div>
+                            <textarea
+                                value={descriptionDraft}
+                                onChange={(e) => setDescriptionDraft(e.target.value)}
+                                onBlur={persistClipTextMetadata}
+                                rows={3}
+                                className="w-full resize-y rounded-lg border border-white/10 bg-black/40 p-3 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-primary/50"
+                                placeholder="Kurz, klar, klickstark..."
+                            />
+                        </div>
+                        <div className="mb-2 flex items-center justify-between gap-3">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Hook-Entwurf</span>
+                            <span className="text-[10px] text-zinc-500">Wird fuer Schnell-Render und Bulk-Planung genutzt</span>
+                        </div>
+                        <textarea
+                            value={resolvedHookDraftText}
+                            onChange={(e) => onHookDraftChange && onHookDraftChange(e.target.value)}
+                            rows={3}
+                            readOnly={!onHookDraftChange}
+                            className="w-full resize-y rounded-lg border border-white/10 bg-black/40 p-3 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-primary/50"
+                            placeholder="Kurzer, reisserischer Hook..."
+                        />
                     </div>
                 </div>
 
@@ -945,30 +1249,17 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     )}
                 </div>
 
-                {/* Scrollable Descriptions Area */}
-                <div className="flex-1 overflow-y-auto custom-scrollbar space-y-3 pr-2 mb-4">
-                    {/* YouTube */}
-                    <div className="bg-black/20 rounded-lg p-3 border border-white/5">
-                        <div className="flex items-center gap-2 text-[10px] font-bold text-red-400 mb-1.5 uppercase tracking-wider">
-                            <Youtube size={12} className="shrink-0" /> <span className="truncate">YouTube-Titel</span>
-                        </div>
-                        <p className="text-xs text-zinc-300 select-all break-words">
-                            {clip.video_title_for_youtube_short || "Virales Short-Video"}
-                        </p>
+                <div className="mb-4 rounded-lg border border-white/5 bg-black/20 p-3">
+                    <div className="mb-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+                        <Youtube size={12} className="text-red-400" />
+                        <span>Copy-Vorschau</span>
                     </div>
-
-                    {/* TikTok / IG */}
-                    <div className="bg-black/20 rounded-lg p-3 border border-white/5">
-                        <div className="flex items-center gap-2 text-[10px] font-bold text-zinc-400 mb-1.5 uppercase tracking-wider">
-                            <Video size={12} className="text-cyan-400 shrink-0" />
-                            <span className="text-zinc-500">/</span>
-                            <Instagram size={12} className="text-pink-400 shrink-0" />
-                            <span className="truncate">Beschreibung</span>
-                        </div>
-                        <p className="text-xs text-zinc-300 line-clamp-3 hover:line-clamp-none transition-all cursor-pointer select-all break-words">
-                            {clip.video_description_for_tiktok || clip.video_description_for_instagram}
-                        </p>
-                    </div>
+                    <p className="text-xs text-zinc-300 break-words">
+                        {titleDraft || "Viraler Clip erzeugt"}
+                    </p>
+                    <p className="mt-2 text-xs text-zinc-500 break-words">
+                        {descriptionDraft || "Noch keine Beschreibung gesetzt."}
+                    </p>
                 </div>
 
                 {/* Error Message */}
@@ -985,131 +1276,156 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         Vorschau-Modus: Untertitel/Hook können als Stil gespeichert werden. <b>Vorschau-Render</b> rendert absichtlich nur ein kurzes 1s-Sample (Turbo) zur Positionierung, danach <b>Final-Render</b>.
                     </div>
                 )}
-                <div className="grid grid-cols-2 gap-3 mt-auto pt-4 border-t border-white/5">
-                    {isPreviewOnly && (
+                <div className="mt-auto pt-4 border-t border-white/5">
+                    <div className="grid grid-cols-2 gap-3">
                         <button
-                            onClick={() => handlePreviewRender()}
+                            type="button"
+                            onClick={openQuickRenderModal}
                             disabled={isBusy}
-                            className="col-span-2 py-2 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-emerald-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 disabled:opacity-60"
-                        >
-                            {isPreviewRendering ? <Loader2 size={14} className="animate-spin" /> : <Video size={14} />}
-                            {isPreviewRendering ? 'Vorschau wird gerendert...' : 'Vorschau-Render (1s Turbo)'}
-                        </button>
-                    )}
-                    {isPreviewOnly && (
-                        <button
-                            onClick={handleRenderClip}
-                            disabled={isBusy}
-                            className="col-span-2 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-cyan-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 disabled:opacity-60"
+                            className="py-2 bg-gradient-to-r from-fuchsia-600 to-pink-600 hover:from-fuchsia-500 hover:to-pink-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-fuchsia-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2 disabled:opacity-60"
                         >
                             {isRenderingClip ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                            {isRenderingClip ? 'Rendern...' : 'Final-Render (Version erstellen)'}
+                            {isRenderingClip ? 'Rendern...' : 'Schnell-Render'}
                         </button>
+                        <button
+                            onClick={() => setShowModal(true)}
+                            disabled={isPreviewOnly}
+                            className="py-2 bg-primary hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-xs font-bold shadow-lg shadow-primary/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2"
+                        >
+                            <Share2 size={14} className="shrink-0" /> Posten
+                        </button>
+                    </div>
+
+                    <button
+                        type="button"
+                        onClick={() => setShowMoreOptions((prev) => !prev)}
+                        className="mt-3 inline-flex w-full items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-zinc-200 hover:bg-white/10"
+                    >
+                        <span>Weitere Optionen</span>
+                        <ChevronDown size={14} className={`transition-transform ${showMoreOptions ? 'rotate-180' : ''}`} />
+                    </button>
+
+                    {showMoreOptions && (
+                        <div className="mt-3 grid grid-cols-2 gap-3">
+                            {isPreviewOnly && (
+                                <button
+                                    onClick={() => handlePreviewRender()}
+                                    disabled={isBusy}
+                                    className="col-span-2 py-2 bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-emerald-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2 disabled:opacity-60"
+                                >
+                                    {isPreviewRendering ? <Loader2 size={14} className="animate-spin" /> : <Video size={14} />}
+                                    {isPreviewRendering ? 'Vorschau wird gerendert...' : 'Vorschau-Render (1s Turbo)'}
+                                </button>
+                            )}
+                            {isPreviewOnly && (
+                                <button
+                                    onClick={handleRenderClip}
+                                    disabled={isBusy}
+                                    className="col-span-2 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-cyan-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2 disabled:opacity-60"
+                                >
+                                    {isRenderingClip ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+                                    {isRenderingClip ? 'Rendern...' : 'Final-Render (Version erstellen)'}
+                                </button>
+                            )}
+
+                            <button
+                                onClick={handleAutoEdit}
+                                disabled={isBusy || isPreviewOnly}
+                                className="py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-purple-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2"
+                            >
+                                {isEditing ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
+                                {isEditing ? 'Bearbeite...' : 'Auto-Schnitt'}
+                            </button>
+
+                            <button
+                                onClick={() => setShowSubtitleModal(true)}
+                                disabled={isBusy}
+                                className="py-2 bg-gradient-to-r from-yellow-600 to-orange-600 hover:from-yellow-500 hover:to-orange-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-orange-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2"
+                            >
+                                {isSubtitling ? <Loader2 size={14} className="animate-spin" /> : <Type size={14} />}
+                                {isSubtitling ? 'Füge ein...' : (isPreviewOnly ? 'Untertitel-Stil speichern' : 'Untertitel')}
+                            </button>
+
+                            <button
+                                onClick={() => setShowHookModal(true)}
+                                disabled={isBusy}
+                                className="py-2 bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-black rounded-lg text-xs font-bold shadow-lg shadow-yellow-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2"
+                            >
+                                {isHooking ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
+                                {isHooking ? 'Füge ein...' : (isPreviewOnly ? 'Hook-Stil speichern' : 'Viraler Hook')}
+                            </button>
+
+                            <button
+                                onClick={openTrimModal}
+                                disabled={isBusy || isPreviewOnly}
+                                className="py-2 bg-gradient-to-r from-blue-500 to-cyan-600 hover:from-blue-400 hover:to-cyan-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-cyan-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2"
+                            >
+                                {isTrimming ? <Loader2 size={14} className="animate-spin" /> : <Scissors size={14} />}
+                                {isTrimming ? 'Schneide...' : 'Zuschneiden'}
+                            </button>
+
+                            <button
+                                onClick={() => setShowTranslateModal(true)}
+                                disabled={isBusy || isPreviewOnly}
+                                className="py-2 bg-gradient-to-r from-green-500 to-teal-600 hover:from-green-400 hover:to-teal-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-green-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2"
+                            >
+                                {isTranslating ? <Loader2 size={14} className="animate-spin" /> : <Languages size={14} />}
+                                {isTranslating ? 'Übersetze...' : 'Stimmen-Dub'}
+                            </button>
+
+                            <button
+                                onClick={async (e) => {
+                                    e.preventDefault();
+                                    try {
+                                        const response = await fetch(currentVideoUrl);
+                                        if (!response.ok) throw new Error('Download failed');
+                                        const blob = await response.blob();
+                                        const url = window.URL.createObjectURL(blob);
+                                        const a = document.createElement('a');
+                                        a.style.display = 'none';
+                                        a.href = url;
+                                        a.download = `clip-${index + 1}.mp4`;
+                                        document.body.appendChild(a);
+                                        a.click();
+                                        window.URL.revokeObjectURL(url);
+                                        document.body.removeChild(a);
+                                    } catch (err) {
+                                        console.error('Download error:', err);
+                                        window.open(currentVideoUrl, '_blank');
+                                    }
+                                }}
+                                disabled={isPreviewOnly}
+                                className="py-2 bg-white/5 hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed text-zinc-300 hover:text-white rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-white/5 truncate px-2"
+                            >
+                                <Download size={14} className="shrink-0" /> Herunterladen
+                            </button>
+
+                            <button
+                                onClick={restoreOriginalVersion}
+                                disabled={!isModifiedVideo || isBusy || isPreviewOnly}
+                                className="col-span-2 py-2 bg-black/30 hover:bg-black/50 disabled:opacity-40 disabled:cursor-not-allowed text-zinc-300 hover:text-white rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-white/5 truncate px-2"
+                            >
+                                <RotateCcw size={14} className="shrink-0" /> Original wiederherstellen
+                            </button>
+                        </div>
                     )}
-                    <button
-                        onClick={openQuickRenderModal}
-                        disabled={isBusy}
-                        className="col-span-2 py-2 bg-gradient-to-r from-fuchsia-600 to-pink-600 hover:from-fuchsia-500 hover:to-pink-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-fuchsia-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1 disabled:opacity-60"
-                    >
-                        {isRenderingClip ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                        {isRenderingClip ? 'Rendern...' : 'Schnell-Render (Hook + Untertitel-Vorgaben)'}
-                    </button>
-                    <button
-                        onClick={handleAutoEdit}
-                        disabled={isBusy || isPreviewOnly}
-                        className="col-span-1 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-purple-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
-                    >
-                        {isEditing ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
-                        {isEditing ? 'Bearbeite...' : 'Auto-Schnitt'}
-                    </button>
-
-                    <button
-                        onClick={() => setShowSubtitleModal(true)}
-                        disabled={isBusy}
-                        className="col-span-1 py-2 bg-gradient-to-r from-yellow-600 to-orange-600 hover:from-yellow-500 hover:to-orange-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-orange-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
-                    >
-                        {isSubtitling ? <Loader2 size={14} className="animate-spin" /> : <Type size={14} />}
-                        {isSubtitling ? 'Füge ein...' : (isPreviewOnly ? 'Untertitel-Stil speichern' : 'Untertitel')}
-                    </button>
-
-                    <button
-                        onClick={() => setShowHookModal(true)}
-                        disabled={isBusy}
-                        className="col-span-1 py-2 bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-black rounded-lg text-xs font-bold shadow-lg shadow-yellow-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
-                    >
-                        {isHooking ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
-                        {isHooking ? 'Füge ein...' : (isPreviewOnly ? 'Hook-Stil speichern' : 'Viraler Hook')}
-                    </button>
-
-                    <button
-                        onClick={() => setShowTrimModal(true)}
-                        disabled={isBusy || isPreviewOnly}
-                        className="col-span-1 py-2 bg-gradient-to-r from-blue-500 to-cyan-600 hover:from-blue-400 hover:to-cyan-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-cyan-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
-                    >
-                        {isTrimming ? <Loader2 size={14} className="animate-spin" /> : <Scissors size={14} />}
-                        {isTrimming ? 'Schneide...' : 'Zuschneiden'}
-                    </button>
-
-                    <button
-                        onClick={() => setShowTranslateModal(true)}
-                        disabled={isBusy || isPreviewOnly}
-                        className="col-span-1 py-2 bg-gradient-to-r from-green-500 to-teal-600 hover:from-green-400 hover:to-teal-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-green-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 mb-1 truncate px-1"
-                    >
-                        {isTranslating ? <Loader2 size={14} className="animate-spin" /> : <Languages size={14} />}
-                        {isTranslating ? 'Übersetze...' : 'Stimmen-Dub'}
-                    </button>
-
-                    <button
-                        onClick={() => setShowModal(true)}
-                        disabled={isPreviewOnly}
-                        className="col-span-1 py-2 bg-primary hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-xs font-bold shadow-lg shadow-primary/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2"
-                    >
-                        <Share2 size={14} className="shrink-0" /> Posten
-                    </button>
-                    <button
-                        onClick={async (e) => {
-                            e.preventDefault();
-                            try {
-                                const response = await fetch(currentVideoUrl);
-                                if (!response.ok) throw new Error('Download failed');
-                                const blob = await response.blob();
-                                const url = window.URL.createObjectURL(blob);
-                                const a = document.createElement('a');
-                                a.style.display = 'none';
-                                a.href = url;
-                                a.download = `clip-${index + 1}.mp4`;
-                                document.body.appendChild(a);
-                                a.click();
-                                window.URL.revokeObjectURL(url);
-                                document.body.removeChild(a);
-                            } catch (err) {
-                                console.error('Download error:', err);
-                                window.open(currentVideoUrl, '_blank');
-                            }
-                        }}
-                        disabled={isPreviewOnly}
-                        className="col-span-1 py-2 bg-white/5 hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed text-zinc-300 hover:text-white rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-white/5 truncate px-2"
-                    >
-                        <Download size={14} className="shrink-0" /> Herunterladen
-                    </button>
-
-                    <button
-                        onClick={restoreOriginalVersion}
-                        disabled={!isModifiedVideo || isBusy || isPreviewOnly}
-                        className="col-span-2 py-2 bg-black/30 hover:bg-black/50 disabled:opacity-40 disabled:cursor-not-allowed text-zinc-300 hover:text-white rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-2 border border-white/5 truncate px-2"
-                    >
-                        <RotateCcw size={14} className="shrink-0" /> Original wiederherstellen
-                    </button>
                 </div>
             </div>
 
             {showQuickRenderModal && (
                 createPortal(
-                <div className="fixed inset-0 z-[1100] flex items-center justify-center p-3 md:p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out] overflow-y-auto touch-scroll">
-                    <div className="bg-[#121214] border border-white/10 p-5 rounded-2xl w-full max-w-lg shadow-2xl relative my-4 max-h-[calc(100dvh-1.5rem)] overflow-y-auto custom-scrollbar touch-scroll">
+                <div
+                    className="fixed inset-0 z-[4000] flex items-center justify-center p-3 md:p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out] overflow-y-auto touch-scroll pointer-events-auto"
+                    onClick={() => setShowQuickRenderModal(false)}
+                >
+                    <div
+                        className="bg-[#121214] border border-white/10 p-5 rounded-2xl w-full max-w-lg shadow-2xl relative my-4 max-h-[calc(100dvh-1.5rem)] overflow-y-auto custom-scrollbar touch-scroll pointer-events-auto"
+                        onClick={(e) => e.stopPropagation()}
+                    >
                         <button
+                            type="button"
                             onClick={() => setShowQuickRenderModal(false)}
-                            className="absolute top-4 right-4 text-zinc-500 hover:text-white"
+                            className="absolute top-4 right-4 text-zinc-500 hover:text-white touch-manipulation"
                         >
                             <X size={20} />
                         </button>
@@ -1122,7 +1438,10 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         <label className="block text-xs font-bold text-zinc-400 mb-2">Hook-Text</label>
                         <textarea
                             value={quickHookText}
-                            onChange={(e) => setQuickHookText(e.target.value)}
+                            onChange={(e) => {
+                                setQuickHookText(e.target.value);
+                                onHookDraftChange && onHookDraftChange(e.target.value);
+                            }}
                             rows={5}
                             className="w-full bg-black/40 border border-white/10 rounded-lg p-3 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600 resize-y"
                             placeholder="POV: ..."
@@ -1133,7 +1452,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                 type="button"
                                 onClick={() => setShowQuickRenderModal(false)}
                                 disabled={isRenderingClip}
-                                className="px-4 py-2 rounded-lg border border-white/10 bg-white/5 text-sm text-zinc-200 hover:bg-white/10 disabled:opacity-50"
+                                className="px-4 py-2 rounded-lg border border-white/10 bg-white/5 text-sm text-zinc-200 hover:bg-white/10 disabled:opacity-50 touch-manipulation"
                             >
                                 Abbrechen
                             </button>
@@ -1141,7 +1460,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                 type="button"
                                 onClick={handleQuickRenderWithDefaults}
                                 disabled={isRenderingClip || !quickHookText.trim()}
-                                className="px-4 py-2 rounded-lg bg-gradient-to-r from-fuchsia-600 to-pink-600 hover:from-fuchsia-500 hover:to-pink-500 text-white text-sm font-semibold disabled:opacity-60 flex items-center gap-2"
+                                className="px-4 py-2 rounded-lg bg-gradient-to-r from-fuchsia-600 to-pink-600 hover:from-fuchsia-500 hover:to-pink-500 text-white text-sm font-semibold disabled:opacity-60 flex items-center gap-2 touch-manipulation"
                             >
                                 {isRenderingClip ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
                                 {isRenderingClip ? 'Rendern...' : 'Jetzt rendern'}
@@ -1393,6 +1712,10 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                             const statusValue = (item.status || '').toLowerCase();
                                             const isNotSelected = statusValue === 'not_selected';
                                             const isPending = !isNotSelected && item.success !== true && item.success !== false;
+                                            const canRetryWithSchedule = Boolean(postResult?.request_settings?.scheduled_date);
+                                            const isRetryingScheduled = retryingPlatformAction === `${item.platform}:scheduled`;
+                                            const isRetryingNow = retryingPlatformAction === `${item.platform}:now`;
+                                            const isRetryingThisPlatform = isRetryingScheduled || isRetryingNow;
                                             const rowClass = isNotSelected
                                                 ? 'border-white/10 bg-black/20'
                                                 : item.success === true
@@ -1417,6 +1740,30 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                                     <div className="mt-1 text-[11px] text-zinc-300">
                                                         {item.message || item.error || (isPending ? 'Warte auf Rückmeldung von Upload-Post.' : (isNotSelected ? 'Nicht ausgewählt.' : 'Abgeschlossen'))}
                                                     </div>
+                                                    {item.success === false && (
+                                                        <div className="mt-2 flex flex-wrap gap-2">
+                                                            {canRetryWithSchedule && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => handleRetryPlatform(item.platform, 'scheduled')}
+                                                                    disabled={posting || isRefreshingPostStatus || isRetryingThisPlatform || !uploadPostKey || !resolvedUploadUserId}
+                                                                    className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-white hover:bg-white/10 disabled:opacity-50"
+                                                                >
+                                                                    {isRetryingScheduled ? <Loader2 size={12} className="animate-spin" /> : <Calendar size={12} />}
+                                                                    Mit Zeitplan
+                                                                </button>
+                                                            )}
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => handleRetryPlatform(item.platform, 'now')}
+                                                                disabled={posting || isRefreshingPostStatus || isRetryingThisPlatform || !uploadPostKey || !resolvedUploadUserId}
+                                                                className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-[11px] text-white hover:bg-white/10 disabled:opacity-50"
+                                                            >
+                                                                {isRetryingNow ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />}
+                                                                Sofort posten
+                                                            </button>
+                                                        </div>
+                                                    )}
                                                     {(item.url || item.link) && (
                                                         <a
                                                             href={item.url || item.link}
@@ -1451,7 +1798,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
                         <button
                             onClick={handlePost}
-                            disabled={posting || !uploadPostKey}
+                            disabled={posting || !!retryingPlatformAction || !uploadPostKey || !resolvedUploadUserId}
                             className="w-full py-3 bg-primary hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-white font-bold transition-all flex items-center justify-center gap-2"
                         >
                             {posting ? <><Loader2 size={16} className="animate-spin" /> {isScheduling ? 'Plane...' : 'Veröffentliche...'}</> : <><Share2 size={16} /> {isScheduling ? 'Post planen' : 'Jetzt veröffentlichen'}</>}
@@ -1479,7 +1826,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 onApplyAsJobDefault={handleApplyHookDefaultsToJob}
                 isProcessing={isHooking}
                 videoUrl={currentVideoUrl}
-                initialText={clip.viral_hook_text}
+                initialText={resolvedHookDraftText}
                 defaultSettings={hookStyle}
             />
 
@@ -1494,10 +1841,13 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
             <TrimModal
                 isOpen={showTrimModal}
-                onClose={() => setShowTrimModal(false)}
+                onClose={() => {
+                    setShowTrimModal(false);
+                    setTrimDialogVideoUrl('');
+                }}
                 onTrim={handleTrim}
                 isProcessing={isTrimming}
-                videoUrl={currentVideoUrl}
+                videoUrl={trimDialogVideoUrl || currentVideoUrl}
             />
         </div>
     );

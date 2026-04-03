@@ -12,7 +12,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        const normalizedMaxClips = Math.max(1, Math.min(50, Number(maxClips) || 10));
+        const normalizedMaxClips = Math.max(1, Number(maxClips) || 10);
         if (mode === 'url' && url) {
             onProcess({ type: 'url', payload: url, options: { interviewMode, allowLongClips, maxClips: normalizedMaxClips, analysisOnly } });
         } else if (mode === 'file' && file) {
@@ -135,7 +135,6 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     <input
                         type="number"
                         min="1"
-                        max="50"
                         step="1"
                         value={maxClips}
                         onChange={(e) => setMaxClips(e.target.value)}

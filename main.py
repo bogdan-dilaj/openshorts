@@ -10,6 +10,7 @@ import threading
 import urllib.request
 import urllib.error
 import math
+import shutil
 from scenedetect import VideoManager, SceneManager
 from scenedetect.detectors import ContentDetector
 from ultralytics import YOLO
@@ -179,6 +180,31 @@ OUTPUT JSON SCHEMA:
 }}
 """
 
+HOOK_GENERATION_PROMPT_TEMPLATE = """
+You are a senior short-form video hook copywriter.
+
+Task:
+- Write exactly one ultra-short on-screen hook for each clip.
+- The hook must be in {output_language_name} (code: {output_language_code}).
+- Preferred length: 2 to 6 words. Hard max: 8 words.
+- Make it reisserisch: curiosity gap, tension, surprise, conflict, payoff.
+- No hashtags. No quotes. No emojis. No generic filler like "wait for the ending".
+- Return ONLY valid JSON. No markdown. No commentary.
+
+CLIPS_JSON:
+{clips_json}
+
+OUTPUT JSON:
+{{
+  "hooks": [
+    {{
+      "clip_index": <integer>,
+      "viral_hook_text": "<very short hook overlay>"
+    }}
+  ]
+}}
+"""
+
 # Load the YOLO model once (Keep for backup or scene analysis if needed)
 model = YOLO(YOLO_MODEL_PATH)
 
@@ -291,21 +317,224 @@ def get_default_clip_texts(language_code):
             "video_description_for_tiktok": "Viral Clip aus dem Video.",
             "video_description_for_instagram": "Starker Ausschnitt aus dem Video.",
             "video_title_for_youtube_short": "Generierter YouTube Short",
-            "viral_hook_text": "Warte bis zum Ende",
+            "viral_hook_text": "",
         }
     if normalized == "es":
         return {
             "video_description_for_tiktok": "Clip viral del video.",
             "video_description_for_instagram": "Fragmento potente del video.",
             "video_title_for_youtube_short": "Short generado para YouTube",
-            "viral_hook_text": "Espera hasta el final",
+            "viral_hook_text": "",
         }
     return {
         "video_description_for_tiktok": "Generated TikTok caption.",
         "video_description_for_instagram": "Generated Instagram caption.",
         "video_title_for_youtube_short": "Generated YouTube Short",
-        "viral_hook_text": "Wait for the ending",
+        "viral_hook_text": "",
     }
+
+
+HOOK_PLACEHOLDER_TEXTS = {
+    "",
+    "wait for the ending",
+    "warte bis zum ende",
+    "espera hasta el final",
+    "pov:",
+    "pov: ...",
+    "pov: das darfst du nicht verpassen",
+    "text hier eingeben",
+    "text hier eingeben...",
+}
+
+
+def _sanitize_hook_candidate_text(value, max_words=8, max_chars=80):
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = text.strip("\"'` ")
+    if not text:
+        return ""
+
+    words = text.split()
+    if len(words) > max_words:
+        text = " ".join(words[:max_words]).strip()
+
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip(" ,.;:-!?")
+    return text
+
+
+def _normalize_hook_text_for_compare(value):
+    text = _sanitize_hook_candidate_text(value)
+    text = text.lower().strip()
+    text = re.sub(r"[!?.,:;]+$", "", text)
+    return text
+
+
+def _is_placeholder_hook_text(value):
+    return _normalize_hook_text_for_compare(value) in HOOK_PLACEHOLDER_TEXTS
+
+
+def _collect_transcript_excerpt_for_range(transcript_result, clip_start, clip_end, max_chars=320):
+    if not isinstance(transcript_result, dict):
+        return ""
+
+    segments = transcript_result.get("segments")
+    if not isinstance(segments, list):
+        return ""
+
+    parts = []
+    total_chars = 0
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        seg_start = _coerce_float(segment.get("start"))
+        seg_end = _coerce_float(segment.get("end"))
+        if seg_start is None:
+            seg_start = 0.0
+        if seg_end is None:
+            seg_end = seg_start
+        if seg_end <= clip_start or seg_start >= clip_end:
+            continue
+
+        text = re.sub(r"\s+", " ", str(segment.get("text") or "")).strip()
+        if not text:
+            continue
+        parts.append(text)
+        total_chars += len(text) + 1
+        if total_chars >= max_chars:
+            break
+
+    excerpt = re.sub(r"\s+", " ", " ".join(parts)).strip()
+    if len(excerpt) > max_chars:
+        excerpt = excerpt[: max_chars - 3].rstrip() + "..."
+    return excerpt
+
+
+def _build_hook_generation_contexts(clips, transcript_result):
+    contexts = []
+    for clip_index, clip in enumerate(clips or []):
+        if not isinstance(clip, dict):
+            continue
+        if not _is_placeholder_hook_text(clip.get("viral_hook_text")):
+            continue
+
+        start = _coerce_float(clip.get("start"))
+        end = _coerce_float(clip.get("end"))
+        if start is None:
+            start = 0.0
+        if end is None:
+            end = start
+
+        contexts.append(
+            {
+                "clip_index": clip_index,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "title": str(clip.get("video_title_for_youtube_short") or "").strip(),
+                "description": str(
+                    clip.get("video_description_for_tiktok")
+                    or clip.get("video_description_for_instagram")
+                    or ""
+                ).strip(),
+                "transcript_excerpt": _collect_transcript_excerpt_for_range(
+                    transcript_result,
+                    start,
+                    end,
+                ),
+            }
+        )
+    return contexts
+
+
+def _build_hook_generation_prompt(clip_contexts, output_language_code="en", output_language_name="English"):
+    return HOOK_GENERATION_PROMPT_TEMPLATE.format(
+        output_language_code=output_language_code,
+        output_language_name=output_language_name,
+        clips_json=json.dumps(clip_contexts, ensure_ascii=False),
+    )
+
+
+def _apply_generated_hook_payload(clips, payload):
+    if not isinstance(payload, dict):
+        return 0
+
+    raw_hooks = payload.get("hooks")
+    if not isinstance(raw_hooks, list):
+        return 0
+
+    updated = 0
+    for item in raw_hooks:
+        if not isinstance(item, dict):
+            continue
+        try:
+            clip_index = int(item.get("clip_index"))
+        except (TypeError, ValueError):
+            continue
+        if clip_index < 0 or clip_index >= len(clips):
+            continue
+
+        hook_text = _sanitize_hook_candidate_text(item.get("viral_hook_text"))
+        if not hook_text:
+            continue
+        clips[clip_index]["viral_hook_text"] = hook_text
+        updated += 1
+    return updated
+
+
+def _ensure_generated_clip_hooks(
+    result_json,
+    transcript_result,
+    *,
+    provider_name,
+    output_language_code="en",
+    output_language_name="English",
+    gemini_client=None,
+    gemini_model_name=None,
+    ollama_base_url=None,
+    ollama_model_name=None,
+):
+    if not isinstance(result_json, dict):
+        return result_json
+
+    clips = result_json.get("shorts")
+    if not isinstance(clips, list) or not clips:
+        return result_json
+
+    clip_contexts = _build_hook_generation_contexts(clips, transcript_result)
+    if not clip_contexts:
+        return result_json
+
+    batch_size = max(1, _env_int("HOOK_GENERATION_BATCH_SIZE", 20))
+    print(f"🪝 Generating AI hook suggestions for {len(clip_contexts)} clips...")
+
+    for batch_start in range(0, len(clip_contexts), batch_size):
+        batch = clip_contexts[batch_start : batch_start + batch_size]
+        prompt = _build_hook_generation_prompt(
+            batch,
+            output_language_code=output_language_code,
+            output_language_name=output_language_name,
+        )
+
+        try:
+            if provider_name == "ollama":
+                if not ollama_base_url or not ollama_model_name:
+                    continue
+                _, response_text = _call_ollama_with_retries(prompt, ollama_base_url, ollama_model_name)
+                payload = _extract_json_payload(response_text)
+            else:
+                if gemini_client is None or not gemini_model_name:
+                    continue
+                response = gemini_client.models.generate_content(
+                    model=gemini_model_name,
+                    contents=prompt,
+                )
+                payload = _extract_json_payload(response.text)
+
+            updated = _apply_generated_hook_payload(clips, payload)
+            print(f"🪝 Hook suggestions updated for {updated}/{len(batch)} clips in batch.")
+        except Exception as exc:
+            print(f"⚠️ Failed to generate hook suggestions for clip batch: {exc}")
+
+    return result_json
 
 
 def _clip_overlap_ratio(a_start, a_end, b_start, b_end):
@@ -394,7 +623,7 @@ def sanitize_clip_candidates(
             "video_description_for_tiktok": clip.get("video_description_for_tiktok") or defaults["video_description_for_tiktok"],
             "video_description_for_instagram": clip.get("video_description_for_instagram") or clip.get("video_description_for_tiktok") or defaults["video_description_for_instagram"],
             "video_title_for_youtube_short": clip.get("video_title_for_youtube_short") or defaults["video_title_for_youtube_short"],
-            "viral_hook_text": clip.get("viral_hook_text") or defaults["viral_hook_text"],
+            "viral_hook_text": _sanitize_hook_candidate_text(clip.get("viral_hook_text")) or defaults["viral_hook_text"],
             "status": "pending",
         })
 
@@ -544,6 +773,52 @@ def _env_flag(name, default=False):
     return default
 
 
+def _env_int(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(str(raw).strip())
+    except Exception:
+        return default
+
+
+def _env_float(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(str(raw).strip())
+    except Exception:
+        return default
+
+
+def _build_yt_dlp_js_runtimes():
+    configured = [item.lower() for item in _split_env_values(os.environ.get("YOUTUBE_JS_RUNTIMES"))]
+    detected_paths = {}
+    runtime_bins = {
+        "node": ["node"],
+        "deno": ["deno"],
+        "quickjs": ["qjs", "quickjs"],
+        "bun": ["bun"],
+    }
+
+    for runtime_name, bin_candidates in runtime_bins.items():
+        for bin_name in bin_candidates:
+            path = shutil.which(bin_name)
+            if path:
+                detected_paths[runtime_name] = path
+                break
+
+    selected = configured or ["node", "deno", "quickjs", "bun"]
+    runtimes = {}
+    for runtime_name in selected:
+        if runtime_name in detected_paths:
+            runtimes[runtime_name] = {}
+
+    return runtimes or None
+
+
 def _build_youtube_extractor_args():
     youtube_args = {}
 
@@ -619,6 +894,44 @@ def _best_accessible_source_edge(info):
             best_format = fmt
 
     return best_format, best_edge
+
+
+YOUTUBE_NETWORK_ERROR_MARKERS = (
+    "temporary failure in name resolution",
+    "failed to resolve",
+    "name or service not known",
+    "nodename nor servname provided",
+    "network is unreachable",
+    "connection refused",
+    "connection reset",
+    "connection aborted",
+    "timed out",
+    "timeout",
+    "tls handshake timeout",
+    "proxyerror",
+)
+
+YOUTUBE_DNS_ERROR_MARKERS = (
+    "temporary failure in name resolution",
+    "failed to resolve",
+    "name or service not known",
+    "nodename nor servname provided",
+    "getaddrinfo failed",
+)
+
+
+def _is_youtube_network_failure(message):
+    lower = str(message or "").lower()
+    if not lower:
+        return False
+    return any(marker in lower for marker in YOUTUBE_NETWORK_ERROR_MARKERS)
+
+
+def _is_youtube_dns_failure(message):
+    lower = str(message or "").lower()
+    if not lower:
+        return False
+    return any(marker in lower for marker in YOUTUBE_DNS_ERROR_MARKERS)
 
 
 def _youtube_download_format_profiles():
@@ -1353,17 +1666,28 @@ def _build_youtube_auth_candidates():
             print(f"⚠️ Failed to materialize YOUTUBE_COOKIES env var: {exc}")
 
     def add_file():
-        if not cookies_file_path or not os.path.exists(cookies_file_path):
-            return
-        try:
-            temp_path = _copy_cookies_file_to_temp(cookies_file_path)
-            temp_files.append(temp_path)
-            candidates.append({
-                "label": f"cookies-file:{cookies_file_path}",
-                "opts": {"cookiefile": temp_path},
-            })
-        except Exception as exc:
-            print(f"⚠️ Failed to copy cookies file {cookies_file_path}: {exc}")
+        cookie_sources = []
+        for path in [cookies_file_path, "/tmp/openshorts/cookies.txt", "/app/cookies.txt"]:
+            if not path:
+                continue
+            norm = os.path.normpath(path)
+            if norm in cookie_sources:
+                continue
+            cookie_sources.append(norm)
+
+        existing_sources = [path for path in cookie_sources if os.path.exists(path)]
+        existing_sources.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+
+        for source_path in existing_sources:
+            try:
+                temp_path = _copy_cookies_file_to_temp(source_path)
+                temp_files.append(temp_path)
+                candidates.append({
+                    "label": f"cookies-file:{source_path}",
+                    "opts": {"cookiefile": temp_path},
+                })
+            except Exception as exc:
+                print(f"⚠️ Failed to copy cookies file {source_path}: {exc}")
 
     def add_browser():
         browser_name = browser or "chrome"
@@ -1390,7 +1714,8 @@ def _build_youtube_auth_candidates():
         if browser:
             add_browser()
 
-    allow_unauth_fallback = _env_flag("YOUTUBE_ALLOW_UNAUTH_FALLBACK", True)
+    has_authenticated_candidate = any(bool(candidate.get("opts")) for candidate in candidates)
+    allow_unauth_fallback = _env_flag("YOUTUBE_ALLOW_UNAUTH_FALLBACK", not has_authenticated_candidate)
     if allow_unauth_fallback:
         candidates.append({"label": "unauthenticated", "opts": {}})
 
@@ -1419,6 +1744,7 @@ def download_youtube_video(url, output_dir="."):
     step_start_time = time.time()
     auth_candidates, temp_files = _build_youtube_auth_candidates()
     extractor_args = _build_youtube_extractor_args()
+    js_runtimes = _build_yt_dlp_js_runtimes()
     print(
         "🔐 YouTube auth candidates (in order): "
         + ", ".join(candidate["label"] for candidate in auth_candidates)
@@ -1446,49 +1772,105 @@ def download_youtube_video(url, output_dir="."):
     }
     if extractor_args:
         common_ydl_opts["extractor_args"] = extractor_args
+    if js_runtimes:
+        common_ydl_opts["js_runtimes"] = js_runtimes
+        print("🧠 yt-dlp JS runtimes enabled: " + ", ".join(js_runtimes.keys()))
+    else:
+        print("⚠️ No JS runtime detected for yt-dlp challenge solving (node/deno/quickjs/bun).")
 
     viable_candidates = []
     preflight_errors = []
+    probe_attempts = max(1, _env_int("YOUTUBE_PROBE_ATTEMPTS", 3))
+    probe_retry_delay_seconds = max(0.0, _env_float("YOUTUBE_PROBE_RETRY_DELAY_SECONDS", 1.5))
 
     try:
         for candidate in auth_candidates:
             probe_opts = {**common_ydl_opts, **candidate["opts"]}
             print(f"🔑 Probing YouTube formats using auth={candidate['label']}")
-            try:
-                with yt_dlp.YoutubeDL(probe_opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                best_format, best_edge = _best_accessible_source_edge(info)
-                if best_format:
-                    print(
-                        "🎞️  Best accessible source before download: "
-                        f"auth={candidate['label']} "
-                        f"format={best_format.get('format_id')} "
-                        f"{best_format.get('width') or '?'}x{best_format.get('height') or '?'} "
-                        f"ext={best_format.get('ext')}"
-                    )
-                if best_edge < MIN_SOURCE_EDGE:
-                    preflight_errors.append(
-                        f"{candidate['label']}: best short edge {best_edge}px < required {MIN_SOURCE_EDGE}px"
-                    )
-                    continue
+            info = None
+            best_format = None
+            best_edge = 0
+            for attempt in range(1, probe_attempts + 1):
+                try:
+                    with yt_dlp.YoutubeDL(probe_opts) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                    best_format, best_edge = _best_accessible_source_edge(info)
+                    break
+                except Exception as exc:
+                    err_text = str(exc)
+                    if attempt < probe_attempts and _is_youtube_network_failure(err_text):
+                        wait_seconds = max(0.0, probe_retry_delay_seconds * attempt)
+                        print(
+                            "⚠️ Transient YouTube probe/network failure "
+                            f"(auth={candidate['label']} attempt={attempt}/{probe_attempts}): {err_text}"
+                        )
+                        if wait_seconds > 0:
+                            print(f"🔁 Retrying probe in {wait_seconds:.1f}s...")
+                            time.sleep(wait_seconds)
+                        continue
+                    preflight_errors.append(f"{candidate['label']}: {err_text}")
+                    break
 
-                viable_candidates.append(
-                    {
-                        "candidate": candidate,
-                        "info": info,
-                        "best_format": best_format,
-                        "best_edge": best_edge,
-                    }
+            if info is None:
+                continue
+
+            if best_format:
+                print(
+                    "🎞️  Best accessible source before download: "
+                    f"auth={candidate['label']} "
+                    f"format={best_format.get('format_id')} "
+                    f"{best_format.get('width') or '?'}x{best_format.get('height') or '?'} "
+                    f"ext={best_format.get('ext')}"
                 )
-            except Exception as exc:
-                preflight_errors.append(f"{candidate['label']}: {exc}")
+            if best_edge < MIN_SOURCE_EDGE:
+                preflight_errors.append(
+                    f"{candidate['label']}: best short edge {best_edge}px < required {MIN_SOURCE_EDGE}px"
+                )
+                continue
+
+            viable_candidates.append(
+                {
+                    "candidate": candidate,
+                    "info": info,
+                    "best_format": best_format,
+                    "best_edge": best_edge,
+                }
+            )
 
         if not viable_candidates:
             detail = "\n".join(preflight_errors[-5:]) if preflight_errors else "No auth candidate succeeded."
+            lower_errors = "\n".join(preflight_errors).lower()
+            network_failure = _is_youtube_network_failure(lower_errors)
+            dns_failure = _is_youtube_dns_failure(lower_errors)
+            rotated_cookie_hint = (
+                "Detected invalid/rotated YouTube cookies. Export a fresh cookies.txt from a logged-in browser and retry.\n"
+                if (not network_failure) and ("no longer valid" in lower_errors or "sign in to confirm you’re not a bot" in lower_errors)
+                else ""
+            )
+            network_hint = (
+                (
+                    "Detected DNS resolution failure while contacting YouTube. "
+                    "Check container/host DNS and outbound network access, then retry.\n"
+                )
+                if dns_failure
+                else (
+                    "Detected temporary network failure while contacting YouTube. "
+                    "Check outbound network/proxy/firewall access, then retry.\n"
+                    if network_failure
+                    else ""
+                )
+            )
+            remediation = (
+                "Retry after network access is restored, or upload the source file manually."
+                if network_failure
+                else "Set valid cookies (cookies.txt or pasted cookies), optional visitor data/PO token, or upload the source file manually."
+            )
             raise RuntimeError(
                 "Unable to access a high-quality YouTube source.\n"
+                f"{network_hint}"
+                f"{rotated_cookie_hint}"
                 f"Details:\n{detail}\n"
-                "Set valid cookies (cookies.txt or pasted cookies), optional visitor data/PO token, or upload the source file manually."
+                f"{remediation}"
             )
 
         video_title = viable_candidates[0]["info"].get("title", "youtube_video")
@@ -1575,10 +1957,30 @@ def download_youtube_video(url, output_dir="."):
                 return downloaded_file, sanitized_title
 
         detail = "\n".join(download_errors[-8:]) if download_errors else "All download attempts failed."
+        lower_download_errors = "\n".join(download_errors).lower()
+        network_download_hint = (
+            (
+                "Detected DNS resolution failure while downloading from YouTube. "
+                "Check container/host DNS and outbound network access, then retry.\n"
+            )
+            if _is_youtube_dns_failure(lower_download_errors)
+            else (
+                "Detected temporary network failure while downloading from YouTube. "
+                "Check outbound network/proxy/firewall access, then retry.\n"
+                if _is_youtube_network_failure(lower_download_errors)
+                else ""
+            )
+        )
+        remediation = (
+            "Retry after network access is restored, or upload the source file manually."
+            if network_download_hint
+            else "Set valid cookies (cookies.txt or pasted cookies), optional visitor data/PO token, or upload the source file manually."
+        )
         raise RuntimeError(
             "Unable to download a usable high-quality YouTube source after retries.\n"
+            f"{network_download_hint}"
             f"Details:\n{detail}\n"
-            "Set valid cookies (cookies.txt or pasted cookies), optional visitor data/PO token, or upload the source file manually."
+            f"{remediation}"
         )
 
     except Exception as e:
@@ -1599,7 +2001,8 @@ REASON: {reason}
 ---------------------------------------------------------------------
 1. Save a fresh cookies.txt from a logged-in browser and configure mode `cookies_file` or `cookies_text`.
 2. Optionally set YOUTUBE_VISITOR_DATA and YOUTUBE_PO_TOKEN_* to unlock blocked streams.
-3. If YouTube still only exposes low quality, upload the original source file directly.
+3. Ensure a JS runtime is available for yt-dlp (recommended: node) to pass YouTube JS challenges.
+4. If YouTube still only exposes low quality or blocks access, upload the original source file directly.
 ---------------------------------------------------------------------
 """
         print(error_msg, file=sys.stdout)
@@ -2032,13 +2435,24 @@ def get_viral_clips_via_gemini(transcript_result, video_duration, max_clip_durat
         if cost_analysis:
             result_json['cost_analysis'] = cost_analysis
 
-        return sanitize_clip_candidates(
+        result_json = sanitize_clip_candidates(
             result_json,
             video_duration,
             language_code=language_code,
             max_clips=max_clips,
             max_clip_duration=max_clip_duration,
             min_over_one_minute_clip_duration=MIN_OVER_ONE_MINUTE_CLIP_DURATION if max_clip_duration > MAX_CLIP_DURATION else None,
+        )
+        if not result_json:
+            return None
+        return _ensure_generated_clip_hooks(
+            result_json,
+            transcript_result,
+            provider_name="gemini",
+            output_language_code=language_code,
+            output_language_name=language_name,
+            gemini_client=client,
+            gemini_model_name=model_name,
         )
     except Exception as e:
         print(f"❌ Gemini Error: {e}")
@@ -2262,7 +2676,15 @@ def get_viral_clips_via_ollama(transcript_result, video_duration, max_clip_durat
             "output_cost": 0,
             "total_cost": 0
         }
-        return result_json
+        return _ensure_generated_clip_hooks(
+            result_json,
+            transcript_result,
+            provider_name="ollama",
+            output_language_code=language_code,
+            output_language_name=language_name,
+            ollama_base_url=base_url,
+            ollama_model_name=model_name,
+        )
     except ClipSelectionConfigurationError:
         raise
     except urllib.error.HTTPError as e:
@@ -2330,7 +2752,7 @@ if __name__ == '__main__':
     parser.add_argument('--tight-edit-preset', type=str, default=DEFAULT_TIGHT_EDIT_PRESET_ENV, choices=sorted(TIGHT_EDIT_PRESETS.keys()), help=f"Automatically remove pauses and filler words using the selected preset (default: {DEFAULT_TIGHT_EDIT_PRESET_ENV}).")
     
     args = parser.parse_args()
-    args.max_clips = max(1, min(50, args.max_clips or MAX_GENERATED_CLIPS))
+    args.max_clips = max(1, args.max_clips or MAX_GENERATED_CLIPS)
     args.tight_edit_preset = normalize_tight_edit_preset(args.tight_edit_preset, DEFAULT_TIGHT_EDIT_PRESET_ENV)
 
     script_start_time = time.time()

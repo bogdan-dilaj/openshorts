@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Upload, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield, LayoutGrid, Image, Globe } from 'lucide-react';
+import { Upload, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield, LayoutGrid, Image, Globe, Loader2, CalendarDays, Clock3, ListFilter, GripVertical } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
@@ -178,6 +178,180 @@ const readStoredSocialPostSettings = () => {
   }
 };
 
+const JOB_SHORTS_UI_STATE_PREFIX = 'job_shorts_ui_v1:';
+
+const buildJobUiStorageKey = (jobId) => `${JOB_SHORTS_UI_STATE_PREFIX}${jobId}`;
+
+const readStoredJobUiState = (jobId) => {
+  if (!jobId) return null;
+  try {
+    const raw = localStorage.getItem(buildJobUiStorageKey(jobId));
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+};
+
+const writeStoredJobUiState = (jobId, state) => {
+  if (!jobId) return;
+  try {
+    localStorage.setItem(buildJobUiStorageKey(jobId), JSON.stringify(state));
+  } catch (e) {
+    console.warn('Failed to persist job UI state', e);
+  }
+};
+
+const formatDateInputValue = (date = new Date()) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const resolveClipDurationSeconds = (clip) => {
+  const numeric = Number(clip?.display_duration);
+  if (Number.isFinite(numeric)) return numeric;
+  return Math.max(0, Number(clip?.end || 0) - Number(clip?.start || 0));
+};
+
+const resolveClipHookDraftText = (clip) => (
+  String(clip?.hook_settings?.text || clip?.viral_hook_text || '').trim()
+);
+
+const buildClipSelectionKey = (activeJobId, clip, fallbackIndex) => `${activeJobId}:${clip?.clip_index ?? fallbackIndex}`;
+
+const isClipPostedOrQueued = (clip) => {
+  const status = clip?.social_post_status;
+  if (!status || typeof status !== 'object') return false;
+
+  const normalizedStatus = String(status.status || '').toLowerCase();
+  const pendingCount = Number(status.pending_count || 0);
+  const successCount = Number(status.success_count || 0);
+
+  return (
+    pendingCount > 0
+    || successCount > 0
+    || ['pending', 'in_progress', 'scheduled', 'completed', 'partial'].includes(normalizedStatus)
+  );
+};
+
+const moveArrayItem = (items, fromIndex, toIndex) => {
+  if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return items;
+  const next = [...items];
+  const [moved] = next.splice(fromIndex, 1);
+  if (moved === undefined) return items;
+  next.splice(toIndex, 0, moved);
+  return next;
+};
+
+const parseDailyScheduleSlots = (value) => {
+  const entries = String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  if (!entries.length) {
+    throw new Error('Mindestens einen Posting-Slot angeben, z. B. 12:00, 15:00, 18:00.');
+  }
+
+  const seen = new Set();
+  const slots = entries.map((entry) => {
+    const match = entry.match(/^(\d{1,2})(?::(\d{2}))?$/);
+    if (!match) {
+      throw new Error(`Ungueltiger Slot "${entry}". Erlaubt ist HH:MM.`);
+    }
+    const hours = Number(match[1]);
+    const minutes = Number(match[2] || '00');
+    if (!Number.isInteger(hours) || hours < 0 || hours > 23 || !Number.isInteger(minutes) || minutes < 0 || minutes > 59) {
+      throw new Error(`Ungueltiger Slot "${entry}". Stunden 0-23, Minuten 0-59.`);
+    }
+    return {
+      hours,
+      minutes,
+      label: `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`,
+      sortKey: hours * 60 + minutes,
+    };
+  }).sort((a, b) => a.sortKey - b.sortKey);
+
+  return slots.filter((slot) => {
+    if (seen.has(slot.label)) return false;
+    seen.add(slot.label);
+    return true;
+  });
+};
+
+const buildScheduledPostDates = ({ slotText, count, startDate, dayInterval = 1 }) => {
+  const slots = parseDailyScheduleSlots(slotText);
+  const baseDate = new Date(`${startDate || formatDateInputValue()}T00:00:00`);
+  if (Number.isNaN(baseDate.getTime())) {
+    throw new Error('Ungueltiges Startdatum.');
+  }
+  const normalizedDayInterval = Math.max(1, Number(dayInterval) || 1);
+
+  const now = new Date();
+  const scheduledDates = [];
+  let cycleIndex = 0;
+  const safetyLimit = Math.max(count * normalizedDayInterval * 4, normalizedDayInterval * 24, 32);
+
+  while (scheduledDates.length < count && cycleIndex < safetyLimit) {
+    const dayOffset = cycleIndex * normalizedDayInterval;
+    const day = new Date(baseDate);
+    day.setHours(0, 0, 0, 0);
+    day.setDate(baseDate.getDate() + dayOffset);
+
+    for (const slot of slots) {
+      const candidate = new Date(day);
+      candidate.setHours(slot.hours, slot.minutes, 0, 0);
+      if (candidate <= now) continue;
+      scheduledDates.push(candidate);
+      if (scheduledDates.length >= count) break;
+    }
+
+    cycleIndex += 1;
+  }
+
+  if (scheduledDates.length < count) {
+    throw new Error('Es konnten nicht genug zukuenftige Posting-Slots erzeugt werden.');
+  }
+
+  return scheduledDates;
+};
+
+const formatSchedulePreviewLabel = (value) => new Intl.DateTimeFormat('de-DE', {
+  weekday: 'short',
+  day: '2-digit',
+  month: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+}).format(value);
+
+const buildSubtitleSettingsPayload = (style) => {
+  const normalized = normalizeSubtitleStyleConfig(style || DEFAULT_SUBTITLE_STYLE);
+  return {
+    position: normalized.position,
+    y_position: normalized.yPosition,
+    font_size: normalized.fontSize,
+    font_family: normalized.fontFamily,
+    background_style: normalized.backgroundStyle,
+  };
+};
+
+const buildHookSettingsPayload = (style, hookText) => {
+  const normalized = normalizeHookStyleConfig(style || DEFAULT_HOOK_STYLE);
+  return {
+    text: hookText,
+    position: normalized.position,
+    horizontal_position: normalized.horizontalPosition,
+    x_position: normalized.xPosition,
+    y_position: normalized.yPosition,
+    text_align: normalized.textAlign,
+    size: normalized.size,
+    width_preset: normalized.widthPreset,
+    font_family: normalized.fontFamily,
+    background_style: normalized.backgroundStyle,
+  };
+};
+
 const normalizeOllamaModelName = (value) => {
   const trimmed = (value || '').trim();
   if (!trimmed) return '';
@@ -335,30 +509,40 @@ const normalizeSubtitleStyleConfig = (rawStyle = {}) => {
   const normalizedPositionInput = String(rawStyle.position || '').toLowerCase();
   const normalizedPosition = normalizedPositionInput === 'center' ? 'middle' : normalizedPositionInput;
   const fallbackYFromPosition = SUBTITLE_POSITION_PRESETS.find((item) => item.value === normalizedPosition)?.y;
-  const yPosition = rawStyle.yPosition !== undefined && rawStyle.yPosition !== null
-    ? clampPercent(rawStyle.yPosition, DEFAULT_SUBTITLE_STYLE.yPosition)
+  const rawYPosition = rawStyle.yPosition ?? rawStyle.y_position;
+  const rawFontSize = rawStyle.fontSize ?? rawStyle.font_size;
+  const rawFontFamily = rawStyle.fontFamily ?? rawStyle.font_family;
+  const rawBackgroundStyle = rawStyle.backgroundStyle ?? rawStyle.background_style;
+  const yPosition = rawYPosition !== undefined && rawYPosition !== null
+    ? clampPercent(rawYPosition, DEFAULT_SUBTITLE_STYLE.yPosition)
     : (fallbackYFromPosition ?? DEFAULT_SUBTITLE_STYLE.yPosition);
   return {
     ...DEFAULT_SUBTITLE_STYLE,
     ...rawStyle,
     position: resolveSubtitlePositionFromY(yPosition),
     yPosition,
-    fontSize: clampFontSize(rawStyle.fontSize, DEFAULT_SUBTITLE_STYLE.fontSize),
-    fontFamily: rawStyle.fontFamily || DEFAULT_SUBTITLE_STYLE.fontFamily,
-    backgroundStyle: rawStyle.backgroundStyle || DEFAULT_SUBTITLE_STYLE.backgroundStyle,
+    fontSize: clampFontSize(rawFontSize, DEFAULT_SUBTITLE_STYLE.fontSize),
+    fontFamily: rawFontFamily || DEFAULT_SUBTITLE_STYLE.fontFamily,
+    backgroundStyle: rawBackgroundStyle || DEFAULT_SUBTITLE_STYLE.backgroundStyle,
   };
 };
 
 const normalizeHookStyleConfig = (rawStyle = {}) => {
-  const rawHorizontal = String(rawStyle.horizontalPosition || '').toLowerCase();
+  const rawHorizontal = String(rawStyle.horizontalPosition || rawStyle.horizontal_position || '').toLowerCase();
   const rawVertical = String(rawStyle.position || '').toLowerCase();
   const derivedXFromHorizontal = HOOK_HORIZONTAL_PRESETS[rawHorizontal];
   const derivedYFromVertical = HOOK_VERTICAL_PRESETS[rawVertical];
-  const xPosition = rawStyle.xPosition !== undefined && rawStyle.xPosition !== null
-    ? clampPercent(rawStyle.xPosition, DEFAULT_HOOK_STYLE.xPosition)
+  const rawXPosition = rawStyle.xPosition ?? rawStyle.x_position;
+  const rawYPosition = rawStyle.yPosition ?? rawStyle.y_position;
+  const rawTextAlign = rawStyle.textAlign ?? rawStyle.text_align;
+  const rawWidthPreset = rawStyle.widthPreset ?? rawStyle.width_preset;
+  const rawFontFamily = rawStyle.fontFamily ?? rawStyle.font_family;
+  const rawBackgroundStyle = rawStyle.backgroundStyle ?? rawStyle.background_style;
+  const xPosition = rawXPosition !== undefined && rawXPosition !== null
+    ? clampPercent(rawXPosition, DEFAULT_HOOK_STYLE.xPosition)
     : clampPercent(derivedXFromHorizontal, DEFAULT_HOOK_STYLE.xPosition);
-  const yPosition = rawStyle.yPosition !== undefined && rawStyle.yPosition !== null
-    ? clampPercent(rawStyle.yPosition, DEFAULT_HOOK_STYLE.yPosition)
+  const yPosition = rawYPosition !== undefined && rawYPosition !== null
+    ? clampPercent(rawYPosition, DEFAULT_HOOK_STYLE.yPosition)
     : clampPercent(derivedYFromVertical, DEFAULT_HOOK_STYLE.yPosition);
   const horizontalPosition = ['left', 'center', 'right'].includes(rawHorizontal)
     ? rawHorizontal
@@ -367,7 +551,7 @@ const normalizeHookStyleConfig = (rawStyle = {}) => {
     ? rawVertical
     : (yPosition < 34 ? 'top' : yPosition > 66 ? 'bottom' : 'center');
   const widthValues = new Set(HOOK_WIDTH_OPTIONS.map((option) => option.value));
-  const textAlignInput = String(rawStyle.textAlign || '').toLowerCase();
+  const textAlignInput = String(rawTextAlign || '').toLowerCase();
   const textAlign = ['left', 'center', 'right'].includes(textAlignInput)
     ? textAlignInput
     : horizontalPosition;
@@ -380,9 +564,9 @@ const normalizeHookStyleConfig = (rawStyle = {}) => {
     position,
     textAlign,
     size: ['S', 'M', 'L'].includes(rawStyle.size) ? rawStyle.size : DEFAULT_HOOK_STYLE.size,
-    widthPreset: widthValues.has(rawStyle.widthPreset) ? rawStyle.widthPreset : DEFAULT_HOOK_STYLE.widthPreset,
-    fontFamily: rawStyle.fontFamily || DEFAULT_HOOK_STYLE.fontFamily,
-    backgroundStyle: rawStyle.backgroundStyle || DEFAULT_HOOK_STYLE.backgroundStyle,
+    widthPreset: widthValues.has(rawWidthPreset) ? rawWidthPreset : DEFAULT_HOOK_STYLE.widthPreset,
+    fontFamily: rawFontFamily || DEFAULT_HOOK_STYLE.fontFamily,
+    backgroundStyle: rawBackgroundStyle || DEFAULT_HOOK_STYLE.backgroundStyle,
   };
 };
 
@@ -702,6 +886,23 @@ function App() {
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isMobileLiveAnalysisOpen, setIsMobileLiveAnalysisOpen] = useState(false);
   const [processingStartedAt, setProcessingStartedAt] = useState(null);
+  const [clipDurationFilter, setClipDurationFilter] = useState('all');
+  const [showSelectedOnly, setShowSelectedOnly] = useState(false);
+  const [showUnpostedOnly, setShowUnpostedOnly] = useState(false);
+  const [selectedClipKeys, setSelectedClipKeys] = useState([]);
+  const [clipHookDrafts, setClipHookDrafts] = useState({});
+  const [bulkScheduleDate, setBulkScheduleDate] = useState(() => formatDateInputValue());
+  const [bulkScheduleSlots, setBulkScheduleSlots] = useState('12:00, 15:00, 18:00');
+  const [bulkScheduleDayInterval, setBulkScheduleDayInterval] = useState(1);
+  const [bulkFirstComment, setBulkFirstComment] = useState('');
+  const [isBulkSettingsOpen, setIsBulkSettingsOpen] = useState(false);
+  const [isBulkBarCollapsed, setIsBulkBarCollapsed] = useState(false);
+  const [isBulkOrderOpen, setIsBulkOrderOpen] = useState(false);
+  const [isBulkScheduling, setIsBulkScheduling] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState(null);
+  const [bulkStatus, setBulkStatus] = useState(null);
+  const [draggedSelectedClipKey, setDraggedSelectedClipKey] = useState('');
+  const [dragOverSelectedClipKey, setDragOverSelectedClipKey] = useState('');
 
   const handleClipPlay = (startTime) => {
     setSyncedTime(startTime);
@@ -750,6 +951,45 @@ function App() {
     }
     setProcessingStartedAt(null);
   }, [status, jobId]);
+
+  useEffect(() => {
+    if (!jobId) {
+      setShowSelectedOnly(false);
+      setShowUnpostedOnly(false);
+      setSelectedClipKeys([]);
+      setClipHookDrafts({});
+      setBulkProgress(null);
+      setBulkStatus(null);
+      setIsBulkSettingsOpen(false);
+      setIsBulkBarCollapsed(false);
+      setIsBulkOrderOpen(false);
+      setBulkScheduleDate(formatDateInputValue());
+      setBulkScheduleSlots('12:00, 15:00, 18:00');
+      setBulkScheduleDayInterval(1);
+      setBulkFirstComment('');
+      setDragOverSelectedClipKey('');
+      setDraggedSelectedClipKey('');
+      return;
+    }
+
+    const stored = readStoredJobUiState(jobId);
+    setClipDurationFilter(stored?.clipDurationFilter || 'all');
+    setShowSelectedOnly(!!stored?.showSelectedOnly);
+    setShowUnpostedOnly(!!stored?.showUnpostedOnly);
+    setSelectedClipKeys(Array.isArray(stored?.selectedClipKeys) ? stored.selectedClipKeys : []);
+    setClipHookDrafts(stored?.clipHookDrafts && typeof stored.clipHookDrafts === 'object' ? stored.clipHookDrafts : {});
+    setBulkProgress(null);
+    setBulkStatus(null);
+    setIsBulkSettingsOpen(!!stored?.isBulkSettingsOpen);
+    setIsBulkBarCollapsed(!!stored?.isBulkBarCollapsed);
+    setIsBulkOrderOpen(!!stored?.isBulkOrderOpen);
+    setBulkScheduleDate(stored?.bulkScheduleDate || formatDateInputValue());
+    setBulkScheduleSlots(stored?.bulkScheduleSlots || '12:00, 15:00, 18:00');
+    setBulkScheduleDayInterval(Math.max(1, Number(stored?.bulkScheduleDayInterval) || 1));
+    setBulkFirstComment(stored?.bulkFirstComment || '');
+    setDraggedSelectedClipKey('');
+    setDragOverSelectedClipKey('');
+  }, [jobId]);
 
   const setOllamaModel = (value) => {
     setOllamaModelState(normalizeOllamaModelName(value));
@@ -847,37 +1087,113 @@ function App() {
     setOverlayProfileStatus({ type: 'success', message: `Profil "${rawName}" gespeichert.` });
   };
 
-  const applySubtitleDefaultsToJob = (targetJobId, style) => {
+  const applySubtitleDefaultsToJob = async (targetJobId, style) => {
     if (!targetJobId) return;
-    setJobOverlayDefaults((prev) => {
-      const existing = prev[targetJobId] || buildOverlayDefaultsForProfile(activeOverlayProfileId);
-      return {
+    const existing = jobOverlayDefaults[targetJobId] || buildOverlayDefaultsForProfile(activeOverlayProfileId);
+    const nextDefaults = {
+      ...existing,
+      subtitleStyle: normalizeSubtitleStyleConfig(style || existing.subtitleStyle),
+    };
+
+    setJobOverlayDefaults((prev) => ({
+      ...prev,
+      [targetJobId]: nextDefaults,
+    }));
+    setResults((prev) => prev ? ({ ...prev, job_overlay_defaults: {
+      ...(prev.job_overlay_defaults || {}),
+      subtitle_style: buildSubtitleSettingsPayload(nextDefaults.subtitleStyle),
+      hook_style: prev.job_overlay_defaults?.hook_style,
+    } }) : prev);
+
+    try {
+      const res = await fetch(getApiUrl('/api/job/overlay-defaults'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_id: targetJobId,
+          subtitle_style: buildSubtitleSettingsPayload(nextDefaults.subtitleStyle),
+        }),
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      const persistedDefaults = data.job_overlay_defaults || {};
+      setJobOverlayDefaults((prev) => ({
         ...prev,
         [targetJobId]: {
-          ...existing,
-          subtitleStyle: normalizeSubtitleStyleConfig(style || existing.subtitleStyle),
+          ...nextDefaults,
+          subtitleStyle: normalizeSubtitleStyleConfig(persistedDefaults.subtitle_style || nextDefaults.subtitleStyle),
+          hookStyle: normalizeHookStyleConfig(persistedDefaults.hook_style || nextDefaults.hookStyle),
         },
-      };
-    });
+      }));
+      setBulkStatus({ type: 'success', message: 'Untertitel-Defaults fuer diesen Job gespeichert.' });
+    } catch (error) {
+      setBulkStatus({ type: 'error', message: `Job-Defaults konnten nicht gespeichert werden: ${error.message}` });
+    }
   };
 
-  const applyHookDefaultsToJob = (targetJobId, style) => {
+  const applyHookDefaultsToJob = async (targetJobId, style) => {
     if (!targetJobId) return;
-    setJobOverlayDefaults((prev) => {
-      const existing = prev[targetJobId] || buildOverlayDefaultsForProfile(activeOverlayProfileId);
-      return {
+    const existing = jobOverlayDefaults[targetJobId] || buildOverlayDefaultsForProfile(activeOverlayProfileId);
+    const nextDefaults = {
+      ...existing,
+      hookStyle: normalizeHookStyleConfig(style || existing.hookStyle),
+    };
+
+    setJobOverlayDefaults((prev) => ({
+      ...prev,
+      [targetJobId]: nextDefaults,
+    }));
+    setResults((prev) => prev ? ({ ...prev, job_overlay_defaults: {
+      ...(prev.job_overlay_defaults || {}),
+      subtitle_style: prev.job_overlay_defaults?.subtitle_style,
+      hook_style: buildHookSettingsPayload(nextDefaults.hookStyle, 'Template'),
+    } }) : prev);
+
+    try {
+      const res = await fetch(getApiUrl('/api/job/overlay-defaults'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_id: targetJobId,
+          hook_style: buildHookSettingsPayload(nextDefaults.hookStyle, 'Template'),
+        }),
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      const persistedDefaults = data.job_overlay_defaults || {};
+      setJobOverlayDefaults((prev) => ({
         ...prev,
         [targetJobId]: {
-          ...existing,
-          hookStyle: normalizeHookStyleConfig(style || existing.hookStyle),
+          ...nextDefaults,
+          subtitleStyle: normalizeSubtitleStyleConfig(persistedDefaults.subtitle_style || nextDefaults.subtitleStyle),
+          hookStyle: normalizeHookStyleConfig(persistedDefaults.hook_style || nextDefaults.hookStyle),
         },
-      };
-    });
+      }));
+      setBulkStatus({ type: 'success', message: 'Hook-Defaults fuer diesen Job gespeichert.' });
+    } catch (error) {
+      setBulkStatus({ type: 'error', message: `Job-Defaults konnten nicht gespeichert werden: ${error.message}` });
+    }
   };
 
   const activeJobOverlayDefaults = jobId
     ? (jobOverlayDefaults[jobId] || buildOverlayDefaultsForProfile(activeOverlayProfileId))
     : buildOverlayDefaultsForProfile(activeOverlayProfileId);
+
+  useEffect(() => {
+    if (!jobId || !results?.job_overlay_defaults) return;
+    const persistedDefaults = results.job_overlay_defaults;
+    setJobOverlayDefaults((prev) => {
+      const existing = prev[jobId] || buildOverlayDefaultsForProfile(activeOverlayProfileId);
+      return {
+        ...prev,
+        [jobId]: {
+          ...existing,
+          subtitleStyle: normalizeSubtitleStyleConfig(persistedDefaults.subtitle_style || existing.subtitleStyle),
+          hookStyle: normalizeHookStyleConfig(persistedDefaults.hook_style || existing.hookStyle),
+        },
+      };
+    });
+  }, [jobId, results?.job_overlay_defaults, activeOverlayProfileId]);
 
   const getClipVariantKey = (activeJobId, clip, fallbackIndex) => `${activeJobId}:${clip.clip_index ?? fallbackIndex}`;
 
@@ -910,6 +1226,345 @@ function App() {
       };
     });
     updateClipVideoOverride(activeJobId, updatedClip, updatedClip.clip_index ?? 0, null);
+  };
+
+  useEffect(() => {
+    if (!jobId || !results?.clips?.length) return;
+    setClipHookDrafts((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      results.clips.forEach((clip, index) => {
+        const key = buildClipSelectionKey(jobId, clip, index);
+        if (next[key] === undefined) {
+          next[key] = resolveClipHookDraftText(clip);
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [jobId, results?.clips]);
+
+  const clipEntries = (results?.clips || []).map((clip, index) => {
+    const key = buildClipSelectionKey(jobId || 'job', clip, index);
+    return {
+      clip,
+      index,
+      key,
+      durationSeconds: resolveClipDurationSeconds(clip),
+      hookDraftText: clipHookDrafts[key] ?? resolveClipHookDraftText(clip),
+    };
+  });
+
+  const clipEntryMap = new Map(clipEntries.map((entry) => [entry.key, entry]));
+
+  const availableClipKeysSignature = clipEntries.map((entry) => entry.key).join('|');
+
+  useEffect(() => {
+    if (!selectedClipKeys.length && !Object.keys(clipHookDrafts).length) return;
+    const availableKeys = new Set(clipEntries.map((entry) => entry.key));
+    setSelectedClipKeys((prev) => {
+      const next = prev.filter((key) => availableKeys.has(key));
+      return next.length === prev.length ? prev : next;
+    });
+    setClipHookDrafts((prev) => {
+      let changed = false;
+      const next = Object.entries(prev).reduce((acc, [key, value]) => {
+        if (!availableKeys.has(key)) {
+          changed = true;
+          return acc;
+        }
+        acc[key] = value;
+        return acc;
+      }, {});
+      return changed ? next : prev;
+    });
+  }, [availableClipKeysSignature]);
+
+  useEffect(() => {
+    if (showSelectedOnly && !selectedClipKeys.length) {
+      setShowSelectedOnly(false);
+    }
+  }, [showSelectedOnly, selectedClipKeys.length]);
+
+  const filteredClipEntries = clipEntries.filter((entry) => {
+    if (clipDurationFilter === 'over_1m' && entry.durationSeconds <= 60) return false;
+    if (clipDurationFilter === 'under_1m' && entry.durationSeconds > 60) return false;
+    if (showSelectedOnly && !selectedClipKeys.includes(entry.key)) return false;
+    if (showUnpostedOnly && isClipPostedOrQueued(entry.clip)) return false;
+    return true;
+  });
+
+  const selectedClipEntries = selectedClipKeys
+    .map((key) => clipEntryMap.get(key))
+    .filter(Boolean);
+
+  const toggleClipSelection = (clip, index) => {
+    const key = buildClipSelectionKey(jobId || 'job', clip, index);
+    setSelectedClipKeys((prev) => (
+      prev.includes(key)
+        ? prev.filter((item) => item !== key)
+        : [...prev, key]
+    ));
+  };
+
+  const updateClipHookDraft = (clip, index, value) => {
+    const key = buildClipSelectionKey(jobId || 'job', clip, index);
+    setClipHookDrafts((prev) => ({
+      ...prev,
+      [key]: value,
+    }));
+  };
+
+  const selectAllVisibleClips = () => {
+    const visibleKeys = filteredClipEntries.map((entry) => entry.key);
+    if (!visibleKeys.length) return;
+    setSelectedClipKeys((prev) => {
+      const next = [...prev];
+      visibleKeys.forEach((key) => {
+        if (!next.includes(key)) next.push(key);
+      });
+      return next;
+    });
+  };
+
+  const moveSelectedClipKey = (sourceKey, targetKey) => {
+    if (!sourceKey || !targetKey || sourceKey === targetKey) return;
+    setSelectedClipKeys((prev) => {
+      const fromIndex = prev.indexOf(sourceKey);
+      const toIndex = prev.indexOf(targetKey);
+      if (fromIndex === -1 || toIndex === -1) return prev;
+      return moveArrayItem(prev, fromIndex, toIndex);
+    });
+  };
+
+  const handleSelectedClipDragStart = (event, clipKey) => {
+    setDraggedSelectedClipKey(clipKey);
+    setDragOverSelectedClipKey('');
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', clipKey);
+  };
+
+  const handleSelectedClipDragOver = (event, clipKey) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    if (dragOverSelectedClipKey !== clipKey) {
+      setDragOverSelectedClipKey(clipKey);
+    }
+  };
+
+  const handleSelectedClipDrop = (event, targetKey) => {
+    event.preventDefault();
+    const sourceKey = event.dataTransfer.getData('text/plain') || draggedSelectedClipKey;
+    moveSelectedClipKey(sourceKey, targetKey);
+    setDraggedSelectedClipKey('');
+    setDragOverSelectedClipKey('');
+  };
+
+  const handleSelectedClipDragEnd = () => {
+    setDraggedSelectedClipKey('');
+    setDragOverSelectedClipKey('');
+  };
+
+  const selectedPlatformsForBulk = Object.keys(socialPostSettings.platforms || {}).filter((platform) => socialPostSettings.platforms[platform]);
+
+  useEffect(() => {
+    if (!jobId) return;
+    writeStoredJobUiState(jobId, {
+      clipDurationFilter,
+      showSelectedOnly,
+      showUnpostedOnly,
+      selectedClipKeys,
+      clipHookDrafts,
+      bulkScheduleDate,
+      bulkScheduleSlots,
+      bulkScheduleDayInterval,
+      bulkFirstComment,
+      isBulkSettingsOpen,
+      isBulkBarCollapsed,
+      isBulkOrderOpen,
+    });
+  }, [
+    jobId,
+    clipDurationFilter,
+    showSelectedOnly,
+    showUnpostedOnly,
+    selectedClipKeys,
+    clipHookDrafts,
+    bulkScheduleDate,
+    bulkScheduleSlots,
+    bulkScheduleDayInterval,
+    bulkFirstComment,
+    isBulkSettingsOpen,
+    isBulkBarCollapsed,
+    isBulkOrderOpen,
+  ]);
+
+  let bulkSchedulePreview = [];
+  let bulkSchedulePreviewError = '';
+  try {
+    if (selectedClipKeys.length >= 2) {
+      bulkSchedulePreview = buildScheduledPostDates({
+        slotText: bulkScheduleSlots,
+        count: Math.min(selectedClipKeys.length, 4),
+        startDate: bulkScheduleDate,
+        dayInterval: bulkScheduleDayInterval,
+      });
+    }
+  } catch (error) {
+    bulkSchedulePreviewError = error.message;
+  }
+
+  const showBulkActionsBar = activeTab === 'dashboard' && status === 'complete' && selectedClipKeys.length >= 2;
+
+  const handleBulkRenderAndSchedule = async () => {
+    if (!jobId) {
+      setBulkStatus({ type: 'error', message: 'Kein aktiver Job geladen.' });
+      return;
+    }
+    if (selectedClipEntries.length < 2) {
+      setBulkStatus({ type: 'error', message: 'Bitte mindestens zwei Shorts auswaehlen.' });
+      return;
+    }
+    if (!uploadPostKey || !uploadUserId) {
+      setBulkStatus({ type: 'error', message: 'Upload-Post API-Key oder Profil fehlt.' });
+      return;
+    }
+    if (!selectedPlatformsForBulk.length) {
+      setBulkStatus({ type: 'error', message: 'Bitte mindestens eine Plattform auswaehlen.' });
+      return;
+    }
+    if (selectedPlatformsForBulk.includes('pinterest') && !(socialPostSettings.pinterestBoardId || '').trim()) {
+      setBulkStatus({ type: 'error', message: 'Pinterest benoetigt eine Board-ID.' });
+      return;
+    }
+
+    let scheduledDates;
+    try {
+      scheduledDates = buildScheduledPostDates({
+        slotText: bulkScheduleSlots,
+        count: selectedClipEntries.length,
+        startDate: bulkScheduleDate,
+        dayInterval: bulkScheduleDayInterval,
+      });
+    } catch (error) {
+      setBulkStatus({ type: 'error', message: error.message });
+      return;
+    }
+
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    const failedSelections = [];
+    const succeededSelections = [];
+
+    setIsBulkScheduling(true);
+    setBulkStatus(null);
+    setIsBulkSettingsOpen(false);
+
+    for (let position = 0; position < selectedClipEntries.length; position += 1) {
+      const entry = selectedClipEntries[position];
+      const hookText = String(entry.hookDraftText || '').trim();
+      const clipLabel = `Clip ${entry.index + 1}`;
+
+      if (!hookText) {
+        failedSelections.push({ key: entry.key, label: clipLabel, error: 'Hook-Text ist leer.' });
+        continue;
+      }
+
+      try {
+        setBulkProgress({
+          current: position + 1,
+          total: selectedClipEntries.length,
+          label: clipLabel,
+          phase: 'render',
+        });
+        setClipHookDrafts((prev) => ({ ...prev, [entry.key]: hookText }));
+
+        const renderRes = await fetch(getApiUrl('/api/clip/render'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            job_id: jobId,
+            clip_index: entry.clip.clip_index ?? entry.index,
+            apply_tight_edit: true,
+            tight_edit_preset: tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset,
+            apply_subtitles: true,
+            subtitle_settings: buildSubtitleSettingsPayload(activeJobOverlayDefaults.subtitleStyle),
+            apply_hook: true,
+            hook_settings: buildHookSettingsPayload(activeJobOverlayDefaults.hookStyle, hookText),
+          }),
+        });
+
+        if (!renderRes.ok) {
+          throw new Error(await readErrorMessage(renderRes));
+        }
+
+        const renderData = await renderRes.json();
+        const renderedClip = renderData.clip || entry.clip;
+        updateClipResult(jobId, renderedClip);
+
+        setBulkProgress({
+          current: position + 1,
+          total: selectedClipEntries.length,
+          label: clipLabel,
+          phase: 'schedule',
+        });
+
+        const postRes = await fetch(getApiUrl('/api/social/post'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            job_id: jobId,
+            clip_index: renderedClip.clip_index ?? entry.index,
+            api_key: uploadPostKey,
+            user_id: uploadUserId,
+            platforms: selectedPlatformsForBulk,
+            first_comment: bulkFirstComment,
+            scheduled_date: scheduledDates[position].toISOString(),
+            timezone,
+            instagram_share_mode: socialPostSettings.instagramShareMode,
+            tiktok_post_mode: socialPostSettings.tiktokPostMode,
+            tiktok_is_aigc: socialPostSettings.tiktokIsAigc,
+            facebook_page_id: socialPostSettings.facebookPageId,
+            pinterest_board_id: socialPostSettings.pinterestBoardId,
+          }),
+        });
+
+        if (!postRes.ok) {
+          throw new Error(await readErrorMessage(postRes));
+        }
+
+        const postData = await postRes.json();
+        if (postData.clip) {
+          updateClipResult(jobId, postData.clip);
+        }
+        succeededSelections.push(entry.key);
+      } catch (error) {
+        failedSelections.push({
+          key: entry.key,
+          label: clipLabel,
+          error: error.message || 'Unbekannter Fehler',
+        });
+      }
+    }
+
+    setIsBulkScheduling(false);
+    setBulkProgress(null);
+
+    if (failedSelections.length) {
+      setSelectedClipKeys(failedSelections.map((entry) => entry.key));
+      setBulkStatus({
+        type: succeededSelections.length ? 'warning' : 'error',
+        message: succeededSelections.length
+          ? `${succeededSelections.length} Shorts geplant, ${failedSelections.length} fehlgeschlagen. ${failedSelections.slice(0, 2).map((entry) => `${entry.label}: ${entry.error}`).join(' | ')}`
+          : failedSelections.slice(0, 3).map((entry) => `${entry.label}: ${entry.error}`).join(' | '),
+      });
+      return;
+    }
+
+    setSelectedClipKeys([]);
+    setBulkStatus({
+      type: 'success',
+      message: `${succeededSelections.length} Shorts gerendert und fuer die naechsten Slots eingeplant.`,
+    });
   };
 
   const buildProviderHeaders = (includeJson = false) => {
@@ -2664,27 +3319,127 @@ function App() {
 
               {/* Right Panel: Results Grid */}
               <div className={`${status === 'complete' ? 'w-full md:w-[70%] lg:w-[75%]' : 'w-full md:w-[45%] lg:w-[40%]'} flex-1 min-h-0 md:h-full flex flex-col bg-background p-4 md:p-6 transition-all duration-700 ease-in-out`}>
-                <h2 className="text-lg font-semibold mb-6 flex items-center gap-2 shrink-0">
-                  <Sparkles className="text-yellow-400" size={20} />
-                  Generierte Shorts
-                  {results?.clips?.length > 0 && (
-                    <span className="text-xs bg-white/10 text-white px-2 py-0.5 rounded-full ml-auto">
-                      {results.clips.length} Clips
-                    </span>
-                  )}
-                  {results?.cost_analysis && (
-                    <span className="text-xs bg-green-500/10 border border-green-500/20 text-green-400 px-2 py-0.5 rounded-full ml-2" title={`Input: ${results.cost_analysis.input_tokens} | Output: ${results.cost_analysis.output_tokens}`}>
-                      ${results.cost_analysis.total_cost.toFixed(5)}
-                    </span>
-                  )}
-                </h2>
+                <div className="mb-4 flex flex-col gap-3 shrink-0">
+                  <div className="flex flex-wrap items-start gap-3">
+                    <div className="min-w-0">
+                      <h2 className="text-lg font-semibold flex items-center gap-2">
+                        <Sparkles className="text-yellow-400" size={20} />
+                        Generierte Shorts
+                      </h2>
+                      <p className="mt-1 text-xs text-zinc-500">
+                        Beste Clips filtern, Hooks anpassen und mehrere Shorts in einem Rutsch rendern und planen.
+                      </p>
+                    </div>
+                    <div className="ml-auto flex flex-wrap items-center gap-2">
+                      {results?.clips?.length > 0 && (
+                        <span className="text-xs bg-white/10 text-white px-2 py-0.5 rounded-full">
+                          {filteredClipEntries.length}/{results.clips.length} Clips
+                        </span>
+                      )}
+                      {selectedClipKeys.length > 0 && (
+                        <span className="text-xs bg-fuchsia-500/10 border border-fuchsia-500/20 text-fuchsia-200 px-2 py-0.5 rounded-full">
+                          {selectedClipKeys.length} ausgewaehlt
+                        </span>
+                      )}
+                      {results?.cost_analysis && (
+                        <span className="text-xs bg-green-500/10 border border-green-500/20 text-green-400 px-2 py-0.5 rounded-full" title={`Input: ${results.cost_analysis.input_tokens} | Output: ${results.cost_analysis.output_tokens}`}>
+                          ${results.cost_analysis.total_cost.toFixed(5)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
 
-                <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar touch-scroll p-1">
+                  {results?.clips?.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center gap-2 text-[11px] uppercase tracking-wide text-zinc-500">
+                        <ListFilter size={13} />
+                        Dauer
+                      </span>
+                      {[
+                        { value: 'all', label: 'Alle' },
+                        { value: 'under_1m', label: 'Unter 1 Min' },
+                        { value: 'over_1m', label: 'Ueber 1 Min' },
+                      ].map((option) => (
+                        <button
+                          key={option.value}
+                          type="button"
+                          onClick={() => setClipDurationFilter(option.value)}
+                          className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${
+                            clipDurationFilter === option.value
+                              ? 'border-primary/40 bg-primary/15 text-white'
+                              : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
+                          }`}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => setShowSelectedOnly((prev) => !prev)}
+                        disabled={!selectedClipKeys.length}
+                        className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${
+                          showSelectedOnly
+                            ? 'border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-100'
+                            : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
+                        } disabled:cursor-not-allowed disabled:opacity-40`}
+                      >
+                        {showSelectedOnly ? 'Alle anzeigen' : 'Nur Auswahl'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowUnpostedOnly((prev) => !prev)}
+                        className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${
+                          showUnpostedOnly
+                            ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100'
+                            : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
+                        }`}
+                      >
+                        {showUnpostedOnly ? 'Alle Posting-States' : 'Nicht gepostet'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={selectAllVisibleClips}
+                        disabled={!filteredClipEntries.length}
+                        className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Alle sichtbaren auswaehlen
+                      </button>
+                      {selectedClipKeys.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setSelectedClipKeys([])}
+                          className="ml-auto rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/10 hover:text-white"
+                        >
+                          Auswahl loeschen
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {bulkStatus?.message && !showBulkActionsBar && (
+                    <div className={`rounded-xl border px-3 py-2 text-sm ${
+                      bulkStatus.type === 'success'
+                        ? 'border-green-500/20 bg-green-500/10 text-green-200'
+                        : bulkStatus.type === 'warning'
+                          ? 'border-amber-500/20 bg-amber-500/10 text-amber-100'
+                          : 'border-red-500/20 bg-red-500/10 text-red-200'
+                    }`}>
+                      {bulkStatus.message}
+                    </div>
+                  )}
+                </div>
+
+                <div className={`flex-1 min-h-0 overflow-y-auto custom-scrollbar touch-scroll p-1 ${
+                  showBulkActionsBar
+                    ? (isBulkBarCollapsed ? 'pb-32 md:pb-28' : 'pb-[30rem] md:pb-[24rem]')
+                    : ''
+                }`}>
                   {results && results.clips && results.clips.length > 0 ? (
+                    filteredClipEntries.length > 0 ? (
                     <div className={`grid gap-4 pb-10 ${status === 'complete' ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1'}`}>
-                      {results.clips.map((clip, i) => (
+                      {filteredClipEntries.map(({ clip, index: i, key, hookDraftText }) => (
                         <ResultCard
-                          key={`${jobId || 'job'}:${clip.clip_index ?? i}`}
+                          key={key}
                           clip={clip}
                           index={i}
                           jobId={jobId}
@@ -2707,9 +3462,27 @@ function App() {
                           onClipUpdated={(updatedClip) => updateClipResult(jobId, updatedClip)}
                           onPlay={(time) => handleClipPlay(time)}
                           onPause={handleClipPause}
+                          hookDraftText={hookDraftText}
+                          onHookDraftChange={(value) => updateClipHookDraft(clip, i, value)}
+                          isSelected={selectedClipKeys.includes(key)}
+                          onToggleSelect={() => toggleClipSelection(clip, i)}
                         />
                       ))}
                     </div>
+                    ) : (
+                      <div className="h-full flex flex-col items-center justify-center text-zinc-500 space-y-3 opacity-80">
+                        <div className="w-12 h-12 rounded-full border border-white/10 bg-white/5 flex items-center justify-center">
+                          <ListFilter size={18} />
+                        </div>
+                        <p className="text-sm">
+                          {showSelectedOnly
+                            ? 'In der aktuellen Auswahl ist kein Clip sichtbar.'
+                            : showUnpostedOnly
+                              ? 'Kein Clip passt zum Filter Nicht gepostet.'
+                            : 'Kein Clip passt zum aktiven Filter.'}
+                        </p>
+                      </div>
+                    )
                   ) : (
                     status === 'processing' ? (
                       <div className="h-full flex flex-col items-center justify-center text-zinc-500 space-y-4 opacity-50">
@@ -2724,6 +3497,327 @@ function App() {
                   )}
                 </div>
               </div>
+
+              {showBulkActionsBar && (
+                <div className="fixed inset-x-3 bottom-3 z-[3500] md:inset-x-6">
+                  <div className="mx-auto w-full max-w-6xl rounded-2xl border border-white/10 bg-[#121214]/95 backdrop-blur-xl shadow-2xl shadow-black/40">
+                    <div className="flex flex-col gap-4 p-4 md:p-5">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="rounded-full border border-fuchsia-500/30 bg-fuchsia-500/10 px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-fuchsia-200">
+                              {selectedClipKeys.length} Shorts ausgewaehlt
+                            </span>
+                            {bulkProgress && (
+                              <span className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-cyan-200">
+                              {bulkProgress.current}/{bulkProgress.total} {bulkProgress.phase === 'render' ? 'Render' : 'Schedule'}
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-2 text-xs text-zinc-400">
+                            {isBulkBarCollapsed
+                              ? 'Multi-Post-Leiste minimiert. Erweitern, um Reihenfolge, Timing und Posting-Optionen zu bearbeiten.'
+                              : 'Quick-Render nutzt globale Untertitel- und Hook-Vorgaben. Die Reihenfolge-Liste bestimmt die Posting-Reihenfolge.'}
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setIsBulkOrderOpen((prev) => !prev)}
+                            className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200 hover:bg-white/10"
+                          >
+                            <GripVertical size={15} />
+                            {isBulkOrderOpen ? 'Reihenfolge zu' : 'Reihenfolge'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setIsBulkSettingsOpen((prev) => !prev)}
+                            className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200 hover:bg-white/10"
+                          >
+                            <Settings size={15} />
+                            Einstellungen
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedClipKeys([])}
+                            disabled={isBulkScheduling}
+                            className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-300 hover:bg-white/10 disabled:opacity-50"
+                          >
+                            <X size={15} />
+                            Auswahl leeren
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleBulkRenderAndSchedule}
+                            disabled={isBulkScheduling}
+                            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-fuchsia-600 to-pink-600 px-4 py-2.5 text-sm font-semibold text-white hover:from-fuchsia-500 hover:to-pink-500 disabled:opacity-60"
+                          >
+                            {isBulkScheduling ? <Loader2 size={16} className="animate-spin" /> : <Share2 size={16} />}
+                            {isBulkScheduling ? 'Bearbeite Auswahl...' : 'Rendern & planen'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setIsBulkBarCollapsed((prev) => !prev)}
+                            className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200 hover:bg-white/10"
+                          >
+                            <ChevronDown size={15} className={`transition-transform ${isBulkBarCollapsed ? 'rotate-180' : ''}`} />
+                            {isBulkBarCollapsed ? 'Erweitern' : 'Minimieren'}
+                          </button>
+                        </div>
+                      </div>
+
+                      {!isBulkBarCollapsed && isBulkOrderOpen && (
+                        <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                          <div className="mb-2 flex items-center justify-between gap-2">
+                            <label className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                              Posting-Reihenfolge
+                            </label>
+                            <span className="text-[11px] text-zinc-500">Vertikal ziehen und ablegen</span>
+                          </div>
+                          <div className="max-h-56 space-y-2 overflow-y-auto custom-scrollbar pr-1">
+                            {selectedClipEntries.map((entry, orderIndex) => (
+                              <div
+                                key={entry.key}
+                                draggable
+                                onDragStart={(event) => handleSelectedClipDragStart(event, entry.key)}
+                                onDragOver={(event) => handleSelectedClipDragOver(event, entry.key)}
+                                onDrop={(event) => handleSelectedClipDrop(event, entry.key)}
+                                onDragEnd={handleSelectedClipDragEnd}
+                                className={`cursor-grab rounded-xl border px-3 py-2 transition-colors active:cursor-grabbing ${
+                                  draggedSelectedClipKey === entry.key
+                                    ? 'border-fuchsia-500/40 bg-fuchsia-500/15 text-fuchsia-100'
+                                    : dragOverSelectedClipKey === entry.key
+                                      ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-100'
+                                      : 'border-white/10 bg-white/5 text-zinc-200 hover:bg-white/10'
+                                }`}
+                              >
+                                <div className="flex items-center gap-3">
+                                  <GripVertical size={15} className="shrink-0 text-zinc-500" />
+                                  <span className="rounded-full bg-black/40 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">
+                                    {orderIndex + 1}
+                                  </span>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="truncate text-sm font-medium text-white">
+                                      {entry.clip.video_title_for_youtube_short || `Clip ${entry.index + 1}`}
+                                    </div>
+                                    <div className="text-[11px] text-zinc-500">
+                                      Clip {entry.index + 1}
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {!isBulkBarCollapsed && (
+                        <div className="grid gap-3 md:grid-cols-[180px_140px_minmax(0,1fr)] xl:grid-cols-[180px_140px_minmax(0,1fr)_minmax(0,1fr)]">
+                        <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                          <label className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                            <CalendarDays size={14} />
+                            Startdatum
+                          </label>
+                          <input
+                            type="date"
+                            value={bulkScheduleDate}
+                            min={formatDateInputValue()}
+                            onChange={(e) => setBulkScheduleDate(e.target.value)}
+                            className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:border-primary/50"
+                          />
+                        </div>
+
+                        <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                          <label className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                            <CalendarDays size={14} />
+                            Alle X Tage
+                          </label>
+                          <input
+                            type="number"
+                            min="1"
+                            step="1"
+                            value={bulkScheduleDayInterval}
+                            onChange={(e) => setBulkScheduleDayInterval(Math.max(1, Number(e.target.value) || 1))}
+                            className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:border-primary/50"
+                          />
+                          <p className="mt-2 text-[11px] text-zinc-500">
+                            `1` = taeglich, `3` = jeder dritte Tag.
+                          </p>
+                        </div>
+
+                        <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                          <label className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                            <Clock3 size={14} />
+                            Posting-Slots pro Tag
+                          </label>
+                          <input
+                            type="text"
+                            value={bulkScheduleSlots}
+                            onChange={(e) => setBulkScheduleSlots(e.target.value)}
+                            className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:border-primary/50"
+                            placeholder="12:00, 15:00, 18:00"
+                          />
+                          <p className="mt-2 text-[11px] text-zinc-500">
+                            Kommagetrennt, Format `HH:MM`. Nach jedem Tagesblock springt der Plan um das eingestellte Tagesintervall weiter.
+                          </p>
+                        </div>
+
+                        <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                            Nächste Slots
+                          </div>
+                          {bulkSchedulePreviewError ? (
+                            <p className="text-[11px] text-red-300">{bulkSchedulePreviewError}</p>
+                          ) : bulkSchedulePreview.length ? (
+                            <div className="flex flex-wrap gap-2">
+                              {bulkSchedulePreview.map((slot) => (
+                                <span key={slot.toISOString()} className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-zinc-200">
+                                  {formatSchedulePreviewLabel(slot)}
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-[11px] text-zinc-500">Waehle mindestens zwei Shorts aus.</p>
+                          )}
+                        </div>
+                        </div>
+                      )}
+
+                      {!isBulkBarCollapsed && isBulkSettingsOpen && (
+                        <div className="rounded-2xl border border-white/10 bg-black/30 p-4">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div>
+                              <h3 className="text-sm font-semibold text-white">Posting-Einstellungen</h3>
+                              <p className="mt-1 text-xs text-zinc-500">
+                                Diese Optionen werden fuer alle ausgewaehlten Shorts und alle kuenftigen Bulk-Posts verwendet.
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setIsBulkSettingsOpen(false)}
+                              className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/10"
+                            >
+                              Schliessen
+                            </button>
+                          </div>
+
+                          <div className="mt-4 grid gap-4 xl:grid-cols-[1.2fr_1fr]">
+                            <div className="space-y-4">
+                              <div>
+                                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-zinc-400">Plattformen</label>
+                                <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
+                                  {SOCIAL_PLATFORM_OPTIONS.map((platform) => (
+                                    <label key={platform.key} className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200">
+                                      <input
+                                        type="checkbox"
+                                        checked={!!socialPostSettings.platforms[platform.key]}
+                                        onChange={(e) => setSocialPostSettings((prev) => ({
+                                          ...prev,
+                                          platforms: {
+                                            ...prev.platforms,
+                                            [platform.key]: e.target.checked,
+                                          },
+                                        }))}
+                                        className="h-4 w-4 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary"
+                                      />
+                                      {platform.label}
+                                    </label>
+                                  ))}
+                                </div>
+                              </div>
+
+                              <div>
+                                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-zinc-400">Erster Kommentar</label>
+                                <textarea
+                                  value={bulkFirstComment}
+                                  onChange={(e) => setBulkFirstComment(e.target.value)}
+                                  rows={3}
+                                  className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:border-primary/50"
+                                  placeholder="Optionaler erster Kommentar fuer alle Posts"
+                                />
+                              </div>
+                            </div>
+
+                            <div className="space-y-4">
+                              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
+                                <div>
+                                  <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-zinc-400">Instagram-Modus</label>
+                                  <select
+                                    value={socialPostSettings.instagramShareMode}
+                                    onChange={(e) => setSocialPostSettings((prev) => ({ ...prev, instagramShareMode: e.target.value }))}
+                                    className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:border-primary/50"
+                                  >
+                                    {INSTAGRAM_SHARE_MODES.map((mode) => (
+                                      <option key={mode.value} value={mode.value}>{mode.label}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-zinc-400">TikTok-Modus</label>
+                                  <select
+                                    value={socialPostSettings.tiktokPostMode}
+                                    onChange={(e) => setSocialPostSettings((prev) => ({ ...prev, tiktokPostMode: e.target.value }))}
+                                    className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:border-primary/50"
+                                  >
+                                    {TIKTOK_POST_MODES.map((mode) => (
+                                      <option key={mode.value} value={mode.value}>{mode.label}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                              </div>
+
+                              <label className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/5 px-3 py-3 text-sm text-zinc-200">
+                                <input
+                                  type="checkbox"
+                                  checked={!!socialPostSettings.tiktokIsAigc}
+                                  onChange={(e) => setSocialPostSettings((prev) => ({ ...prev, tiktokIsAigc: e.target.checked }))}
+                                  className="h-4 w-4 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary"
+                                />
+                                TikTok als KI-generiert markieren
+                              </label>
+
+                              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
+                                <div>
+                                  <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-zinc-400">Facebook-Page-ID</label>
+                                  <input
+                                    type="text"
+                                    value={socialPostSettings.facebookPageId}
+                                    onChange={(e) => setSocialPostSettings((prev) => ({ ...prev, facebookPageId: e.target.value }))}
+                                    className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:border-primary/50"
+                                    placeholder="Optional"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-zinc-400">Pinterest-Board-ID</label>
+                                  <input
+                                    type="text"
+                                    value={socialPostSettings.pinterestBoardId}
+                                    onChange={(e) => setSocialPostSettings((prev) => ({ ...prev, pinterestBoardId: e.target.value }))}
+                                    className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:border-primary/50"
+                                    placeholder="Fuer Pinterest erforderlich"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {bulkStatus?.message && (
+                        <div className={`rounded-xl border px-3 py-2 text-sm ${
+                          bulkStatus.type === 'success'
+                            ? 'border-green-500/20 bg-green-500/10 text-green-200'
+                            : bulkStatus.type === 'warning'
+                              ? 'border-amber-500/20 bg-amber-500/10 text-amber-100'
+                              : 'border-red-500/20 bg-red-500/10 text-red-200'
+                        }`}>
+                          {bulkStatus.message}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
 
             </div>
           )}

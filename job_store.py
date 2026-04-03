@@ -239,6 +239,7 @@ def build_job_result(output_dir: str, job_id: str) -> Optional[Dict[str, Any]]:
                 "clips": ready_clips,
                 "cost_analysis": data.get("cost_analysis"),
                 "generation_mode": data.get("generation_mode", "clips"),
+                "job_overlay_defaults": data.get("job_overlay_defaults"),
                 "resume_available": resume_available,
             }
 
@@ -265,6 +266,7 @@ def build_job_result(output_dir: str, job_id: str) -> Optional[Dict[str, Any]]:
         "clips": clips,
         "cost_analysis": None,
         "generation_mode": "legacy",
+        "job_overlay_defaults": None,
         "resume_available": False,
     }
 

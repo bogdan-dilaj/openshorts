@@ -3,6 +3,9 @@ services:
     build: .
     container_name: openshorts-backend
     network_mode: host
+    dns:
+      - "${DOCKER_DNS_1:-1.1.1.1}"
+      - "${DOCKER_DNS_2:-8.8.8.8}"
     environment:
       MAX_CONCURRENT_JOBS: "${MAX_CONCURRENT_JOBS:-1}"
       JOB_NICE_LEVEL: "${JOB_NICE_LEVEL:-10}"
@@ -13,6 +16,13 @@ services:
       WHISPER_DEVICE: "cpu"
       WHISPER_MODEL: "${WHISPER_MODEL:-distil-large-v3}"
       WHISPER_CPU_MODEL: "${WHISPER_CPU_MODEL:-distil-large-v3}"
+      WHISPER_MODEL_DE: "${WHISPER_MODEL_DE:-primeline/distil-whisper-large-v3-german}"
+      WHISPER_CPU_MODEL_DE: "${WHISPER_CPU_MODEL_DE:-primeline/distil-whisper-large-v3-german}"
+      WHISPER_MODEL_NON_EN: "${WHISPER_MODEL_NON_EN:-large-v3}"
+      WHISPER_CPU_MODEL_NON_EN: "${WHISPER_CPU_MODEL_NON_EN:-large-v3}"
+      WHISPER_HF_CONVERT_ENABLED: "${WHISPER_HF_CONVERT_ENABLED:-true}"
+      WHISPER_HF_CONVERT_QUANTIZATION: "${WHISPER_HF_CONVERT_QUANTIZATION:-}"
+      WHISPER_HF_CONVERT_CACHE_DIR: "${WHISPER_HF_CONVERT_CACHE_DIR:-/tmp/.cache/whisper_ct2}"
       WHISPER_CPU_AUTO_DISTIL: "${WHISPER_CPU_AUTO_DISTIL:-true}"
       WHISPER_MODEL_FALLBACKS: "${WHISPER_MODEL_FALLBACKS:-medium,small,base}"
       WHISPER_COMPUTE_TYPE: "int8"
@@ -55,6 +65,9 @@ services:
     build: ./dashboard
     container_name: openshorts-frontend
     network_mode: host
+    dns:
+      - "${DOCKER_DNS_1:-1.1.1.1}"
+      - "${DOCKER_DNS_2:-8.8.8.8}"
     command: npm run dev -- --host --port 5175
     volumes:
       - ./dashboard:/app

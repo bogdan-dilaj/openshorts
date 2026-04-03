@@ -1,4 +1,6 @@
+import hashlib
 import os
+import re
 import threading
 import time
 from typing import Any, Dict, List, Tuple
@@ -16,6 +18,8 @@ except Exception:  # pragma: no cover - torch is available in runtime, keep fall
 _MODEL_CACHE: Dict[Tuple[str, str, str, int, int], WhisperModel] = {}
 _MODEL_META: Dict[Tuple[str, str, str, int, int], Dict[str, Any]] = {}
 _MODEL_LOCK = threading.Lock()
+_MODEL_RESOLUTION_CACHE: Dict[str, str] = {}
+_MODEL_RESOLUTION_LOCK = threading.Lock()
 _VALID_LANGUAGE_TOKEN = set("abcdefghijklmnopqrstuvwxyz-")
 
 
@@ -82,6 +86,7 @@ def _transcribe_once(
     language: str = "",
 ):
     kwargs = {
+        "task": "transcribe",
         "word_timestamps": word_timestamps,
         "beam_size": beam_size,
         "vad_filter": vad_filter,
@@ -141,9 +146,16 @@ def _compute_candidates(device: str, safe_mode: bool) -> List[str]:
     return ["int8"]
 
 
-def _model_candidates(safe_mode: bool, device: str, *, log_cpu_optimization: bool = True) -> List[str]:
-    primary = (os.environ.get("WHISPER_MODEL") or "distil-large-v3").strip() or "distil-large-v3"
-    cpu_primary = (os.environ.get("WHISPER_CPU_MODEL") or "").strip()
+def _model_candidates(
+    safe_mode: bool,
+    device: str,
+    *,
+    log_cpu_optimization: bool = True,
+    primary_override: str = "",
+    cpu_primary_override: str = "",
+) -> List[str]:
+    primary = (primary_override or os.environ.get("WHISPER_MODEL") or "distil-large-v3").strip() or "distil-large-v3"
+    cpu_primary = (cpu_primary_override or os.environ.get("WHISPER_CPU_MODEL") or "").strip()
     cpu_auto_distil = _env_bool("WHISPER_CPU_AUTO_DISTIL", True)
 
     ordered_primary: List[str] = []
@@ -201,20 +213,185 @@ def _runtime_key(model_name: str, device: str, compute_type: str, cpu_threads: i
     return (model_name, device, compute_type, cpu_threads, num_workers)
 
 
-def get_whisper_model() -> Tuple[WhisperModel, Dict[str, Any]]:
+def _is_remote_hf_model_name(model_name: str) -> bool:
+    model_name = (model_name or "").strip()
+    if not model_name:
+        return False
+    if os.path.exists(model_name):
+        return False
+    # whisper built-in aliases like large-v3, distil-large-v3, ...
+    if "/" not in model_name:
+        return False
+    return True
+
+
+def _slugify_model_name(model_name: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", model_name).strip("._-")
+    return slug or "model"
+
+
+def _hf_convert_enabled() -> bool:
+    value = (os.environ.get("WHISPER_HF_CONVERT_ENABLED") or "true").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _resolve_model_reference(model_name: str) -> str:
+    normalized = (model_name or "").strip()
+    if not normalized:
+        return normalized
+
+    with _MODEL_RESOLUTION_LOCK:
+        cached = _MODEL_RESOLUTION_CACHE.get(normalized)
+        if cached:
+            return cached
+
+    if not _is_remote_hf_model_name(normalized):
+        with _MODEL_RESOLUTION_LOCK:
+            _MODEL_RESOLUTION_CACHE[normalized] = normalized
+        return normalized
+
+    if not _hf_convert_enabled():
+        with _MODEL_RESOLUTION_LOCK:
+            _MODEL_RESOLUTION_CACHE[normalized] = normalized
+        return normalized
+
+    try:
+        from huggingface_hub import snapshot_download
+    except Exception as exc:
+        raise RuntimeError(f"huggingface_hub unavailable for model '{normalized}': {exc}") from exc
+
+    try:
+        snapshot_dir = snapshot_download(
+            repo_id=normalized,
+            resume_download=True,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"failed to download model '{normalized}' from Hugging Face: {exc}") from exc
+
+    if os.path.isfile(os.path.join(snapshot_dir, "model.bin")):
+        with _MODEL_RESOLUTION_LOCK:
+            _MODEL_RESOLUTION_CACHE[normalized] = snapshot_dir
+        return snapshot_dir
+
+    cache_root = (
+        os.environ.get("WHISPER_HF_CONVERT_CACHE_DIR")
+        or "/tmp/.cache/whisper_ct2"
+    ).strip() or "/tmp/.cache/whisper_ct2"
+    os.makedirs(cache_root, exist_ok=True)
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
+    target_dir = os.path.join(cache_root, f"{_slugify_model_name(normalized)}-{digest}")
+
+    if os.path.isfile(os.path.join(target_dir, "model.bin")):
+        with _MODEL_RESOLUTION_LOCK:
+            _MODEL_RESOLUTION_CACHE[normalized] = target_dir
+        return target_dir
+
+    copy_candidates = [
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "preprocessor_config.json",
+        "generation_config.json",
+        "special_tokens_map.json",
+        "added_tokens.json",
+        "normalizer.json",
+        "vocab.json",
+        "merges.txt",
+    ]
+    copy_files = [
+        file_name
+        for file_name in copy_candidates
+        if os.path.isfile(os.path.join(snapshot_dir, file_name))
+    ]
+
+    quantization = (os.environ.get("WHISPER_HF_CONVERT_QUANTIZATION") or "").strip() or None
+
+    try:
+        from ctranslate2.converters import TransformersConverter
+    except Exception as exc:
+        raise RuntimeError(
+            "ctranslate2 TransformersConverter unavailable; install transformers/sentencepiece dependencies"
+        ) from exc
+
+    print(
+        "🔧 Converting HuggingFace Whisper model for faster-whisper (one-time): "
+        f"{normalized} -> {target_dir}"
+    )
+
+    converter = TransformersConverter(
+        model_name_or_path=snapshot_dir,
+        copy_files=copy_files or None,
+        low_cpu_mem_usage=True,
+    )
+    converter.convert(
+        output_dir=target_dir,
+        quantization=quantization,
+        force=False,
+    )
+
+    if not os.path.isfile(os.path.join(target_dir, "model.bin")):
+        raise RuntimeError(
+            f"conversion finished but model.bin missing for '{normalized}' at {target_dir}"
+        )
+
+    with _MODEL_RESOLUTION_LOCK:
+        _MODEL_RESOLUTION_CACHE[normalized] = target_dir
+    return target_dir
+
+
+def get_whisper_model(language_hint: str = "") -> Tuple[WhisperModel, Dict[str, Any]]:
     safe_mode = _env_bool("WHISPER_SAFE_MODE", True)
     device = _resolve_device()
     configured_device = (os.environ.get("WHISPER_DEVICE") or "auto").strip().lower()
     cpu_threads = _env_int("WHISPER_CPU_THREADS", WHISPER_CPU_THREADS, minimum=1)
     num_workers = _env_int("WHISPER_NUM_WORKERS", 1, minimum=1)
     vram_margin_mb = _env_int("WHISPER_SAFE_VRAM_MARGIN_MB", 1800, minimum=0)
+    normalized_language_hint = _normalize_language_code(language_hint)
+
+    non_english_requested = bool(normalized_language_hint and normalized_language_hint != "en")
+    primary_override = ""
+    cpu_primary_override = ""
+    if non_english_requested:
+        configured_primary = (os.environ.get("WHISPER_MODEL") or "").strip()
+        configured_de = (os.environ.get("WHISPER_MODEL_DE") or "").strip()
+        configured_non_en = (os.environ.get("WHISPER_MODEL_NON_EN") or "").strip()
+        configured_cpu_de = (os.environ.get("WHISPER_CPU_MODEL_DE") or "").strip()
+        configured_cpu_non_en = (os.environ.get("WHISPER_CPU_MODEL_NON_EN") or "").strip()
+
+        if normalized_language_hint == "de" and configured_de:
+            primary_override = configured_de
+        elif configured_non_en:
+            primary_override = configured_non_en
+        elif "distil-large-v3" in configured_primary.lower():
+            primary_override = "large-v3"
+
+        if device == "cpu":
+            if normalized_language_hint == "de" and configured_cpu_de:
+                cpu_primary_override = configured_cpu_de
+            elif configured_cpu_non_en:
+                cpu_primary_override = configured_cpu_non_en
+            elif not primary_override:
+                cpu_primary_override = "medium"
+
+        target_model_log = primary_override or configured_primary or "distil-large-v3"
+        if target_model_log:
+            print(
+                "🗣️ Whisper language-aware model routing: "
+                f"language={normalized_language_hint}, target_model={target_model_log}"
+            )
 
     attempts: List[Tuple[str, str, str]] = []
-    cuda_models = _model_candidates(safe_mode, "cuda")
+    cuda_models = _model_candidates(
+        safe_mode,
+        "cuda",
+        primary_override=primary_override,
+        cpu_primary_override=cpu_primary_override,
+    )
     cpu_models = _model_candidates(
         safe_mode,
         "cpu",
         log_cpu_optimization=(device == "cpu"),
+        primary_override=primary_override,
+        cpu_primary_override=cpu_primary_override,
     )
     seen_attempts = set()
 
@@ -268,14 +445,22 @@ def get_whisper_model() -> Tuple[WhisperModel, Dict[str, Any]]:
                     had_cuda_failure = True
                     continue
 
-            key = _runtime_key(model_name, attempt_device, compute_type, cpu_threads, num_workers)
+            try:
+                resolved_model_name = _resolve_model_reference(model_name)
+            except Exception as exc:
+                errors.append(f"{model_name}/{attempt_device}/{compute_type}: model resolve failed ({exc})")
+                if attempt_device == "cuda":
+                    had_cuda_failure = True
+                continue
+
+            key = _runtime_key(resolved_model_name, attempt_device, compute_type, cpu_threads, num_workers)
             cached = _MODEL_CACHE.get(key)
             if cached:
                 return cached, _MODEL_META[key]
 
             try:
                 model = WhisperModel(
-                    model_name,
+                    resolved_model_name,
                     device=attempt_device,
                     compute_type=compute_type,
                     cpu_threads=cpu_threads,
@@ -283,6 +468,7 @@ def get_whisper_model() -> Tuple[WhisperModel, Dict[str, Any]]:
                 )
                 meta = {
                     "model": model_name,
+                    "resolved_model": resolved_model_name,
                     "device": attempt_device,
                     "compute_type": compute_type,
                     "safe_mode": safe_mode,
@@ -291,9 +477,12 @@ def get_whisper_model() -> Tuple[WhisperModel, Dict[str, Any]]:
                 }
                 _MODEL_CACHE[key] = model
                 _MODEL_META[key] = meta
+                model_display = model_name
+                if resolved_model_name != model_name:
+                    model_display = f"{model_name} ({resolved_model_name})"
                 print(
                     "🎙️ Faster-Whisper runtime ready: "
-                    f"model={model_name}, device={attempt_device}, compute={compute_type}, safe_mode={safe_mode}"
+                    f"model={model_display}, device={attempt_device}, compute={compute_type}, safe_mode={safe_mode}"
                 )
                 return model, meta
             except Exception as exc:
@@ -318,7 +507,7 @@ def transcribe_with_runtime(audio_path: str, *, word_timestamps: bool = True, la
     lang_retry_enabled = _env_bool("WHISPER_LANGUAGE_RETRY_ENABLED", True)
     lang_retry_max_probability = _env_float("WHISPER_LANGUAGE_RETRY_MAX_PROBABILITY", 0.92)
 
-    model, runtime_meta = get_whisper_model()
+    model, runtime_meta = get_whisper_model(requested_language)
     segments, info = _transcribe_once(
         model,
         audio_path,

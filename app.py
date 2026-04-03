@@ -18,6 +18,7 @@ import zlib
 import urllib.request
 import urllib.error
 import urllib.parse
+import socket
 from dotenv import load_dotenv
 from typing import Any, Dict, Optional, List, Tuple
 from contextlib import asynccontextmanager
@@ -207,6 +208,105 @@ def _refresh_job_result(job_id: str):
 def _write_metadata(metadata_path: str, data: Dict[str, Any]) -> None:
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def _normalize_job_subtitle_style(style: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(style, dict):
+        return None
+    return _sanitize_subtitle_settings_dict(style, {}) or None
+
+
+def _normalize_job_hook_style(style: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(style, dict):
+        return None
+
+    return {
+        "position": style.get("position") or "top",
+        "horizontal_position": style.get("horizontal_position") or style.get("horizontalPosition") or "center",
+        "x_position": style.get("x_position") if style.get("x_position") is not None else style.get("xPosition"),
+        "y_position": style.get("y_position") if style.get("y_position") is not None else style.get("yPosition"),
+        "text_align": style.get("text_align") or style.get("textAlign") or "center",
+        "size": style.get("size") or "M",
+        "width_preset": style.get("width_preset") or style.get("widthPreset") or "wide",
+        "font_family": style.get("font_family") or style.get("fontFamily"),
+        "background_style": style.get("background_style") or style.get("backgroundStyle"),
+    }
+
+
+def _persist_job_overlay_defaults(
+    job_id: str,
+    *,
+    subtitle_style: Any = _METADATA_UNSET,
+    hook_style: Any = _METADATA_UNSET,
+) -> Optional[Dict[str, Any]]:
+    try:
+        _, metadata_path, data = _load_job_metadata_or_404(job_id)
+        existing = data.get("job_overlay_defaults")
+        next_defaults = dict(existing) if isinstance(existing, dict) else {}
+
+        if subtitle_style is not _METADATA_UNSET:
+            normalized_subtitle_style = _normalize_job_subtitle_style(subtitle_style)
+            if normalized_subtitle_style:
+                next_defaults["subtitle_style"] = normalized_subtitle_style
+            else:
+                next_defaults.pop("subtitle_style", None)
+
+        if hook_style is not _METADATA_UNSET:
+            normalized_hook_style = _normalize_job_hook_style(hook_style)
+            if normalized_hook_style:
+                next_defaults["hook_style"] = normalized_hook_style
+            else:
+                next_defaults.pop("hook_style", None)
+
+        if next_defaults:
+            next_defaults["updated_at"] = time.time()
+            data["job_overlay_defaults"] = next_defaults
+        else:
+            data.pop("job_overlay_defaults", None)
+
+        _write_metadata(metadata_path, data)
+        _refresh_job_result(job_id)
+        return data.get("job_overlay_defaults")
+    except Exception as e:
+        print(f"⚠️ Failed to persist job overlay defaults for {job_id}: {e}")
+        return None
+
+
+def _persist_clip_text_metadata(
+    job_id: str,
+    clip_index: int,
+    *,
+    video_title_for_youtube_short: Any = _METADATA_UNSET,
+    video_description_for_tiktok: Any = _METADATA_UNSET,
+    video_description_for_instagram: Any = _METADATA_UNSET,
+) -> Optional[Dict[str, Any]]:
+    try:
+        output_dir, metadata_path, data = _load_job_metadata_or_404(job_id)
+        clips = data.get("shorts", [])
+        if clip_index < 0 or clip_index >= len(clips):
+            return None
+
+        clip = dict(clips[clip_index] or {})
+        clip["clip_index"] = clip_index
+        _ensure_clip_versions(job_id, output_dir, clip)
+
+        if video_title_for_youtube_short is not _METADATA_UNSET:
+            clip["video_title_for_youtube_short"] = _normalize_unicode_text(video_title_for_youtube_short or "").strip()
+        if video_description_for_tiktok is not _METADATA_UNSET:
+            clip["video_description_for_tiktok"] = _normalize_unicode_text(video_description_for_tiktok or "").strip()
+        if video_description_for_instagram is not _METADATA_UNSET:
+            clip["video_description_for_instagram"] = _normalize_unicode_text(video_description_for_instagram or "").strip()
+
+        clips[clip_index] = clip
+        data["shorts"] = clips
+        _write_metadata(metadata_path, data)
+        result = _refresh_job_result(job_id)
+        if result:
+            return _find_result_clip(result, clip_index)
+        return clip
+    except Exception as e:
+        print(f"⚠️ Failed to persist clip text metadata for {job_id}#{clip_index}: {e}")
+        return None
 
 
 def _clip_video_url(job_id: str, filename: Optional[str]) -> Optional[str]:
@@ -1122,8 +1222,30 @@ def _build_subtitle_settings(req, clip_data: Dict) -> Optional[Dict]:
     }
 
 
-def _build_hook_settings(req, clip_data: Dict) -> Optional[Dict]:
+def _default_hook_settings_from_clip(clip_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     existing = clip_data.get("hook_settings")
+    existing = existing if isinstance(existing, dict) else {}
+    raw_text = existing.get("text") or clip_data.get("viral_hook_text") or ""
+    text = _normalize_unicode_text(raw_text).strip()
+    if not text:
+        return None
+
+    return {
+        "text": text,
+        "position": existing.get("position") or "top",
+        "horizontal_position": existing.get("horizontal_position") or "center",
+        "x_position": existing.get("x_position") if existing.get("x_position") is not None else 50,
+        "y_position": existing.get("y_position") if existing.get("y_position") is not None else 12,
+        "text_align": existing.get("text_align") or "center",
+        "size": existing.get("size") or "M",
+        "width_preset": existing.get("width_preset") or "wide",
+        "font_family": existing.get("font_family"),
+        "background_style": existing.get("background_style"),
+    }
+
+
+def _build_hook_settings(req, clip_data: Dict) -> Optional[Dict]:
+    existing = _default_hook_settings_from_clip(clip_data)
     raw_text = (req.text or "") if hasattr(req, "text") else (existing or {}).get("text", "")
     text = _normalize_unicode_text(raw_text).strip()
     if not text:
@@ -1165,26 +1287,27 @@ def _sanitize_subtitle_settings_dict(settings: Optional[Dict[str, Any]], clip_da
 
 
 def _sanitize_hook_settings_dict(settings: Optional[Dict[str, Any]], clip_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    existing = _default_hook_settings_from_clip(clip_data)
     if settings is None:
-        return clip_data.get("hook_settings")
+        return existing
     if not isinstance(settings, dict):
-        return clip_data.get("hook_settings")
+        return existing
 
     text = _normalize_unicode_text(settings.get("text") or "").strip()
     if not text:
-        return clip_data.get("hook_settings")
+        return existing
 
     return {
         "text": text,
-        "position": settings.get("position") or "top",
-        "horizontal_position": settings.get("horizontal_position") or settings.get("horizontalPosition") or "center",
-        "x_position": settings.get("x_position") if settings.get("x_position") is not None else settings.get("xPosition"),
-        "y_position": settings.get("y_position") if settings.get("y_position") is not None else settings.get("yPosition"),
-        "text_align": settings.get("text_align") or settings.get("textAlign") or "center",
-        "size": settings.get("size") or "M",
-        "width_preset": settings.get("width_preset") or settings.get("widthPreset") or "wide",
-        "font_family": settings.get("font_family") or settings.get("fontFamily"),
-        "background_style": settings.get("background_style") or settings.get("backgroundStyle"),
+        "position": settings.get("position") or (existing or {}).get("position") or "top",
+        "horizontal_position": settings.get("horizontal_position") or settings.get("horizontalPosition") or (existing or {}).get("horizontal_position") or "center",
+        "x_position": settings.get("x_position") if settings.get("x_position") is not None else settings.get("xPosition") if settings.get("xPosition") is not None else (existing or {}).get("x_position"),
+        "y_position": settings.get("y_position") if settings.get("y_position") is not None else settings.get("yPosition") if settings.get("yPosition") is not None else (existing or {}).get("y_position"),
+        "text_align": settings.get("text_align") or settings.get("textAlign") or (existing or {}).get("text_align") or "center",
+        "size": settings.get("size") or (existing or {}).get("size") or "M",
+        "width_preset": settings.get("width_preset") or settings.get("widthPreset") or (existing or {}).get("width_preset") or "wide",
+        "font_family": settings.get("font_family") or settings.get("fontFamily") or (existing or {}).get("font_family"),
+        "background_style": settings.get("background_style") or settings.get("backgroundStyle") or (existing or {}).get("background_style"),
     }
 
 
@@ -1312,12 +1435,15 @@ def _coerce_bool(value) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _coerce_max_clips(value, default: int = 10, minimum: int = 1, maximum: int = 50) -> int:
+def _coerce_max_clips(value, default: int = 10, minimum: int = 1, maximum: Optional[int] = None) -> int:
     try:
         parsed = int(value)
     except (TypeError, ValueError):
         return default
-    return max(minimum, min(maximum, parsed))
+    parsed = max(minimum, parsed)
+    if maximum is not None:
+        parsed = min(maximum, parsed)
+    return parsed
 
 
 def _coerce_tight_edit_preset(value, default: str = DEFAULT_TIGHT_EDIT_PRESET) -> str:
@@ -1360,6 +1486,108 @@ def _normalize_ollama_model_name(model_name: Optional[str]) -> str:
         "gemma3-12b:latest": "gemma3:12b",
     }
     return alias_map.get(normalized.lower(), normalized)
+
+
+NETWORK_ERROR_MARKERS = (
+    "temporary failure in name resolution",
+    "failed to resolve",
+    "name or service not known",
+    "nodename nor servname provided",
+    "getaddrinfo failed",
+    "network is unreachable",
+    "connection refused",
+    "connection reset",
+    "connection aborted",
+    "timed out",
+    "timeout",
+    "tls handshake timeout",
+)
+
+DNS_ERROR_MARKERS = (
+    "temporary failure in name resolution",
+    "failed to resolve",
+    "name or service not known",
+    "nodename nor servname provided",
+    "getaddrinfo failed",
+)
+
+NETWORK_DIAGNOSTIC_TARGETS = (
+    ("www.youtube.com", 443),
+    ("api.upload-post.com", 443),
+)
+
+
+def _network_error_text(exc: Exception) -> str:
+    reason = getattr(exc, "reason", None)
+    if reason not in (None, exc):
+        return str(reason)
+    return str(exc)
+
+
+def _is_network_resolution_error(value: Any) -> bool:
+    lower = str(value or "").lower()
+    if not lower:
+        return False
+    return any(marker in lower for marker in DNS_ERROR_MARKERS)
+
+
+def _is_network_connectivity_error(value: Any) -> bool:
+    lower = str(value or "").lower()
+    if not lower:
+        return False
+    return any(marker in lower for marker in NETWORK_ERROR_MARKERS)
+
+
+def _hostname_from_target(target: str) -> str:
+    parsed = urllib.parse.urlparse(str(target or ""))
+    return parsed.hostname or str(target or "")
+
+
+def _format_outbound_network_error(service_name: str, target: str, exc: Exception) -> str:
+    host = _hostname_from_target(target)
+    detail = _network_error_text(exc)
+    if _is_network_resolution_error(detail):
+        return (
+            f"DNS resolution failed while contacting {service_name} ({host}). "
+            "Check the backend container DNS configuration and outbound network access, then retry. "
+            f"Original error: {detail}"
+        )
+    if _is_network_connectivity_error(detail):
+        return (
+            f"{service_name} is currently unreachable ({host}). "
+            "Check outbound network access, proxy/firewall settings, then retry. "
+            f"Original error: {detail}"
+        )
+    return f"{service_name} request failed ({host}): {detail}"
+
+
+def _diagnose_hostname_resolution(host: str, port: int) -> Dict[str, Any]:
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        addresses = sorted({item[4][0] for item in infos})
+        return {
+            "host": host,
+            "port": port,
+            "ok": True,
+            "addresses": addresses[:8],
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "host": host,
+            "port": port,
+            "ok": False,
+            "addresses": [],
+            "error": str(exc),
+        }
+
+
+def _read_resolver_config_preview() -> List[str]:
+    try:
+        with open("/etc/resolv.conf", "r", encoding="utf-8") as f:
+            return [line.rstrip("\n") for line in f.readlines()[:20]]
+    except Exception as exc:
+        return [f"<unavailable: {exc}>"]
 
 
 def _list_ollama_models(base_url: str) -> List[str]:
@@ -1848,6 +2076,20 @@ class SettingsSyncLoadRequest(BaseModel):
     sync_code: str
     apply_youtube_cookies: Optional[bool] = True
 
+
+class JobOverlayDefaultsRequest(BaseModel):
+    job_id: str
+    subtitle_style: Optional[Dict[str, Any]] = None
+    hook_style: Optional[Dict[str, Any]] = None
+
+
+class ClipTextMetadataUpdateRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    video_title_for_youtube_short: Optional[str] = None
+    video_description_for_tiktok: Optional[str] = None
+    video_description_for_instagram: Optional[str] = None
+
 def enqueue_output(out, job_id, output_dir):
     """Reads output from a subprocess and appends it to jobs logs."""
     try:
@@ -1862,6 +2104,50 @@ def enqueue_output(out, job_id, output_dir):
         print(f"Error reading output for job {job_id}: {e}")
     finally:
         out.close()
+
+
+def _extract_actionable_job_error(logs: Optional[List[str]]) -> Optional[str]:
+    if not logs:
+        return None
+
+    cleaned = [str(line).strip() for line in logs if str(line).strip()]
+    if not cleaned:
+        return None
+
+    for line in reversed(cleaned):
+        lower = line.lower()
+        if lower.startswith("reason:"):
+            reason = line.split(":", 1)[1].strip()
+            if reason:
+                return reason
+
+    prioritized_markers = (
+        "runtimeerror:",
+        "unable to access a high-quality youtube source",
+        "unable to download a usable high-quality youtube source",
+        "unable to download api page",
+        "failed to resolve",
+        "temporary failure in name resolution",
+        "execution error:",
+        "fatal error",
+    )
+    for marker in prioritized_markers:
+        for line in reversed(cleaned):
+            lower = line.lower()
+            if marker not in lower:
+                continue
+            if lower.startswith("runtimeerror:"):
+                return line.split(":", 1)[1].strip() or line
+            if lower.startswith("execution error:"):
+                return line.split(":", 1)[1].strip() or line
+            return line
+
+    for line in reversed(cleaned):
+        lower = line.lower()
+        if "error" in lower or "failed" in lower:
+            return line
+    return None
+
 
 async def run_job(job_id, job_data, queue_token=None):
     """Executes the subprocess for a specific job."""
@@ -1981,10 +2267,15 @@ async def run_job(job_id, job_data, queue_token=None):
                 jobs[job_id]['status'] = 'failed'
                 jobs[job_id]['job_state'] = 'failed'
                 jobs[job_id]['can_resume'] = True
+                failure_error = (
+                    _extract_actionable_job_error(jobs[job_id].get("logs"))
+                    or f"Process failed with exit code {returncode}"
+                )
+                jobs[job_id]['error'] = failure_error
                 jobs[job_id]['logs'].append(f"Process failed with exit code {returncode}")
                 update_job_manifest(output_dir, {
                     "status": "failed",
-                    "error": f"Process failed with exit code {returncode}",
+                    "error": failure_error,
                     "can_resume": True,
                 })
             
@@ -1992,6 +2283,7 @@ async def run_job(job_id, job_data, queue_token=None):
         jobs[job_id]['status'] = 'failed'
         jobs[job_id]['job_state'] = 'failed'
         jobs[job_id]['can_resume'] = True
+        jobs[job_id]['error'] = str(e)
         jobs[job_id]['logs'].append(f"Execution error: {str(e)}")
         update_job_manifest(output_dir, {
             "status": "failed",
@@ -2432,6 +2724,25 @@ async def get_job_history(
             include_logs=include_logs,
             log_limit=log_limit,
         )
+    }
+
+
+@app.post("/api/job/overlay-defaults")
+async def update_job_overlay_defaults(req: JobOverlayDefaultsRequest):
+    _get_job_record_or_404(req.job_id)
+
+    persisted_defaults = _persist_job_overlay_defaults(
+        req.job_id,
+        subtitle_style=req.subtitle_style if req.subtitle_style is not None else _METADATA_UNSET,
+        hook_style=req.hook_style if req.hook_style is not None else _METADATA_UNSET,
+    )
+    if persisted_defaults is None:
+        raise HTTPException(status_code=500, detail="Failed to persist job overlay defaults.")
+
+    return {
+        "success": True,
+        "job_id": req.job_id,
+        "job_overlay_defaults": persisted_defaults,
     }
 
 
@@ -3001,6 +3312,27 @@ async def select_clip_version(req: SelectClipVersionRequest):
         "success": True,
         "new_video_url": clip_data.get("video_url"),
         "clip": clip_data,
+    }
+
+
+@app.post("/api/clip/text-metadata")
+async def update_clip_text_metadata(req: ClipTextMetadataUpdateRequest):
+    _get_job_record_or_404(req.job_id)
+
+    updated_clip = _persist_clip_text_metadata(
+        req.job_id,
+        req.clip_index,
+        video_title_for_youtube_short=req.video_title_for_youtube_short if req.video_title_for_youtube_short is not None else _METADATA_UNSET,
+        video_description_for_tiktok=req.video_description_for_tiktok if req.video_description_for_tiktok is not None else _METADATA_UNSET,
+        video_description_for_instagram=req.video_description_for_instagram if req.video_description_for_instagram is not None else _METADATA_UNSET,
+    )
+    if updated_clip is None:
+        raise HTTPException(status_code=404, detail="Clip not found.")
+
+    return {
+        "success": True,
+        "job_id": req.job_id,
+        "clip": updated_clip,
     }
 
 
@@ -3693,6 +4025,15 @@ class SocialPostRequest(BaseModel):
     facebook_page_id: Optional[str] = None
     pinterest_board_id: Optional[str] = None
 
+
+class SocialPostRetryRequest(BaseModel):
+    job_id: str
+    clip_index: int
+    api_key: str
+    user_id: str
+    platform: str
+    retry_mode: Optional[str] = "now"
+
 import httpx
 
 UPLOAD_POST_AUTH_SCHEMES = ("ApiKey", "Apikey")
@@ -3891,7 +4232,7 @@ def _build_upload_post_summary(
     failure_count = sum(1 for item in platform_results if item.get("success") is False)
     pending_count = max(0, len(requested_platforms) - success_count - failure_count)
 
-    if status in {"pending", "in_progress"}:
+    if status in {"pending", "in_progress", "queued", "scheduled"}:
         action = "Scheduling" if is_scheduled else "Publishing"
         return f"{action} started. {success_count} done, {failure_count} failed, {pending_count} pending."
     if failure_count and success_count:
@@ -3943,6 +4284,248 @@ def _normalize_upload_post_response(
         "usage": payload.get("usage"),
         "raw": payload,
     }
+
+
+def _build_social_post_request_settings(
+    *,
+    final_title: str,
+    final_description: str,
+    first_comment: str,
+    scheduled_date: Optional[str],
+    timezone: Optional[str],
+    instagram_share_mode: Optional[str],
+    tiktok_post_mode: Optional[str],
+    tiktok_is_aigc: Optional[bool],
+    facebook_page_id: Optional[str],
+    pinterest_board_id: Optional[str],
+    transcript_language: Optional[str],
+) -> Dict[str, Any]:
+    return {
+        "title": final_title,
+        "description": final_description,
+        "first_comment": first_comment,
+        "scheduled_date": scheduled_date,
+        "timezone": timezone or "UTC",
+        "instagram_share_mode": instagram_share_mode or "CUSTOM",
+        "tiktok_post_mode": tiktok_post_mode or "DIRECT_POST",
+        "tiktok_is_aigc": bool(tiktok_is_aigc),
+        "facebook_page_id": (facebook_page_id or "").strip() or None,
+        "pinterest_board_id": (pinterest_board_id or "").strip() or None,
+        "transcript_language": transcript_language,
+    }
+
+
+def _normalize_social_post_request_settings(value: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(value, dict):
+        return None
+    return _build_social_post_request_settings(
+        final_title=(value.get("title") or "").strip(),
+        final_description=(value.get("description") or "").strip(),
+        first_comment=(value.get("first_comment") or "").strip(),
+        scheduled_date=(value.get("scheduled_date") or "").strip() or None,
+        timezone=(value.get("timezone") or "UTC").strip() or "UTC",
+        instagram_share_mode=(value.get("instagram_share_mode") or "CUSTOM").strip() or "CUSTOM",
+        tiktok_post_mode=(value.get("tiktok_post_mode") or "DIRECT_POST").strip() or "DIRECT_POST",
+        tiktok_is_aigc=bool(value.get("tiktok_is_aigc")),
+        facebook_page_id=(value.get("facebook_page_id") or "").strip() or None,
+        pinterest_board_id=(value.get("pinterest_board_id") or "").strip() or None,
+        transcript_language=(value.get("transcript_language") or "").strip() or None,
+    )
+
+
+def _normalize_social_post_platform_results(items: Any) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    seen = set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        platform = _normalize_upload_post_platform_name(item.get("platform"))
+        if not platform or platform in seen:
+            continue
+        normalized = dict(item)
+        normalized["platform"] = platform
+        results.append(normalized)
+        seen.add(platform)
+    return results
+
+
+def _resolve_social_post_overall_status(
+    *,
+    fallback_status: Optional[str],
+    success_count: int,
+    failure_count: int,
+    pending_count: int,
+) -> str:
+    normalized = (fallback_status or "").strip().lower()
+    if pending_count > 0:
+        if normalized in {"pending", "in_progress", "queued", "scheduled"}:
+            return normalized
+        return "pending"
+    if failure_count and success_count:
+        return "partial"
+    if failure_count:
+        return "failed"
+    if success_count:
+        return "completed"
+    return normalized or "completed"
+
+
+def _finalize_social_post_status_payload(
+    status_payload: Dict[str, Any],
+    *,
+    requested_platforms: Optional[List[str]] = None,
+    platform_results: Optional[List[Dict[str, Any]]] = None,
+    request_settings: Optional[Dict[str, Any]] = None,
+    tracking_platforms: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    payload = dict(status_payload or {})
+    normalized_requested_platforms = _normalize_social_platforms(
+        requested_platforms
+        if requested_platforms is not None
+        else payload.get("requested_platforms") or []
+    )
+    normalized_results = _normalize_social_post_platform_results(
+        platform_results if platform_results is not None else payload.get("platform_results")
+    )
+
+    ordered_results: List[Dict[str, Any]] = []
+    seen = set()
+    by_platform = {item["platform"]: item for item in normalized_results}
+    for platform in normalized_requested_platforms:
+        if platform in by_platform:
+            ordered_results.append(by_platform[platform])
+            seen.add(platform)
+    for item in normalized_results:
+        platform = item["platform"]
+        if platform in seen:
+            continue
+        ordered_results.append(item)
+        seen.add(platform)
+        if platform not in normalized_requested_platforms:
+            normalized_requested_platforms.append(platform)
+
+    success_count = sum(1 for item in ordered_results if item.get("success") is True)
+    failure_count = sum(1 for item in ordered_results if item.get("success") is False)
+    pending_count = sum(1 for item in ordered_results if item.get("success") not in (True, False))
+    if pending_count > 0 or success_count > 0:
+        overall_success = True
+    elif failure_count > 0:
+        overall_success = False
+    else:
+        overall_success = bool(payload.get("success", True))
+    normalized_request_settings = (
+        _normalize_social_post_request_settings(request_settings)
+        if request_settings is not None
+        else _normalize_social_post_request_settings(payload.get("request_settings"))
+    )
+    is_scheduled = bool(payload.get("scheduled"))
+    overall_status = _resolve_social_post_overall_status(
+        fallback_status=payload.get("status"),
+        success_count=success_count,
+        failure_count=failure_count,
+        pending_count=pending_count,
+    )
+    normalized_tracking_platforms = _normalize_social_platforms(
+        tracking_platforms
+        if tracking_platforms is not None
+        else payload.get("tracking_platforms") or []
+    )
+    if pending_count <= 0:
+        normalized_tracking_platforms = []
+    elif not normalized_tracking_platforms:
+        normalized_tracking_platforms = list(normalized_requested_platforms)
+
+    payload.update({
+        "success": overall_success,
+        "status": overall_status,
+        "message": _build_upload_post_summary(
+            requested_platforms=normalized_requested_platforms,
+            platform_results=ordered_results,
+            status=overall_status,
+            is_scheduled=is_scheduled,
+        ),
+        "scheduled": is_scheduled,
+        "requested_platforms": normalized_requested_platforms,
+        "platform_results": ordered_results,
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "pending_count": pending_count,
+        "total": payload.get("total") or len(normalized_requested_platforms),
+        "tracking_platforms": normalized_tracking_platforms,
+    })
+    if normalized_request_settings is not None:
+        payload["request_settings"] = normalized_request_settings
+    return payload
+
+
+def _merge_social_post_status(
+    existing_status: Any,
+    incoming_status: Dict[str, Any],
+    *,
+    updated_platforms: Optional[List[str]] = None,
+    request_settings: Optional[Dict[str, Any]] = None,
+    tracking_platforms: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    existing_payload = dict(existing_status or {})
+    incoming_payload = dict(incoming_status or {})
+
+    requested_platforms = _normalize_social_platforms(existing_payload.get("requested_platforms") or [])
+    for platform in _normalize_social_platforms(incoming_payload.get("requested_platforms") or []):
+        if platform not in requested_platforms:
+            requested_platforms.append(platform)
+
+    existing_results = _normalize_social_post_platform_results(existing_payload.get("platform_results"))
+    incoming_results = _normalize_social_post_platform_results(incoming_payload.get("platform_results"))
+    merged_by_platform = {item["platform"]: dict(item) for item in existing_results}
+    incoming_by_platform = {item["platform"]: dict(item) for item in incoming_results}
+    platforms_to_update = _normalize_social_platforms(
+        updated_platforms
+        if updated_platforms is not None
+        else incoming_payload.get("requested_platforms") or list(incoming_by_platform.keys())
+    )
+
+    for platform in platforms_to_update:
+        if platform in incoming_by_platform:
+            merged_by_platform[platform] = incoming_by_platform[platform]
+        elif platform not in merged_by_platform:
+            merged_by_platform[platform] = {
+                "platform": platform,
+                "success": None,
+                "status": "pending",
+                "message": "Warte auf Rueckmeldung von Upload-Post.",
+                "error": None,
+            }
+
+    for platform, item in incoming_by_platform.items():
+        if platform not in merged_by_platform:
+            merged_by_platform[platform] = item
+        if platform not in requested_platforms:
+            requested_platforms.append(platform)
+
+    merged_results = [merged_by_platform[platform] for platform in requested_platforms if platform in merged_by_platform]
+    merged_payload = dict(existing_payload)
+    merged_payload.update(incoming_payload)
+
+    merged_request_settings = (
+        _normalize_social_post_request_settings(request_settings)
+        if request_settings is not None
+        else _normalize_social_post_request_settings(incoming_payload.get("request_settings"))
+        or _normalize_social_post_request_settings(existing_payload.get("request_settings"))
+    )
+    merged_tracking_platforms = (
+        tracking_platforms
+        if tracking_platforms is not None
+        else incoming_payload.get("tracking_platforms")
+        if incoming_payload.get("tracking_platforms") is not None
+        else existing_payload.get("tracking_platforms")
+    )
+    return _finalize_social_post_status_payload(
+        merged_payload,
+        requested_platforms=requested_platforms,
+        platform_results=merged_results,
+        request_settings=merged_request_settings,
+        tracking_platforms=merged_tracking_platforms,
+    )
 
 
 def _parse_social_platforms_form_value(value: Any) -> List[str]:
@@ -4062,9 +4645,14 @@ def _send_upload_post_video(
         "video": (video_filename, video_bytes, video_content_type or "application/octet-stream"),
     }
 
-    with httpx.Client(timeout=300.0) as client:
-        print(f"📡 Sending to Upload-Post for platforms: {requested_platforms}")
-        response = _upload_post_sync_request(client, "POST", url, api_key, data=data_payload, files=files)
+    try:
+        with httpx.Client(timeout=300.0) as client:
+            print(f"📡 Sending to Upload-Post for platforms: {requested_platforms}")
+            response = _upload_post_sync_request(client, "POST", url, api_key, data=data_payload, files=files)
+    except httpx.RequestError as exc:
+        detail = _format_outbound_network_error("Upload-Post", url, exc)
+        print(f"⚠️ {detail}")
+        raise HTTPException(status_code=502, detail=detail)
 
     if response.status_code not in {200, 201, 202}:
         print(f"❌ Upload-Post Error: {response.text}")
@@ -4155,6 +4743,19 @@ async def post_to_socials(req: SocialPostRequest):
             pinterest_board_id=req.pinterest_board_id,
             transcript_language=transcript_language,
         )
+        request_settings = _build_social_post_request_settings(
+            final_title=final_title,
+            final_description=final_description,
+            first_comment=first_comment,
+            scheduled_date=req.scheduled_date,
+            timezone=req.timezone,
+            instagram_share_mode=req.instagram_share_mode,
+            tiktok_post_mode=req.tiktok_post_mode,
+            tiktok_is_aigc=req.tiktok_is_aigc,
+            facebook_page_id=req.facebook_page_id,
+            pinterest_board_id=req.pinterest_board_id,
+            transcript_language=transcript_language,
+        )
 
         with open(file_path, "rb") as f:
             file_content = f.read()
@@ -4166,6 +4767,12 @@ async def post_to_socials(req: SocialPostRequest):
             video_filename=filename,
             video_bytes=file_content,
             video_content_type="video/mp4",
+        )
+        normalized = _finalize_social_post_status_payload(
+            normalized,
+            requested_platforms=requested_platforms,
+            request_settings=request_settings,
+            tracking_platforms=requested_platforms,
         )
         normalized["clip_index"] = req.clip_index
 
@@ -4179,6 +4786,118 @@ async def post_to_socials(req: SocialPostRequest):
         raise
     except Exception as e:
         print(f"❌ Social Post Exception: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/social/post/retry")
+async def retry_social_platform_post(req: SocialPostRetryRequest):
+    _get_job_record_or_404(req.job_id)
+
+    try:
+        _, _, metadata_data = _load_job_metadata_or_404(req.job_id)
+        clips = metadata_data.get("shorts", [])
+        if req.clip_index < 0 or req.clip_index >= len(clips):
+            raise HTTPException(status_code=404, detail="Clip not found.")
+
+        clip = clips[req.clip_index]
+        requested_platforms = _normalize_social_platforms([req.platform])
+        if not requested_platforms:
+            raise HTTPException(status_code=400, detail="Select exactly one platform to retry.")
+        platform = requested_platforms[0]
+
+        existing_status = clip.get("social_post_status") or {}
+        existing_platform_results = _normalize_social_post_platform_results(existing_status.get("platform_results"))
+        existing_platform_result = next((item for item in existing_platform_results if item.get("platform") == platform), None)
+        existing_status_value = (existing_platform_result or {}).get("status", "").strip().lower()
+        if not existing_platform_result or (
+            existing_platform_result.get("success") is not False
+            and existing_status_value not in {"failed", "error"}
+        ):
+            raise HTTPException(status_code=400, detail="Only failed platforms can be retried individually.")
+
+        retry_mode = (req.retry_mode or "now").strip().lower()
+        if retry_mode not in {"now", "scheduled"}:
+            raise HTTPException(status_code=400, detail="retry_mode must be 'now' or 'scheduled'.")
+
+        filename = clip['video_url'].split('/')[-1]
+        file_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail=f"Video file not found: {file_path}")
+
+        request_settings = _normalize_social_post_request_settings(existing_status.get("request_settings")) or _build_social_post_request_settings(
+            final_title=clip.get('video_title_for_youtube_short') or clip.get('title', 'Viral Short'),
+            final_description=clip.get('video_description_for_instagram') or clip.get('video_description_for_tiktok') or "Check this out!",
+            first_comment="",
+            scheduled_date=None,
+            timezone="UTC",
+            instagram_share_mode="CUSTOM",
+            tiktok_post_mode="DIRECT_POST",
+            tiktok_is_aigc=False,
+            facebook_page_id=None,
+            pinterest_board_id=None,
+            transcript_language=(
+                metadata_data.get("transcript", {}).get("language")
+                or metadata_data.get("language")
+                or clip.get("language")
+            ),
+        )
+        stored_scheduled_date = request_settings.get("scheduled_date")
+        if retry_mode == "scheduled":
+            if not stored_scheduled_date:
+                raise HTTPException(status_code=400, detail="No scheduled time is stored for this post.")
+            effective_scheduled_date = stored_scheduled_date
+        else:
+            effective_scheduled_date = None
+
+        if platform == "pinterest" and not (request_settings.get("pinterest_board_id") or "").strip():
+            raise HTTPException(status_code=400, detail="Pinterest retry requires a board ID.")
+
+        data_payload = _build_upload_post_data_payload(
+            user_id=req.user_id,
+            requested_platforms=requested_platforms,
+            final_title=request_settings.get("title") or clip.get('video_title_for_youtube_short') or clip.get('title', 'Viral Short'),
+            final_description=request_settings.get("description") or clip.get('video_description_for_instagram') or clip.get('video_description_for_tiktok') or "Check this out!",
+            first_comment=(request_settings.get("first_comment") or "").strip(),
+            scheduled_date=effective_scheduled_date,
+            timezone=request_settings.get("timezone") or "UTC",
+            instagram_share_mode=request_settings.get("instagram_share_mode") or "CUSTOM",
+            tiktok_post_mode=request_settings.get("tiktok_post_mode") or "DIRECT_POST",
+            tiktok_is_aigc=bool(request_settings.get("tiktok_is_aigc")),
+            facebook_page_id=request_settings.get("facebook_page_id"),
+            pinterest_board_id=request_settings.get("pinterest_board_id"),
+            transcript_language=request_settings.get("transcript_language"),
+        )
+
+        with open(file_path, "rb") as f:
+            file_content = f.read()
+
+        normalized = _send_upload_post_video(
+            api_key=req.api_key,
+            requested_platforms=requested_platforms,
+            data_payload=data_payload,
+            video_filename=filename,
+            video_bytes=file_content,
+            video_content_type="video/mp4",
+        )
+        normalized = _merge_social_post_status(
+            existing_status,
+            normalized,
+            updated_platforms=requested_platforms,
+            request_settings=request_settings,
+            tracking_platforms=requested_platforms,
+        )
+        normalized["clip_index"] = req.clip_index
+
+        persisted_clip = _persist_social_post_status_to_clip(req.job_id, req.clip_index, normalized)
+        if persisted_clip:
+            normalized["clip"] = persisted_clip
+
+        return normalized
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Social Retry Exception: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -4235,6 +4954,19 @@ async def post_uploaded_video_to_socials(
             pinterest_board_id=pinterest_board_id,
             transcript_language=language,
         )
+        request_settings = _build_social_post_request_settings(
+            final_title=final_title,
+            final_description=final_description,
+            first_comment=first_comment_value,
+            scheduled_date=scheduled_date,
+            timezone=timezone,
+            instagram_share_mode=instagram_share_mode,
+            tiktok_post_mode=tiktok_post_mode,
+            tiktok_is_aigc=tiktok_is_aigc,
+            facebook_page_id=facebook_page_id,
+            pinterest_board_id=pinterest_board_id,
+            transcript_language=language,
+        )
         normalized = _send_upload_post_video(
             api_key=api_key,
             requested_platforms=requested_platforms,
@@ -4242,6 +4974,12 @@ async def post_uploaded_video_to_socials(
             video_filename=filename,
             video_bytes=file_content,
             video_content_type=video.content_type or "application/octet-stream",
+        )
+        normalized = _finalize_social_post_status_payload(
+            normalized,
+            requested_platforms=requested_platforms,
+            request_settings=request_settings,
+            tracking_platforms=requested_platforms,
         )
         normalized["source"] = "uploaded_video"
         normalized["filename"] = filename
@@ -4273,8 +5011,13 @@ async def get_social_post_status(
     if vendor_job_id:
         params["job_id"] = vendor_job_id
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await _upload_post_async_request(client, "GET", UPLOAD_POST_STATUS_URL, api_key, params=params)
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await _upload_post_async_request(client, "GET", UPLOAD_POST_STATUS_URL, api_key, params=params)
+    except httpx.RequestError as exc:
+        detail = _format_outbound_network_error("Upload-Post", UPLOAD_POST_STATUS_URL, exc)
+        print(f"⚠️ {detail}")
+        raise HTTPException(status_code=502, detail=detail)
 
     if resp.status_code != 200:
         print(f"❌ Upload-Post Status Error: {resp.text}")
@@ -4288,6 +5031,30 @@ async def get_social_post_status(
         is_scheduled=scheduled,
     )
     if job_id is not None and clip_index is not None:
+        existing_status = None
+        try:
+            _, _, metadata_data = _load_job_metadata_or_404(job_id)
+            clips = metadata_data.get("shorts", [])
+            if 0 <= clip_index < len(clips):
+                existing_status = clips[clip_index].get("social_post_status")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            print(f"⚠️ Failed to load existing social post status for merge: {exc}")
+
+        if existing_status:
+            normalized = _merge_social_post_status(
+                existing_status,
+                normalized,
+                updated_platforms=requested_platforms,
+                tracking_platforms=requested_platforms,
+            )
+        else:
+            normalized = _finalize_social_post_status_payload(
+                normalized,
+                requested_platforms=requested_platforms,
+                tracking_platforms=requested_platforms,
+            )
         normalized["clip_index"] = clip_index
         normalized["openshorts_job_id"] = job_id
         persisted_clip = _persist_social_post_status_to_clip(job_id, clip_index, normalized)
@@ -4351,7 +5118,7 @@ async def get_social_user(api_key: str = Header(..., alias="X-Upload-Post-Key"))
         except HTTPException:
              raise
         except httpx.RequestError as e:
-             message = f"Upload-Post is currently unreachable (network/DNS issue): {e}"
+             message = _format_outbound_network_error("Upload-Post", url, e)
              print(f"⚠️ {message}")
              return {
                  "profiles": [],
@@ -4360,6 +5127,19 @@ async def get_social_user(api_key: str = Header(..., alias="X-Upload-Post-Key"))
              }
         except Exception as e:
              raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/network/diagnostics")
+async def get_network_diagnostics():
+    return {
+        "in_docker": os.path.exists("/.dockerenv"),
+        "network_mode": (os.environ.get("NETWORK_MODE") or "").strip().lower() or "unknown",
+        "resolver_config": _read_resolver_config_preview(),
+        "targets": [
+            _diagnose_hostname_resolution(host, port)
+            for host, port in NETWORK_DIAGNOSTIC_TARGETS
+        ],
+    }
 
 # --- Thumbnail Studio Endpoints ---
 

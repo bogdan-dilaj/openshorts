@@ -5,6 +5,8 @@ torchvision
 tqdm
 yt-dlp
 faster-whisper
+transformers
+sentencepiece
 google-genai
 python-dotenv
 mediapipe==0.10.14

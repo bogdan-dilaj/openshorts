@@ -28,6 +28,13 @@ ENV/
 *.mkv
 *.gif
 videos/
+output/
+uploads/
+dashboard/node_modules/
+dashboard/dist/
+*.log
+*.tmp
+tmp/
 
 # Model files (downloaded at build time)
 *.pt
@@ -40,7 +47,6 @@ docker-compose.yml
 # Docs
 README.md
 *.md
-
 
 
 

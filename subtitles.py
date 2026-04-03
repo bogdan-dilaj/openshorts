@@ -198,6 +198,21 @@ def transcribe_audio(video_path, preferred_language=None):
         )
 
     preferred = _normalize_language_code(preferred_language)
+    if preferred and preferred != "en":
+        preferred_attempts = [item for item in attempts if item[4] == preferred]
+        if preferred_attempts:
+            best_score, best_transcript, _, best_info, _, _, _ = max(preferred_attempts, key=lambda item: item[0])
+            print(
+                "🗣️ Subtitle language selector: forcing preferred language probe "
+                f"'{preferred}' (score={best_score:.3f})."
+            )
+            print(
+                "✅ Transcription complete. "
+                f"Language: {best_transcript.get('language')} "
+                f"(score={best_score:.3f}, p={float(getattr(best_info, 'language_probability', 0.0) or 0.0):.2f})"
+            )
+            return best_transcript
+
     if preferred in {"", "en"}:
         german_candidates = [
             item for item in attempts
