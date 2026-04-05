@@ -244,7 +244,7 @@ const moveArrayItem = (items, fromIndex, toIndex) => {
   return next;
 };
 
-const parseDailyScheduleSlots = (value) => {
+const parseDailyScheduleSlots = (value, { preserveOrder = false } = {}) => {
   const entries = String(value || '')
     .split(',')
     .map((item) => item.trim())
@@ -269,9 +269,14 @@ const parseDailyScheduleSlots = (value) => {
       hours,
       minutes,
       label: `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`,
+      inputOrder: entries.indexOf(entry),
       sortKey: hours * 60 + minutes,
     };
-  }).sort((a, b) => a.sortKey - b.sortKey);
+  });
+
+  if (!preserveOrder) {
+    slots.sort((a, b) => a.sortKey - b.sortKey);
+  }
 
   return slots.filter((slot) => {
     if (seen.has(slot.label)) return false;
@@ -280,8 +285,8 @@ const parseDailyScheduleSlots = (value) => {
   });
 };
 
-const buildScheduledPostDates = ({ slotText, count, startDate, dayInterval = 1 }) => {
-  const slots = parseDailyScheduleSlots(slotText);
+const buildScheduledPostDates = ({ slotText, count, startDate, dayInterval = 1, staggerSlotsByDay = false }) => {
+  const slots = parseDailyScheduleSlots(slotText, { preserveOrder: staggerSlotsByDay });
   const baseDate = new Date(`${startDate || formatDateInputValue()}T00:00:00`);
   if (Number.isNaN(baseDate.getTime())) {
     throw new Error('Ungueltiges Startdatum.');
@@ -290,6 +295,34 @@ const buildScheduledPostDates = ({ slotText, count, startDate, dayInterval = 1 }
 
   const now = new Date();
   const scheduledDates = [];
+
+  if (staggerSlotsByDay) {
+    const firstSlot = slots[0];
+    const firstCandidate = new Date(baseDate);
+    firstCandidate.setHours(firstSlot.hours, firstSlot.minutes, 0, 0);
+
+    let safetyCounter = 0;
+    const safetyLimit = Math.max(count * slots.length * normalizedDayInterval * 4, 128);
+    while (firstCandidate <= now && safetyCounter < safetyLimit) {
+      firstCandidate.setDate(firstCandidate.getDate() + normalizedDayInterval);
+      safetyCounter += 1;
+    }
+
+    if (firstCandidate <= now) {
+      throw new Error('Es konnten nicht genug zukuenftige gestaffelte Posting-Slots erzeugt werden.');
+    }
+
+    for (let scheduleIndex = 0; scheduleIndex < count; scheduleIndex += 1) {
+      const slot = slots[scheduleIndex % slots.length];
+      const candidate = new Date(firstCandidate);
+      candidate.setDate(firstCandidate.getDate() + (scheduleIndex * normalizedDayInterval));
+      candidate.setHours(slot.hours, slot.minutes, 0, 0);
+      scheduledDates.push(candidate);
+    }
+
+    return scheduledDates;
+  }
+
   let cycleIndex = 0;
   const safetyLimit = Math.max(count * normalizedDayInterval * 4, normalizedDayInterval * 24, 32);
 
@@ -832,6 +865,11 @@ function App() {
     if (stored) return decrypt(stored);
     return '';
   });
+  const [pexelsKey, setPexelsKey] = useState(() => {
+    const stored = localStorage.getItem('pexelsKey_v1');
+    if (stored) return decrypt(stored);
+    return '';
+  });
 
   const [uploadUserId, setUploadUserId] = useState(() => localStorage.getItem('uploadUserId') || '');
   const [userProfiles, setUserProfiles] = useState([]); // List of {username, connected: []}
@@ -878,6 +916,7 @@ function App() {
   const [settingsSyncIncludeYoutubeCookies, setSettingsSyncIncludeYoutubeCookies] = useState(true);
   const [clipVideoOverrides, setClipVideoOverrides] = useState({});
   const [jobOverlayDefaults, setJobOverlayDefaults] = useState({});
+  const [jobSocialDefaults, setJobSocialDefaults] = useState({});
 
   // Sync state for original video playback
   const [syncedTime, setSyncedTime] = useState(0);
@@ -894,6 +933,7 @@ function App() {
   const [bulkScheduleDate, setBulkScheduleDate] = useState(() => formatDateInputValue());
   const [bulkScheduleSlots, setBulkScheduleSlots] = useState('12:00, 15:00, 18:00');
   const [bulkScheduleDayInterval, setBulkScheduleDayInterval] = useState(1);
+  const [bulkScheduleStaggerSlotsByDay, setBulkScheduleStaggerSlotsByDay] = useState(false);
   const [bulkFirstComment, setBulkFirstComment] = useState('');
   const [isBulkSettingsOpen, setIsBulkSettingsOpen] = useState(false);
   const [isBulkBarCollapsed, setIsBulkBarCollapsed] = useState(false);
@@ -966,6 +1006,7 @@ function App() {
       setBulkScheduleDate(formatDateInputValue());
       setBulkScheduleSlots('12:00, 15:00, 18:00');
       setBulkScheduleDayInterval(1);
+      setBulkScheduleStaggerSlotsByDay(false);
       setBulkFirstComment('');
       setDragOverSelectedClipKey('');
       setDraggedSelectedClipKey('');
@@ -986,6 +1027,7 @@ function App() {
     setBulkScheduleDate(stored?.bulkScheduleDate || formatDateInputValue());
     setBulkScheduleSlots(stored?.bulkScheduleSlots || '12:00, 15:00, 18:00');
     setBulkScheduleDayInterval(Math.max(1, Number(stored?.bulkScheduleDayInterval) || 1));
+    setBulkScheduleStaggerSlotsByDay(!!stored?.bulkScheduleStaggerSlotsByDay);
     setBulkFirstComment(stored?.bulkFirstComment || '');
     setDraggedSelectedClipKey('');
     setDragOverSelectedClipKey('');
@@ -1175,9 +1217,82 @@ function App() {
     }
   };
 
+  const updateInstagramCollaboratorsDraftForJob = (targetJobId, value) => {
+    if (!targetJobId) return;
+    const normalizedValue = String(value || '');
+    setJobSocialDefaults((prev) => ({
+      ...prev,
+      [targetJobId]: {
+        instagramCollaborators: normalizedValue,
+      },
+    }));
+    setResults((prev) => prev ? ({
+      ...prev,
+      job_social_defaults: {
+        ...(prev.job_social_defaults || {}),
+        instagram_collaborators: normalizedValue.trim() || null,
+      },
+    }) : prev);
+  };
+
+  const applyInstagramCollaboratorsToJob = async (targetJobId, value) => {
+    if (!targetJobId) return { success: false, error: new Error('Kein Job aktiv.') };
+    const normalizedValue = String(value || '').trim();
+
+    setJobSocialDefaults((prev) => ({
+      ...prev,
+      [targetJobId]: {
+        instagramCollaborators: normalizedValue,
+      },
+    }));
+    setResults((prev) => prev ? ({
+      ...prev,
+      job_social_defaults: {
+        ...(prev.job_social_defaults || {}),
+        instagram_collaborators: normalizedValue || null,
+      },
+    }) : prev);
+
+    try {
+      const res = await fetch(getApiUrl('/api/job/social-defaults'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_id: targetJobId,
+          instagram_collaborators: normalizedValue,
+        }),
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      const persistedDefaults = data.job_social_defaults || {};
+      setJobSocialDefaults((prev) => ({
+        ...prev,
+        [targetJobId]: {
+          instagramCollaborators: persistedDefaults.instagram_collaborators || '',
+        },
+      }));
+      setBulkStatus({
+        type: 'success',
+        message: normalizedValue
+          ? 'Instagram-Collaborator fuer diesen Job gespeichert.'
+          : 'Instagram-Collaborator fuer diesen Job entfernt.',
+      });
+      return {
+        success: true,
+        instagramCollaborators: persistedDefaults.instagram_collaborators || '',
+      };
+    } catch (error) {
+      setBulkStatus({ type: 'error', message: `Job-Collaborator konnte nicht gespeichert werden: ${error.message}` });
+      return { success: false, error };
+    }
+  };
+
   const activeJobOverlayDefaults = jobId
     ? (jobOverlayDefaults[jobId] || buildOverlayDefaultsForProfile(activeOverlayProfileId))
     : buildOverlayDefaultsForProfile(activeOverlayProfileId);
+  const activeJobSocialDefaults = jobId
+    ? (jobSocialDefaults[jobId] || { instagramCollaborators: '' })
+    : { instagramCollaborators: '' };
 
   useEffect(() => {
     if (!jobId || !results?.job_overlay_defaults) return;
@@ -1194,6 +1309,26 @@ function App() {
       };
     });
   }, [jobId, results?.job_overlay_defaults, activeOverlayProfileId]);
+
+  useEffect(() => {
+    if (!jobId) return;
+    const persistedDefaults = results?.job_social_defaults;
+    if (!persistedDefaults) {
+      setJobSocialDefaults((prev) => ({
+        ...prev,
+        [jobId]: {
+          instagramCollaborators: prev[jobId]?.instagramCollaborators || '',
+        },
+      }));
+      return;
+    }
+    setJobSocialDefaults((prev) => ({
+      ...prev,
+      [jobId]: {
+        instagramCollaborators: persistedDefaults.instagram_collaborators || '',
+      },
+    }));
+  }, [jobId, results?.job_social_defaults]);
 
   const getClipVariantKey = (activeJobId, clip, fallbackIndex) => `${activeJobId}:${clip.clip_index ?? fallbackIndex}`;
 
@@ -1378,6 +1513,7 @@ function App() {
       bulkScheduleDate,
       bulkScheduleSlots,
       bulkScheduleDayInterval,
+      bulkScheduleStaggerSlotsByDay,
       bulkFirstComment,
       isBulkSettingsOpen,
       isBulkBarCollapsed,
@@ -1393,6 +1529,7 @@ function App() {
     bulkScheduleDate,
     bulkScheduleSlots,
     bulkScheduleDayInterval,
+    bulkScheduleStaggerSlotsByDay,
     bulkFirstComment,
     isBulkSettingsOpen,
     isBulkBarCollapsed,
@@ -1408,6 +1545,7 @@ function App() {
         count: Math.min(selectedClipKeys.length, 4),
         startDate: bulkScheduleDate,
         dayInterval: bulkScheduleDayInterval,
+        staggerSlotsByDay: bulkScheduleStaggerSlotsByDay,
       });
     }
   } catch (error) {
@@ -1445,6 +1583,7 @@ function App() {
         count: selectedClipEntries.length,
         startDate: bulkScheduleDate,
         dayInterval: bulkScheduleDayInterval,
+        staggerSlotsByDay: bulkScheduleStaggerSlotsByDay,
       });
     } catch (error) {
       setBulkStatus({ type: 'error', message: error.message });
@@ -1521,6 +1660,9 @@ function App() {
             scheduled_date: scheduledDates[position].toISOString(),
             timezone,
             instagram_share_mode: socialPostSettings.instagramShareMode,
+            instagram_collaborators: String(
+              renderedClip.instagram_collaborators || activeJobSocialDefaults.instagramCollaborators || ''
+            ).trim() || undefined,
             tiktok_post_mode: socialPostSettings.tiktokPostMode,
             tiktok_is_aigc: socialPostSettings.tiktokIsAigc,
             facebook_page_id: socialPostSettings.facebookPageId,
@@ -1691,6 +1833,7 @@ function App() {
     uploadPostKey,
     uploadUserId,
     elevenLabsKey,
+    pexelsKey,
     subtitleStyle,
     hookStyle,
     overlayProfiles,
@@ -1710,6 +1853,7 @@ function App() {
     if (typeof payload.uploadPostKey === 'string') setUploadPostKey(payload.uploadPostKey);
     if (typeof payload.uploadUserId === 'string') setUploadUserId(payload.uploadUserId);
     if (typeof payload.elevenLabsKey === 'string') setElevenLabsKey(payload.elevenLabsKey);
+    if (typeof payload.pexelsKey === 'string') setPexelsKey(payload.pexelsKey);
 
     if (payload.subtitleStyle && typeof payload.subtitleStyle === 'object') {
       setSubtitleStyle(normalizeSubtitleStyleConfig(payload.subtitleStyle));
@@ -1899,6 +2043,14 @@ function App() {
       localStorage.setItem('elevenLabsKey_v1', encrypt(elevenLabsKey));
     }
   }, [elevenLabsKey]);
+
+  useEffect(() => {
+    if (pexelsKey) {
+      localStorage.setItem('pexelsKey_v1', encrypt(pexelsKey));
+    } else {
+      localStorage.removeItem('pexelsKey_v1');
+    }
+  }, [pexelsKey]);
 
   useEffect(() => {
     if (uploadPostKey && userProfiles.length === 0) {
@@ -2437,6 +2589,27 @@ function App() {
                 ollamaModel={ollamaModel}
                 onOllamaModelSet={setOllamaModel}
               />
+
+              <div className="glass-panel p-6 mt-8">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="p-2 bg-accent/20 rounded-lg text-accent">
+                    <Image size={18} />
+                  </div>
+                  <h2 className="text-lg font-semibold">Pexels API-Key</h2>
+                </div>
+                <div className="relative">
+                  <input
+                    type="password"
+                    value={pexelsKey}
+                    onChange={(e) => setPexelsKey(e.target.value)}
+                    placeholder="Pexels API-Key"
+                    className="input-field w-full font-mono"
+                  />
+                </div>
+                <p className="mt-3 text-xs text-zinc-500">
+                  Optional: Der Pexels-Key wird für AI-gesteuerte Stock-Image-Overlays im viralen Render verwendet.
+                </p>
+              </div>
 
               <div className="glass-panel p-6 mt-8">
                 <div className="flex items-center justify-between mb-4">
@@ -3454,10 +3627,13 @@ function App() {
                           hookStyle={activeJobOverlayDefaults.hookStyle}
                           tightEditPreset={tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset}
                           socialPostSettings={socialPostSettings}
+                          jobInstagramCollaborators={activeJobSocialDefaults.instagramCollaborators}
                           activeUploadProfile={uploadUserId}
                           onApplySubtitleDefaultsToJob={(style) => applySubtitleDefaultsToJob(jobId, style)}
                           onApplyHookDefaultsToJob={(style) => applyHookDefaultsToJob(jobId, style)}
+                          onApplyInstagramCollaboratorsToJob={(value) => applyInstagramCollaboratorsToJob(jobId, value)}
                           currentVideoOverride={clipVideoOverrides[getClipVariantKey(jobId, clip, i)]}
+                          pexelsKey={pexelsKey}
                           onVideoVariantChange={(videoUrl) => updateClipVideoOverride(jobId, clip, i, videoUrl)}
                           onClipUpdated={(updatedClip) => updateClipResult(jobId, updatedClip)}
                           onPlay={(time) => handleClipPlay(time)}
@@ -3660,6 +3836,20 @@ function App() {
                           <p className="mt-2 text-[11px] text-zinc-500">
                             Kommagetrennt, Format `HH:MM`. Nach jedem Tagesblock springt der Plan um das eingestellte Tagesintervall weiter.
                           </p>
+                          <label className="mt-3 flex items-start gap-3 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200">
+                            <input
+                              type="checkbox"
+                              checked={bulkScheduleStaggerSlotsByDay}
+                              onChange={(e) => setBulkScheduleStaggerSlotsByDay(e.target.checked)}
+                              className="mt-0.5 h-4 w-4 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary"
+                            />
+                            <span className="min-w-0">
+                              <span className="block text-sm font-medium text-white">Slots ueber Tage staffeln</span>
+                              <span className="mt-1 block text-[11px] text-zinc-500">
+                                Aktiv: der erste geplante Post startet immer mit dem ersten Slot aus deiner Eingabe, danach folgt pro Intervalltag der naechste Slot, z. B. `18:00`, dann `15:00`, dann `12:00`.
+                              </span>
+                            </span>
+                          </label>
                         </div>
 
                         <div className="rounded-xl border border-white/10 bg-black/20 p-3">
@@ -3751,6 +3941,22 @@ function App() {
                                       <option key={mode.value} value={mode.value}>{mode.label}</option>
                                     ))}
                                   </select>
+                                </div>
+                                <div>
+                                  <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                                    Instagram-Collaborator
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={activeJobSocialDefaults.instagramCollaborators}
+                                    onChange={(e) => updateInstagramCollaboratorsDraftForJob(jobId, e.target.value)}
+                                    onBlur={(e) => applyInstagramCollaboratorsToJob(jobId, e.target.value)}
+                                    className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:border-primary/50"
+                                    placeholder="Optional, ohne @, z. B. partner_account"
+                                  />
+                                  <p className="mt-2 text-[11px] text-zinc-500">
+                                    Gilt fuer den ganzen Job. Mit oder ohne `@` moeglich, empfohlen ohne `@`. Auf Clip-Ebene kann der Wert optional ueberschrieben oder leer gelassen werden.
+                                  </p>
                                 </div>
                                 <div>
                                   <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-zinc-400">TikTok-Modus</label>

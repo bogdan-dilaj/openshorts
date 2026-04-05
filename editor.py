@@ -48,13 +48,104 @@ class VideoEditor:
                 raise Exception("Video processing failed by Gemini.")
             time.sleep(2)
 
-    def get_ffmpeg_filter(self, video_file_obj, duration, fps=30, width=None, height=None, transcript=None):
+    @staticmethod
+    def _parse_json_response(response_text: str):
+        if not response_text:
+            return None
+
+        text = response_text
+        if text.startswith("```json"):
+            text = text[7:]
+        elif text.startswith("```"):
+            text = text[3:]
+
+        if text.endswith("```"):
+            text = text[:-3]
+
+        text = text.strip()
+        start_idx = text.find("{")
+        end_idx = text.rfind("}")
+        if start_idx != -1 and end_idx != -1:
+            text = text[start_idx:end_idx + 1]
+
+        print(f"🔍 DEBUG: Cleaned JSON Text:\n{text}")
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            print(f"❌ Failed to parse JSON: {response_text}")
+            return None
+
+    def plan_pattern_interrupts(self, duration, transcript=None, interview_mode=False):
+        transcript_text = json.dumps(transcript) if transcript else "Not available."
+        mode_label = "interview" if interview_mode else "standard"
+        prompt = f"""
+        You are a senior short-form video editor planning professional pattern interrupts for a vertical short.
+
+        CLIP DURATION: {duration} seconds
+        MODE: {mode_label}
+
+        TRANSCRIPT:
+        {transcript_text}
+
+        Goal:
+        Suggest professional visual attention resets for the final edit.
+
+        Rules:
+        - For interview mode, stay restrained and premium: smoother zoom-ins with a brief hold, clean emphasis, no chaotic meme effects.
+        - For non-interview mode, stay rhythmic and sharp: smoother zoom-ins toward faces, occasional brief flashes, contrast pops, but still professional.
+        - Pattern interrupts should be sparse, intentional, and tied to specific lines or beats.
+        - Allowed effects are only: "zoom_pulse", "light_flash", "zoom_flash".
+        - Prefer closer face zooms that hold briefly instead of instant snap-back zooms.
+        - For interview mode, assume the final render has one speaker panel on top and one on bottom. Plan premium panel-local emphasis moments.
+        - Light flashes can appear a bit more often than before, but keep them tasteful and short.
+        - Do not suggest more than 6 interrupts for interview mode.
+        - Do not suggest more than 8 interrupts for standard mode.
+        - Avoid the first 0.4 seconds and the last 0.4 seconds.
+
+        Return JSON only:
+        {{
+          "effect_notes": "Use restrained punch-ins and extremely short light flashes only where emphasis helps.",
+          "pattern_interrupts": [
+            {{"time": 1.2, "effect": "zoom_pulse", "strength": "medium", "reason": "first strong claim"}},
+            {{"time": 3.8, "effect": "light_flash", "strength": "low", "reason": "surprising reveal"}}
+          ]
+        }}
+        """
+
+        if self.provider == "gemini":
+            print("🤖 Asking Gemini for viral edit plan...")
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                )
+            )
+            response_text = response.text
+            print(f"🔍 DEBUG: Gemini Viral Plan:\n{response_text}")
+        else:
+            print(f"🦙 Asking Ollama for viral edit plan with {self.model_name}...")
+            response_text = self._generate_ollama_response(prompt)
+            print(f"🔍 DEBUG: Ollama Viral Plan:\n{response_text}")
+
+        return self._parse_json_response(response_text)
+
+    def plan_viral_edit(self, duration, transcript=None, interview_mode=False):
+        """Backward-compatible wrapper."""
+        return self.plan_pattern_interrupts(
+            duration=duration,
+            transcript=transcript,
+            interview_mode=interview_mode,
+        )
+
+    def get_ffmpeg_filter(self, video_file_obj, duration, fps=30, width=None, height=None, transcript=None, style_context=None):
         """Asks the configured LLM for a raw FFmpeg filter string."""
         if width is None or height is None:
             # Keep prompt usable even if caller didn't pass dimensions.
             width, height = 1080, 1920
         
         transcript_text = json.dumps(transcript) if transcript else "Not available."
+        style_direction = (style_context or "").strip() or "Keep the pacing professional, premium, and intentional. Avoid gimmicky chaos."
 
         prompt = f"""
         You are an expert FFmpeg video editor. Your task is to generate a complex video filter string to make a short video viral, BUT ONLY apply effects where they make sense contextually.
@@ -65,6 +156,9 @@ class VideoEditor:
         
         TRANSCRIPT (Context of what is being said):
         {transcript_text}
+
+        ADDITIONAL STYLE DIRECTION:
+        {style_direction}
 
         Goal: Enhance the video with dynamic zooms, cuts (simulated with punch-ins), and visual effects to increase retention, but DO NOT overdo it. Random effects are bad. Contextual effects are good.
 
@@ -138,33 +232,7 @@ class VideoEditor:
             response_text = self._generate_ollama_response(prompt)
             print(f"🔍 DEBUG: Ollama Raw Response:\n{response_text}")
 
-        try:
-            # Clean response text (remove potential markdown blocks)
-            text = response_text
-            if text.startswith("```json"):
-                text = text[7:]
-            elif text.startswith("```"):
-                text = text[3:]
-            
-            if text.endswith("```"):
-                text = text[:-3]
-                
-            text = text.strip()
-            
-            # Additional cleanup for potential trailing characters outside JSON
-            # Find the first '{' and last '}'
-            start_idx = text.find('{')
-            end_idx = text.rfind('}')
-            
-            if start_idx != -1 and end_idx != -1:
-                text = text[start_idx:end_idx+1]
-            
-            print(f"🔍 DEBUG: Cleaned JSON Text:\n{text}")
-                
-            return json.loads(text)
-        except json.JSONDecodeError:
-            print(f"❌ Failed to parse JSON: {response_text}")
-            return None
+        return self._parse_json_response(response_text)
 
     def _generate_ollama_response(self, prompt: str) -> str:
         req = urllib.request.Request(

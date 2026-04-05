@@ -146,7 +146,7 @@ const resolveClipPostHighlight = (clip) => {
     };
 };
 
-export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, llmProvider, ollamaBaseUrl, ollamaModel, elevenLabsKey, subtitleStyle, hookStyle, tightEditPreset, socialPostSettings = DEFAULT_SOCIAL_POST_SETTINGS, activeUploadProfile, onApplySubtitleDefaultsToJob, onApplyHookDefaultsToJob, currentVideoOverride, onVideoVariantChange, onClipUpdated, onPlay, onPause, hookDraftText, onHookDraftChange, isSelected = false, onToggleSelect }) {
+export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, llmProvider, ollamaBaseUrl, ollamaModel, elevenLabsKey, pexelsKey, subtitleStyle, hookStyle, tightEditPreset, socialPostSettings = DEFAULT_SOCIAL_POST_SETTINGS, jobInstagramCollaborators = '', activeUploadProfile, onApplySubtitleDefaultsToJob, onApplyHookDefaultsToJob, onApplyInstagramCollaboratorsToJob, currentVideoOverride, onVideoVariantChange, onClipUpdated, onPlay, onPause, hookDraftText, onHookDraftChange, isSelected = false, onToggleSelect }) {
     const [showModal, setShowModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
     const videoRef = React.useRef(null);
@@ -162,6 +162,8 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const resolvedHookDraftText = hookDraftText ?? clip.hook_settings?.text ?? clip.viral_hook_text ?? '';
     const resolvedClipTitle = clip.video_title_for_youtube_short || "Viraler Clip erzeugt";
     const resolvedClipDescription = clip.video_description_for_instagram || clip.video_description_for_tiktok || "";
+    const resolvedClipInstagramCollaborators = String(clip.instagram_collaborators || '').trim();
+    const resolvedJobInstagramCollaborators = String(jobInstagramCollaborators || '').trim();
     const clipPostHighlight = resolveClipPostHighlight(clip);
 
     const [platforms, setPlatforms] = useState({ ...DEFAULT_SOCIAL_POST_SETTINGS.platforms, ...(socialPostSettings.platforms || {}) });
@@ -171,6 +173,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const [isScheduling, setIsScheduling] = useState(false);
     const [scheduleDate, setScheduleDate] = useState("");
     const [instagramShareMode, setInstagramShareMode] = useState(socialPostSettings.instagramShareMode || 'CUSTOM');
+    const [instagramCollaborators, setInstagramCollaborators] = useState('');
     const [tiktokPostMode, setTiktokPostMode] = useState(socialPostSettings.tiktokPostMode || 'DIRECT_POST');
     const [tiktokIsAigc, setTiktokIsAigc] = useState(!!socialPostSettings.tiktokIsAigc);
     const [facebookPageId, setFacebookPageId] = useState(socialPostSettings.facebookPageId || '');
@@ -191,16 +194,17 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const [isRenderingClip, setIsRenderingClip] = useState(false);
     const [isSelectingVersion, setIsSelectingVersion] = useState(false);
     const [showHookModal, setShowHookModal] = useState(false);
-    const [showQuickRenderModal, setShowQuickRenderModal] = useState(false);
-    const [quickHookText, setQuickHookText] = useState(resolvedHookDraftText.trim());
     const [showTranslateModal, setShowTranslateModal] = useState(false);
     const [showTrimModal, setShowTrimModal] = useState(false);
     const [trimDialogVideoUrl, setTrimDialogVideoUrl] = useState('');
     const [editError, setEditError] = useState(null);
     const [showMoreOptions, setShowMoreOptions] = useState(false);
+    const [applyStockOverlay, setApplyStockOverlay] = useState(false);
     const [titleDraft, setTitleDraft] = useState(resolvedClipTitle);
     const [descriptionDraft, setDescriptionDraft] = useState(resolvedClipDescription);
+    const [instagramCollaboratorsDraft, setInstagramCollaboratorsDraft] = useState(resolvedClipInstagramCollaborators);
     const [isSavingTextMetadata, setIsSavingTextMetadata] = useState(false);
+    const [isApplyingJobCollaborators, setIsApplyingJobCollaborators] = useState(false);
     const [textMetadataStatus, setTextMetadataStatus] = useState(null);
     const isBusy = isEditing || isSubtitling || isHooking || isTranslating || isTrimming || isPreviewRendering || isRenderingClip || isSelectingVersion;
     const clipDuration = Number.isFinite(Number(clip.display_duration))
@@ -212,7 +216,8 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     useEffect(() => {
         setTitleDraft(resolvedClipTitle);
         setDescriptionDraft(resolvedClipDescription);
-    }, [resolvedClipTitle, resolvedClipDescription]);
+        setInstagramCollaboratorsDraft(resolvedClipInstagramCollaborators);
+    }, [resolvedClipTitle, resolvedClipDescription, resolvedClipInstagramCollaborators]);
 
     // Initialize/Reset form when modal opens
     useEffect(() => {
@@ -225,6 +230,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             setScheduleDate("");
             setPlatforms({ ...DEFAULT_SOCIAL_POST_SETTINGS.platforms, ...(socialPostSettings.platforms || {}) });
             setInstagramShareMode(socialPostSettings.instagramShareMode || 'CUSTOM');
+            setInstagramCollaborators((resolvedClipInstagramCollaborators || resolvedJobInstagramCollaborators || '').trim());
             setTiktokPostMode(socialPostSettings.tiktokPostMode || 'DIRECT_POST');
             setTiktokIsAigc(!!socialPostSettings.tiktokIsAigc);
             setFacebookPageId(socialPostSettings.facebookPageId || '');
@@ -239,7 +245,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 refreshPostStatus(savedPostStatus, { silent: true });
             }
         }
-    }, [showModal, clip, socialPostSettings]);
+    }, [showModal, clip, socialPostSettings, resolvedClipInstagramCollaborators, resolvedJobInstagramCollaborators]);
 
     useEffect(() => {
         if (videoRef.current) {
@@ -259,22 +265,6 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             postStatusTimeoutRef.current = null;
         }
     }, [showModal]);
-
-    useEffect(() => {
-        if (!showQuickRenderModal) return;
-        setQuickHookText((resolvedHookDraftText || '').trim());
-    }, [showQuickRenderModal]);
-
-    useEffect(() => {
-        if (!showQuickRenderModal) return undefined;
-
-        const previousOverflow = document.body.style.overflow;
-        document.body.style.overflow = 'hidden';
-
-        return () => {
-            document.body.style.overflow = previousOverflow;
-        };
-    }, [showQuickRenderModal]);
 
     const isModifiedVideo = activeVersionId ? activeVersionId !== originalVersionId : currentVideoUrl !== originalVideoUrl;
 
@@ -297,10 +287,16 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const persistClipTextMetadata = async () => {
         const normalizedTitle = String(titleDraft || '').trim();
         const normalizedDescription = String(descriptionDraft || '').trim();
+        const normalizedCollaborators = String(instagramCollaboratorsDraft || '').trim();
         const currentTitle = String(clip.video_title_for_youtube_short || '').trim();
         const currentDescription = String(resolvedClipDescription || '').trim();
+        const currentCollaborators = String(clip.instagram_collaborators || '').trim();
 
-        if (normalizedTitle === currentTitle && normalizedDescription === currentDescription) {
+        if (
+            normalizedTitle === currentTitle
+            && normalizedDescription === currentDescription
+            && normalizedCollaborators === currentCollaborators
+        ) {
             return;
         }
 
@@ -317,6 +313,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     video_title_for_youtube_short: normalizedTitle,
                     video_description_for_tiktok: normalizedDescription,
                     video_description_for_instagram: normalizedDescription,
+                    instagram_collaborators: normalizedCollaborators,
                 })
             });
 
@@ -333,6 +330,21 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             setTextMetadataStatus({ type: 'error', message: e.message || 'Konnte nicht gespeichert werden.' });
         } finally {
             setIsSavingTextMetadata(false);
+        }
+    };
+
+    const handleApplyCollaboratorsToJob = async () => {
+        if (!onApplyInstagramCollaboratorsToJob) return;
+
+        setIsApplyingJobCollaborators(true);
+        try {
+            await persistClipTextMetadata();
+            await onApplyInstagramCollaboratorsToJob(instagramCollaboratorsDraft);
+            setTextMetadataStatus({ type: 'success', message: 'Fuer den Job uebernommen' });
+        } catch (e) {
+            setTextMetadataStatus({ type: 'error', message: e.message || 'Konnte Job-Default nicht speichern.' });
+        } finally {
+            setIsApplyingJobCollaborators(false);
         }
     };
 
@@ -367,6 +379,32 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             'gemma3-12b:latest': 'gemma3:12b',
         };
         return aliasMap[trimmed.toLowerCase()] || trimmed;
+    };
+
+    const buildLlmHeaders = () => {
+        const provider = (llmProvider || localStorage.getItem('llm_provider') || 'gemini').trim().toLowerCase();
+        const apiKey = geminiApiKey || localStorage.getItem('gemini_key');
+        const pexelsApiKey = pexelsKey;
+        const resolvedOllamaBaseUrl = ollamaBaseUrl || localStorage.getItem('ollama_base_url') || 'http://127.0.0.1:11434';
+        const resolvedOllamaModel = normalizeOllamaModelName(
+            ollamaModel || localStorage.getItem('ollama_model') || 'llama3.1:8b'
+        );
+
+        const headers = {
+            'Content-Type': 'application/json',
+            'X-LLM-Provider': provider,
+        };
+        if (provider === 'gemini' && apiKey) {
+            headers['X-Gemini-Key'] = apiKey;
+        }
+        if (provider === 'ollama') {
+            if (resolvedOllamaBaseUrl) headers['X-Ollama-Base-Url'] = resolvedOllamaBaseUrl;
+            if (resolvedOllamaModel) headers['X-Ollama-Model'] = resolvedOllamaModel;
+        }
+        if (pexelsApiKey) {
+            headers['X-Pexels-Key'] = pexelsApiKey;
+        }
+        return headers;
     };
 
     const stopPostStatusPolling = () => {
@@ -813,13 +851,8 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         }
     };
 
-    const openQuickRenderModal = () => {
-        setQuickHookText((resolvedHookDraftText || '').trim());
-        setShowQuickRenderModal(true);
-    };
-
     const handleQuickRenderWithDefaults = async () => {
-        const hookText = (quickHookText || '').trim();
+        const hookText = String(resolvedHookDraftText || '').trim();
         if (!hookText) {
             setEditError('Hook-Text darf nicht leer sein.');
             return;
@@ -829,9 +862,9 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         setEditError(null);
         onHookDraftChange && onHookDraftChange(hookText);
         try {
-            const res = await fetch(getApiUrl('/api/clip/render'), {
+            const res = await fetch(getApiUrl('/api/clip/render/viral-original'), {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: buildLlmHeaders(),
                 body: JSON.stringify({
                     job_id: jobId,
                     clip_index: clipIndex,
@@ -841,6 +874,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     subtitle_settings: buildSubtitleSettingsPayload(),
                     apply_hook: true,
                     hook_settings: buildHookSettingsPayload(hookText),
+                    apply_stock_overlay: applyStockOverlay,
                 })
             });
 
@@ -850,7 +884,10 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
             const data = await res.json();
             applyClipResponse(data);
-            setShowQuickRenderModal(false);
+            if (data?.warning) {
+                setEditError(data.warning);
+                setTimeout(() => setEditError(null), 5000);
+            }
         } catch (e) {
             setEditError(e.message);
             setTimeout(() => setEditError(null), 6000);
@@ -931,6 +968,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 description: postDescription,
                 first_comment: firstComment,
                 instagram_share_mode: instagramShareMode,
+                instagram_collaborators: String(instagramCollaborators || '').trim(),
                 tiktok_post_mode: tiktokPostMode,
                 tiktok_is_aigc: tiktokIsAigc,
                 facebook_page_id: facebookPageId,
@@ -1280,7 +1318,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     <div className="grid grid-cols-2 gap-3">
                         <button
                             type="button"
-                            onClick={openQuickRenderModal}
+                            onClick={handleQuickRenderWithDefaults}
                             disabled={isBusy}
                             className="py-2 bg-gradient-to-r from-fuchsia-600 to-pink-600 hover:from-fuchsia-500 hover:to-pink-500 text-white rounded-lg text-xs font-bold shadow-lg shadow-fuchsia-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 truncate px-2 disabled:opacity-60"
                         >
@@ -1307,6 +1345,34 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
                     {showMoreOptions && (
                         <div className="mt-3 grid grid-cols-2 gap-3">
+                            <div className="col-span-2 rounded-lg border border-white/10 bg-black/20 p-3">
+                                <div className="mb-2 flex items-center justify-between gap-3">
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Instagram-Collaborator</span>
+                                    <span className="text-[10px] text-zinc-500">Leer = Job-Default, empfohlen ohne @</span>
+                                </div>
+                                <div className="flex flex-col gap-2 md:flex-row">
+                                    <input
+                                        type="text"
+                                        value={instagramCollaboratorsDraft}
+                                        onChange={(e) => setInstagramCollaboratorsDraft(e.target.value)}
+                                        onBlur={persistClipTextMetadata}
+                                        className="min-w-0 flex-1 rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-primary/50"
+                                        placeholder={resolvedJobInstagramCollaborators ? `Job-Default (ohne @): ${resolvedJobInstagramCollaborators}` : 'Optional, ohne @, z. B. partner_account'}
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={handleApplyCollaboratorsToJob}
+                                        disabled={isApplyingJobCollaborators}
+                                        className="inline-flex items-center justify-center rounded-lg border border-cyan-400/20 bg-cyan-500/10 px-3 py-2 text-xs font-semibold text-cyan-100 hover:bg-cyan-500/15 disabled:opacity-60"
+                                    >
+                                        {isApplyingJobCollaborators ? 'Speichert...' : 'Fuer alle uebernehmen'}
+                                    </button>
+                                </div>
+                                <p className="mt-2 text-[11px] text-zinc-500">
+                                    Mit oder ohne `@` moeglich, empfohlen ohne `@`. Der Button setzt den aktuellen Wert dieser Card global fuer den ganzen Job.
+                                </p>
+                            </div>
+
                             {isPreviewOnly && (
                                 <button
                                     onClick={() => handlePreviewRender()}
@@ -1327,6 +1393,18 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                     {isRenderingClip ? 'Rendern...' : 'Final-Render (Version erstellen)'}
                                 </button>
                             )}
+
+                            <div className="col-span-2 flex items-center gap-2">
+                                <label className="flex items-center gap-2 text-xs text-zinc-400">
+                                    <input
+                                        type="checkbox"
+                                        checked={applyStockOverlay}
+                                        onChange={(e) => setApplyStockOverlay(e.target.checked)}
+                                        className="h-3 w-3 rounded border-zinc-600 bg-black/50 text-primary focus:ring-primary"
+                                    />
+                                    Stock-Overlay aktivieren
+                                </label>
+                            </div>
 
                             <button
                                 onClick={handleAutoEdit}
@@ -1411,66 +1489,6 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     )}
                 </div>
             </div>
-
-            {showQuickRenderModal && (
-                createPortal(
-                <div
-                    className="fixed inset-0 z-[4000] flex items-center justify-center p-3 md:p-4 bg-black/80 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out] overflow-y-auto touch-scroll pointer-events-auto"
-                    onClick={() => setShowQuickRenderModal(false)}
-                >
-                    <div
-                        className="bg-[#121214] border border-white/10 p-5 rounded-2xl w-full max-w-lg shadow-2xl relative my-4 max-h-[calc(100dvh-1.5rem)] overflow-y-auto custom-scrollbar touch-scroll pointer-events-auto"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        <button
-                            type="button"
-                            onClick={() => setShowQuickRenderModal(false)}
-                            className="absolute top-4 right-4 text-zinc-500 hover:text-white touch-manipulation"
-                        >
-                            <X size={20} />
-                        </button>
-
-                        <h3 className="text-lg font-bold text-white mb-2">Schnell-Render mit Vorgaben</h3>
-                        <p className="text-xs text-zinc-400 mb-4">
-                            Hook-Text anpassen und direkt mit globalen Hook-/Untertitel-Vorgaben als neue Version rendern.
-                        </p>
-
-                        <label className="block text-xs font-bold text-zinc-400 mb-2">Hook-Text</label>
-                        <textarea
-                            value={quickHookText}
-                            onChange={(e) => {
-                                setQuickHookText(e.target.value);
-                                onHookDraftChange && onHookDraftChange(e.target.value);
-                            }}
-                            rows={5}
-                            className="w-full bg-black/40 border border-white/10 rounded-lg p-3 text-sm text-white focus:outline-none focus:border-primary/50 placeholder-zinc-600 resize-y"
-                            placeholder="POV: ..."
-                        />
-
-                        <div className="mt-4 flex flex-wrap gap-2 justify-end">
-                            <button
-                                type="button"
-                                onClick={() => setShowQuickRenderModal(false)}
-                                disabled={isRenderingClip}
-                                className="px-4 py-2 rounded-lg border border-white/10 bg-white/5 text-sm text-zinc-200 hover:bg-white/10 disabled:opacity-50 touch-manipulation"
-                            >
-                                Abbrechen
-                            </button>
-                            <button
-                                type="button"
-                                onClick={handleQuickRenderWithDefaults}
-                                disabled={isRenderingClip || !quickHookText.trim()}
-                                className="px-4 py-2 rounded-lg bg-gradient-to-r from-fuchsia-600 to-pink-600 hover:from-fuchsia-500 hover:to-pink-500 text-white text-sm font-semibold disabled:opacity-60 flex items-center gap-2 touch-manipulation"
-                            >
-                                {isRenderingClip ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                                {isRenderingClip ? 'Rendern...' : 'Jetzt rendern'}
-                            </button>
-                        </div>
-                    </div>
-                </div>,
-                document.body
-                )
-            )}
 
             {/* Post Modal */}
             {showModal && (
@@ -1600,6 +1618,19 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                     <p className="mt-2 text-[11px] text-zinc-500 leading-relaxed">
                                         {INSTAGRAM_SHARE_MODES.find((mode) => mode.value === instagramShareMode)?.description}
                                     </p>
+                                    <div className="mt-3">
+                                        <label className="block text-xs font-bold text-zinc-400 mb-2">Collaborator (optional)</label>
+                                        <input
+                                            type="text"
+                                            value={instagramCollaborators}
+                                            onChange={(e) => setInstagramCollaborators(e.target.value)}
+                                            className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-primary/50"
+                                            placeholder={resolvedJobInstagramCollaborators ? `Job-Default (ohne @): ${resolvedJobInstagramCollaborators}` : 'Ohne @, z. B. partner_account'}
+                                        />
+                                        <p className="mt-2 text-[11px] text-zinc-500 leading-relaxed">
+                                            Optional. Mit oder ohne `@` moeglich, empfohlen ohne `@`. Leer = Job-Default.
+                                        </p>
+                                    </div>
                                     <p className="mt-2 text-[11px] text-zinc-600 leading-relaxed">
                                         Upload-Post nutzt das eingebettete Original-Audio. Der Text für Instagram wird über das Reel-Titel-Feld gesendet, nicht über das globale Beschreibungsfeld.
                                     </p>

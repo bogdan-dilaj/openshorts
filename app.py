@@ -19,6 +19,9 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import socket
+import numpy as np
+import random
+import concurrent.futures
 from dotenv import load_dotenv
 from typing import Any, Dict, Optional, List, Tuple
 from contextlib import asynccontextmanager
@@ -44,6 +47,7 @@ from tight_edit import (
     plan_manual_keep_segments,
     render_keep_segments,
 )
+from google import genai
 
 load_dotenv()
 
@@ -272,6 +276,37 @@ def _persist_job_overlay_defaults(
         return None
 
 
+def _persist_job_social_defaults(
+    job_id: str,
+    *,
+    instagram_collaborators: Any = _METADATA_UNSET,
+) -> Optional[Dict[str, Any]]:
+    try:
+        _, metadata_path, data = _load_job_metadata_or_404(job_id)
+        existing = data.get("job_social_defaults")
+        next_defaults = dict(existing) if isinstance(existing, dict) else {}
+
+        if instagram_collaborators is not _METADATA_UNSET:
+            normalized = _normalize_instagram_collaborators(instagram_collaborators or "")
+            if normalized:
+                next_defaults["instagram_collaborators"] = normalized
+            else:
+                next_defaults.pop("instagram_collaborators", None)
+
+        if next_defaults:
+            next_defaults["updated_at"] = time.time()
+            data["job_social_defaults"] = next_defaults
+        else:
+            data.pop("job_social_defaults", None)
+
+        _write_metadata(metadata_path, data)
+        _refresh_job_result(job_id)
+        return data.get("job_social_defaults")
+    except Exception as e:
+        print(f"⚠️ Failed to persist job social defaults for {job_id}: {e}")
+        return None
+
+
 def _persist_clip_text_metadata(
     job_id: str,
     clip_index: int,
@@ -279,6 +314,7 @@ def _persist_clip_text_metadata(
     video_title_for_youtube_short: Any = _METADATA_UNSET,
     video_description_for_tiktok: Any = _METADATA_UNSET,
     video_description_for_instagram: Any = _METADATA_UNSET,
+    instagram_collaborators: Any = _METADATA_UNSET,
 ) -> Optional[Dict[str, Any]]:
     try:
         output_dir, metadata_path, data = _load_job_metadata_or_404(job_id)
@@ -296,6 +332,12 @@ def _persist_clip_text_metadata(
             clip["video_description_for_tiktok"] = _normalize_unicode_text(video_description_for_tiktok or "").strip()
         if video_description_for_instagram is not _METADATA_UNSET:
             clip["video_description_for_instagram"] = _normalize_unicode_text(video_description_for_instagram or "").strip()
+        if instagram_collaborators is not _METADATA_UNSET:
+            normalized_collaborators = _normalize_instagram_collaborators(instagram_collaborators or "")
+            if normalized_collaborators:
+                clip["instagram_collaborators"] = normalized_collaborators
+            else:
+                clip.pop("instagram_collaborators", None)
 
         clips[clip_index] = clip
         data["shorts"] = clips
@@ -349,6 +391,25 @@ def _normalize_unicode_text(value: Any) -> str:
     except Exception:
         pass
     return text
+
+
+def _normalize_instagram_collaborators(value: Any) -> str:
+    text = _normalize_unicode_text(value).strip()
+    if not text:
+        return ""
+
+    normalized_parts: List[str] = []
+    seen = set()
+    for raw_part in text.split(","):
+        candidate = raw_part.strip().lstrip("@").strip()
+        if not candidate:
+            continue
+        dedupe_key = candidate.lower()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        normalized_parts.append(candidate)
+    return ",".join(normalized_parts)
 
 
 def _resolve_transcription_language_hint(
@@ -778,6 +839,628 @@ def _resolve_subtitle_transcript_payload(
     return subtitle_transcript, clip_start, clip_end, "audio"
 
 
+def _transcript_has_word_timestamps(transcript: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(transcript, dict):
+        return False
+    for segment in transcript.get("segments") or []:
+        if not isinstance(segment, dict):
+            continue
+        for word in segment.get("words") or []:
+            if not isinstance(word, dict):
+                continue
+            if str(word.get("word") or "").strip():
+                return True
+    return False
+
+
+def _merge_keep_segments(
+    keep_segments: List[Tuple[float, float]],
+    tolerance: float = 0.01,
+) -> List[Tuple[float, float]]:
+    merged: List[Tuple[float, float]] = []
+    for raw_start, raw_end in keep_segments:
+        start = _coerce_float(raw_start)
+        end = _coerce_float(raw_end)
+        if start is None or end is None or end <= start:
+            continue
+        if merged and start >= merged[-1][0] and start <= (merged[-1][1] + tolerance):
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return [(round(start, 3), round(end, 3)) for start, end in merged]
+
+
+def _timeline_interval_to_source_segments(
+    keep_segments: List[Tuple[float, float]],
+    timeline_start: float,
+    timeline_end: float,
+) -> List[Tuple[float, float]]:
+    if timeline_end <= timeline_start:
+        return []
+
+    mapped_segments: List[Tuple[float, float]] = []
+    output_cursor = 0.0
+
+    for raw_source_start, raw_source_end in keep_segments:
+        source_start = _coerce_float(raw_source_start)
+        source_end = _coerce_float(raw_source_end)
+        if source_start is None or source_end is None or source_end <= source_start:
+            continue
+
+        source_duration = source_end - source_start
+        segment_output_start = output_cursor
+        segment_output_end = output_cursor + source_duration
+        overlap_start = max(timeline_start, segment_output_start)
+        overlap_end = min(timeline_end, segment_output_end)
+
+        if overlap_end > overlap_start:
+            mapped_start = source_start + (overlap_start - segment_output_start)
+            mapped_end = source_start + (overlap_end - segment_output_start)
+            mapped_segments.append((mapped_start, mapped_end))
+
+        output_cursor = segment_output_end
+
+    return _merge_keep_segments(mapped_segments, tolerance=0.005)
+
+
+def _remap_transcript_to_keep_segments(
+    transcript: Optional[Dict[str, Any]],
+    keep_segments: List[Tuple[float, float]],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(transcript, dict):
+        return None
+    if not keep_segments:
+        return None
+
+    remapped_segments: List[Dict[str, Any]] = []
+    output_cursor = 0.0
+
+    for raw_keep_start, raw_keep_end in keep_segments:
+        keep_start = _coerce_float(raw_keep_start)
+        keep_end = _coerce_float(raw_keep_end)
+        if keep_start is None or keep_end is None or keep_end <= keep_start:
+            continue
+
+        window = _build_transcript_window_for_range(transcript, keep_start, keep_end)
+        if isinstance(window, dict):
+            for segment in window.get("segments") or []:
+                if not isinstance(segment, dict):
+                    continue
+                seg_start = _coerce_float(segment.get("start"))
+                seg_end = _coerce_float(segment.get("end"))
+                if seg_start is None:
+                    seg_start = keep_start
+                if seg_end is None:
+                    seg_end = seg_start
+                if seg_end <= keep_start or seg_start >= keep_end:
+                    continue
+
+                clipped_start = max(keep_start, seg_start)
+                clipped_end = min(keep_end, seg_end)
+                mapped_words: List[Dict[str, Any]] = []
+                for word in segment.get("words") or []:
+                    if not isinstance(word, dict):
+                        continue
+                    word_text = str(word.get("word") or "").strip()
+                    if not word_text:
+                        continue
+                    word_start = _coerce_float(word.get("start"))
+                    word_end = _coerce_float(word.get("end"))
+                    if word_start is None:
+                        word_start = clipped_start
+                    if word_end is None:
+                        word_end = word_start
+                    if word_end <= keep_start or word_start >= keep_end:
+                        continue
+                    mapped_words.append({
+                        "word": word_text,
+                        "start": round(output_cursor + (max(keep_start, word_start) - keep_start), 3),
+                        "end": round(output_cursor + (min(keep_end, word_end) - keep_start), 3),
+                    })
+
+                text = str(segment.get("text") or "").strip()
+                if not mapped_words and not text:
+                    continue
+
+                remapped_segments.append({
+                    "start": round(output_cursor + (clipped_start - keep_start), 3),
+                    "end": round(output_cursor + (clipped_end - keep_start), 3),
+                    "text": text,
+                    "words": mapped_words,
+                })
+
+        output_cursor += keep_end - keep_start
+
+    if not remapped_segments:
+        return None
+
+    return {
+        "language": transcript.get("language"),
+        "segments": remapped_segments,
+    }
+
+
+def _heuristic_viral_teaser_plan(
+    transcript: Optional[Dict[str, Any]],
+    duration: float,
+    *,
+    interview_mode: bool = False,
+) -> Optional[Dict[str, Any]]:
+    safe_duration = max(0.0, float(duration or 0.0))
+    if safe_duration < 4.0:
+        return None
+
+    min_teaser_length = 1.35 if interview_mode else 1.05
+    max_teaser_length = 2.8 if interview_mode else 2.25
+    preferred_min_start = safe_duration * 0.15
+
+    candidates: List[Tuple[float, Dict[str, Any]]] = []
+    if isinstance(transcript, dict):
+        for segment in transcript.get("segments") or []:
+            if not isinstance(segment, dict):
+                continue
+            seg_start = _coerce_float(segment.get("start"))
+            seg_end = _coerce_float(segment.get("end"))
+            if seg_start is None or seg_end is None or seg_end <= seg_start:
+                continue
+
+            text = str(segment.get("text") or "").strip()
+            if not text:
+                continue
+
+            word_count = len(re.findall(r"\w+", text))
+            if word_count < 3:
+                continue
+
+            teaser_start = max(0.0, min(seg_start, max(0.0, safe_duration - min_teaser_length)))
+            teaser_end = min(
+                safe_duration,
+                max(seg_end, teaser_start + min_teaser_length),
+            )
+            teaser_end = min(teaser_end, teaser_start + max_teaser_length)
+            if teaser_end - teaser_start < min_teaser_length:
+                continue
+
+            score = 0.0
+            if teaser_start >= preferred_min_start:
+                score += 1.8
+            else:
+                score -= 0.6
+            score += min(word_count, 12) * 0.08
+            score += min(teaser_start / max(1.0, safe_duration), 0.7)
+            if any(marker in text for marker in ("?", "!")):
+                score += 0.55
+            if re.search(r"\d|€|\$|%|k\b|million|tausend", text.lower()):
+                score += 0.45
+            if interview_mode and 5 <= word_count <= 14:
+                score += 0.35
+            if not interview_mode and word_count <= 10:
+                score += 0.2
+
+            candidates.append((score, {
+                "use_teaser": True,
+                "teaser_start": teaser_start,
+                "teaser_end": teaser_end,
+                "reason": text[:180],
+                "effect_notes": (
+                    "Subtle interview punch-ins on emphasis and restrained contrast pops."
+                    if interview_mode
+                    else "Rhythmic punch-ins, crop shifts, and short emphasis flashes on key beats."
+                ),
+                "pattern_interrupts": [],
+            }))
+
+    if candidates:
+        best_plan = max(candidates, key=lambda item: item[0])[1]
+        best_plan["source"] = "heuristic"
+        return best_plan
+
+    teaser_length = 1.6 if interview_mode else 1.25
+    teaser_start = min(max(safe_duration * 0.35, preferred_min_start), max(0.0, safe_duration - teaser_length))
+    teaser_end = min(safe_duration, teaser_start + teaser_length)
+    if teaser_end - teaser_start < 0.9:
+        return None
+    return {
+        "use_teaser": True,
+        "teaser_start": teaser_start,
+        "teaser_end": teaser_end,
+        "reason": "Later clip opener chosen as cold open fallback.",
+        "effect_notes": (
+            "Keep the interview pacing premium with subtle punch-ins."
+            if interview_mode
+            else "Use clean punch-ins and one or two tasteful emphasis moments."
+        ),
+        "pattern_interrupts": [],
+        "source": "heuristic",
+    }
+
+
+def _sanitize_viral_teaser_plan(
+    plan: Optional[Dict[str, Any]],
+    duration: float,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(plan, dict):
+        return None
+
+    if plan.get("use_teaser") is False or str(plan.get("use_teaser", "")).strip().lower() == "false":
+        return None
+
+    safe_duration = max(0.0, float(duration or 0.0))
+    teaser_start = _coerce_float(plan.get("teaser_start"))
+    teaser_end = _coerce_float(plan.get("teaser_end"))
+    if teaser_start is None or teaser_end is None:
+        return None
+
+    teaser_start = max(0.0, min(safe_duration, teaser_start))
+    teaser_end = max(0.0, min(safe_duration, teaser_end))
+    if teaser_end - teaser_start < 0.75:
+        return None
+
+    pattern_interrupts = plan.get("pattern_interrupts")
+    if not isinstance(pattern_interrupts, list):
+        pattern_interrupts = []
+
+    return {
+        "use_teaser": True,
+        "teaser_start": round(teaser_start, 3),
+        "teaser_end": round(teaser_end, 3),
+        "reason": str(plan.get("reason") or "").strip(),
+        "effect_notes": str(plan.get("effect_notes") or "").strip(),
+        "pattern_interrupts": pattern_interrupts[:6],
+        "source": str(plan.get("source") or "").strip() or "ai",
+    }
+
+
+def _resolve_ai_editor_runtime(request: Request) -> Dict[str, Any]:
+    provider_name = (request.headers.get("X-LLM-Provider") or "gemini").strip().lower()
+    runtime = {
+        "provider": provider_name,
+        "api_key": request.headers.get("X-Gemini-Key") or os.environ.get("GEMINI_API_KEY"),
+        "ollama_base_url": request.headers.get("X-Ollama-Base-Url") or os.environ.get("OLLAMA_BASE_URL"),
+        "ollama_model": request.headers.get("X-Ollama-Model") or os.environ.get("OLLAMA_MODEL"),
+        "enabled": False,
+        "warning": "",
+    }
+
+    if provider_name == "gemini":
+        runtime["enabled"] = bool(runtime["api_key"])
+        if not runtime["enabled"]:
+            runtime["warning"] = "Gemini API-Key fehlt. Verwende heuristischen Teaser ohne KI-Pattern-Interrupts."
+        return runtime
+
+    if provider_name == "ollama":
+        try:
+            normalized_base_url, normalized_model = _validate_ollama_model_or_raise(
+                runtime["ollama_base_url"],
+                runtime["ollama_model"],
+            )
+            runtime["ollama_base_url"] = normalized_base_url
+            runtime["ollama_model"] = normalized_model
+            runtime["enabled"] = True
+        except HTTPException as exc:
+            runtime["warning"] = str(exc.detail)
+        return runtime
+
+    runtime["warning"] = f"Unbekannter LLM-Provider '{provider_name}'. Verwende heuristischen Fallback."
+    return runtime
+
+
+def _extract_json_payload(text: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not text:
+        return None
+
+    cleaned = str(text).strip()
+    if cleaned.startswith("```json"):
+        cleaned = cleaned[7:]
+    elif cleaned.startswith("```"):
+        cleaned = cleaned[3:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    cleaned = cleaned.strip()
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    start_idx = cleaned.find("{")
+    end_idx = cleaned.rfind("}")
+    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+        candidate = cleaned[start_idx:end_idx + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _resolve_pexels_api_key(request: Request) -> Optional[str]:
+    return request.headers.get("X-Pexels-Key") or os.environ.get("PEXELS_API_KEY")
+
+
+def _build_stock_overlay_prompt(
+    clip_duration: float,
+    transcript: Optional[Dict[str, Any]],
+    language_name: str,
+    hook_text: Optional[str] = None,
+) -> str:
+    transcript_text = ""
+    if isinstance(transcript, dict):
+        transcript_text = " ".join(
+            str(segment.get("text") or "").strip() for segment in transcript.get("segments") or []
+        ).strip()
+    prompt = [
+        "You are a smart short-form video assistant.",
+        f"The clip language is {language_name}.",
+        "Based on the clip transcript and the viral hook text, suggest a broad, thematic Pexels search query and an insertion time for a stock image overlay.",
+        "The image should appear in the lower half of the vertical video for a short attention-grabbing moment.",
+        "Return only a JSON object with the following fields:",
+        "- search_keywords: an array of 1-3 short keyword phrases suitable for Pexels search.",
+        "- overlay_time: a single number in seconds within the final clip.",
+        "- overlay_duration: a single number in seconds between 2.0 and 4.0.",
+        "Do not include any extra text outside the JSON object.",
+        f"CLIP_DURATION: {round(float(clip_duration or 0.0), 3)}",
+    ]
+    if hook_text:
+        prompt.append(f"Viral hook text: {hook_text}")
+    if transcript_text:
+        prompt.append("Transcript text:")
+        prompt.append(transcript_text)
+    prompt.append(
+        "Choose a search query that describes the clip's overall theme in a generic way, not a very narrow or specific product/brand detail."
+    )
+    prompt.append(
+        "For example, if the clip is about video marketing, use something like 'social media creation' or 'content storytelling', not an exact app or brand name."
+    )
+    prompt.append(
+        "Avoid people, faces, portraits, or identifiable characters in the search keywords. Prefer generic scenes, abstract backgrounds, workspaces, cityscapes, or calm textures."
+    )
+    prompt.append(
+        "If possible, choose keywords that describe a non-human visual mood or environment, such as a clean workspace, stylized urban scene, soft abstract lighting, or minimal graphic background."
+    )
+    prompt.append(
+        "Choose a moment that feels natural, attention-grabbing, and relevant to the clip."
+    )
+    return "\n".join(prompt)
+
+
+def _call_stock_overlay_llm(ai_runtime: Dict[str, Any], prompt: str, timeout_seconds: int = 15) -> Optional[Dict[str, Any]]:
+    def _do_llm_call() -> Optional[Dict[str, Any]]:
+        provider = ai_runtime.get("provider", "gemini")
+        if provider == "gemini":
+            api_key = ai_runtime.get("api_key")
+            if not api_key:
+                return None
+            try:
+                client = genai.Client(api_key=api_key)
+                model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+                response = client.models.generate_content(model=model_name, contents=prompt)
+                return _extract_json_payload(response.text)
+            except Exception:
+                return None
+
+        if provider == "ollama":
+            base_url = ai_runtime.get("ollama_base_url")
+            model_name = ai_runtime.get("ollama_model")
+            if not base_url or not model_name:
+                return None
+            try:
+                from main import _call_ollama
+
+                _, response_text = _call_ollama(prompt, base_url, model_name)
+                return _extract_json_payload(response_text)
+            except Exception:
+                return None
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_do_llm_call)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except concurrent.futures.TimeoutError:
+            print(f"⚠️ Stock overlay LLM timed out after {timeout_seconds}s")
+            return None
+
+
+def _sanitize_stock_overlay_plan(payload: Any, clip_duration: float) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+
+    keywords = payload.get("search_keywords") or payload.get("search_query") or payload.get("keywords")
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    if not isinstance(keywords, list):
+        return None
+    search_keywords = [str(k).strip() for k in keywords if str(k or "").strip()]
+    if not search_keywords:
+        return None
+
+    overlay_time = _coerce_float(payload.get("overlay_time") or payload.get("time") or payload.get("start"))
+    if overlay_time is None:
+        return None
+    overlay_duration = _coerce_float(payload.get("overlay_duration") or payload.get("duration"))
+    if overlay_duration is None:
+        overlay_duration = 3.0
+    overlay_duration = max(1.5, min(float(overlay_duration), min(4.0, float(clip_duration or 4.0))))
+    overlay_time = max(0.0, min(float(clip_duration or 0.0) - overlay_duration, float(overlay_time)))
+    if overlay_time < 0.0:
+        overlay_time = 0.0
+
+    if overlay_time + overlay_duration > float(clip_duration or 0.0):
+        overlay_time = max(0.0, float(clip_duration or 0.0) - overlay_duration)
+
+    return {
+        "search_keywords": search_keywords,
+        "overlay_time": round(overlay_time, 3),
+        "overlay_duration": round(overlay_duration, 3),
+    }
+
+
+def _search_pexels_image(search_query: str, api_key: str) -> Optional[Dict[str, Any]]:
+    if not search_query:
+        return None
+    query = urllib.parse.quote(search_query)
+    url = f"https://api.pexels.com/v1/search?query={query}&per_page=15&orientation=portrait"
+    req = urllib.request.Request(url, headers={
+        "Authorization": api_key,
+        "User-Agent": "OpenShorts/1.0",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+    photos = data.get("photos") if isinstance(data, dict) else None
+    if not isinstance(photos, list) or not photos:
+        return None
+    choice = random.choice(photos)
+    src = choice.get("src") or {}
+    for key in ["large2x", "large", "medium", "original"]:
+        if isinstance(src.get(key), str) and src.get(key).strip():
+            return {
+                "photo_url": str(src.get(key)).strip(),
+                "photographer": choice.get("photographer") or "",
+                "photo_id": choice.get("id"),
+            }
+    return None
+
+
+def _download_stock_image(image_url: str, output_path: str) -> bool:
+    req = urllib.request.Request(image_url, headers={"User-Agent": "OpenShorts/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            with open(output_path, "wb") as out_file:
+                out_file.write(response.read())
+        return True
+    except Exception:
+        return False
+
+
+def _apply_pexels_overlay_to_video(
+    input_path: str,
+    output_path: str,
+    image_path: str,
+    overlay_time: float,
+    overlay_duration: float,
+) -> bool:
+    import cv2
+
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        return False
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1080)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1920)
+    cap.release()
+
+    overlay_width = max(64, min(int(width * 0.82), width))
+    overlay_height = max(64, min(int(height * 0.32), height))
+    x_expr = f"({width}-overlay_w)/2"
+    y_expr = f"{height}-overlay_h-40"
+    fade_in = 0.25
+    fade_out = 0.25
+    scaled_image = (
+        f"[1:v]format=rgba,scale='min({overlay_width},iw)':'min({overlay_height},ih)':force_original_aspect_ratio=decrease,"
+        f"fade=t=in:st=0:d={fade_in}:alpha=1,"
+        f"fade=t=out:st={max(0.0, overlay_duration - fade_out)}:d={fade_out}:alpha=1[img]"
+    )
+    filter_complex = (
+        f"{scaled_image};"
+        f"[0:v][img]overlay=x={x_expr}:y={y_expr}:format=auto:enable='between(t,{overlay_time},{overlay_time + overlay_duration})'"
+    )
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        input_path,
+        "-i",
+        image_path,
+        "-filter_complex",
+        filter_complex,
+        "-c:v",
+        "libx264",
+        "-preset",
+        os.environ.get("OVERLAY_FFMPEG_PRESET", "veryfast").strip() or "veryfast",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+    ]
+    if _video_has_audio(input_path):
+        command.extend(["-c:a", "copy"])
+    else:
+        command.append("-an")
+    command.append(output_path)
+
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=90,
+        )
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        print(f"⚠️ Pexels overlay FFmpeg timeout after 90s")
+        return False
+    except subprocess.CalledProcessError as exc:
+        stderr_text = exc.stderr.decode("utf-8", errors="ignore") if exc.stderr else str(exc)
+        print(f"⚠️ Pexels overlay FFmpeg failed: {stderr_text}")
+        return False
+
+
+def _build_viral_effect_style_context(
+    *,
+    interview_mode: bool,
+    teaser_plan: Optional[Dict[str, Any]],
+) -> str:
+    lines = [
+        "The edit must look premium and intentional, never random or meme-chaotic.",
+        "Use only a few pattern interrupts, timed to meaningful beats in the speech.",
+    ]
+
+    if interview_mode:
+        lines.extend([
+            "Interview mode: keep it restrained and professional.",
+            "Prefer subtle punch-ins, gentle crop changes, and brief emphasis flashes only on major points.",
+            "Avoid aggressive constant motion, goofy glitches, and over-stylized effects.",
+        ])
+    else:
+        lines.extend([
+            "Standard short mode: keep the pacing rhythmic and retention-focused.",
+            "Prefer punch-ins, selective crop changes, brief light/contrast pops, and one or two sharp emphasis moments.",
+            "Do not overuse flash effects; they should feel premium, not spammy.",
+        ])
+
+    if isinstance(teaser_plan, dict):
+        effect_notes = str(teaser_plan.get("effect_notes") or "").strip()
+        reason = str(teaser_plan.get("reason") or "").strip()
+        if reason:
+            lines.append(f"Cold open context: {reason}")
+        if effect_notes:
+            lines.append(f"Planner notes: {effect_notes}")
+
+        pattern_interrupts = teaser_plan.get("pattern_interrupts") or []
+        readable_notes = []
+        for item in pattern_interrupts[:4]:
+            if not isinstance(item, dict):
+                continue
+            readable_notes.append(
+                f"{item.get('effect') or 'effect'} around {item.get('time') or '?'}s"
+                + (f" ({item.get('reason')})" if item.get("reason") else "")
+            )
+        if readable_notes:
+            lines.append("Suggested moments: " + "; ".join(readable_notes))
+
+    return " ".join(lines)
+
+
 def _strip_overlay_prefixes(filename: Optional[str]) -> Optional[str]:
     current = os.path.basename(filename or "")
     pattern = re.compile(r"^(?:hook|subtitled|edited|translated|trimmed)_\d+_(.+)$")
@@ -795,6 +1478,8 @@ def _strip_overlay_prefixes(filename: Optional[str]) -> Optional[str]:
 
 def _infer_version_operation(filename: Optional[str]) -> str:
     name = os.path.basename(filename or "").lower()
+    if name.startswith("viral_rendered_"):
+        return "viral_render"
     if name.startswith("rendered_"):
         return "render"
     if name.startswith("subtitled_"):
@@ -813,6 +1498,7 @@ def _infer_version_operation(filename: Optional[str]) -> str:
 def _operation_label(operation: str) -> str:
     return {
         "original": "Original",
+        "viral_render": "Viral Render",
         "render": "Rendered",
         "subtitle": "Subtitles",
         "hook": "Hook",
@@ -825,7 +1511,7 @@ def _operation_label(operation: str) -> str:
 def _default_transcript_source(operation: str) -> str:
     if operation == "render":
         return "original"
-    return "audio" if operation in {"translate", "edit"} else "original"
+    return "audio" if operation in {"translate", "edit", "viral_render"} else "original"
 
 
 def _format_time_label(seconds: float) -> str:
@@ -1097,6 +1783,48 @@ def _probe_video_duration(video_path: str) -> float:
     ]
     result = subprocess.check_output(cmd).decode().strip()
     return max(0.0, float(result))
+
+
+def _probe_video_stream_metrics(video_path: str) -> Dict[str, float]:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,avg_frame_rate",
+        "-of",
+        "json",
+        video_path,
+    ]
+    payload = json.loads(subprocess.check_output(cmd).decode().strip() or "{}")
+    streams = payload.get("streams") or []
+    stream = streams[0] if streams else {}
+    width = int(stream.get("width") or 0)
+    height = int(stream.get("height") or 0)
+    avg_frame_rate = str(stream.get("avg_frame_rate") or "30/1").strip()
+
+    fps = 30.0
+    if "/" in avg_frame_rate:
+        numerator, denominator = avg_frame_rate.split("/", 1)
+        try:
+            denominator_value = float(denominator or 1.0)
+            fps = float(numerator or 0.0) / (denominator_value or 1.0)
+        except (TypeError, ValueError, ZeroDivisionError):
+            fps = 30.0
+    else:
+        try:
+            fps = float(avg_frame_rate)
+        except (TypeError, ValueError):
+            fps = 30.0
+
+    return {
+        "width": width,
+        "height": height,
+        "fps": max(1.0, fps or 30.0),
+        "duration": _probe_video_duration(video_path),
+    }
 
 
 def _probe_video_codec(video_path: str) -> str:
@@ -2083,12 +2811,18 @@ class JobOverlayDefaultsRequest(BaseModel):
     hook_style: Optional[Dict[str, Any]] = None
 
 
+class JobSocialDefaultsRequest(BaseModel):
+    job_id: str
+    instagram_collaborators: Optional[str] = None
+
+
 class ClipTextMetadataUpdateRequest(BaseModel):
     job_id: str
     clip_index: int
     video_title_for_youtube_short: Optional[str] = None
     video_description_for_tiktok: Optional[str] = None
     video_description_for_instagram: Optional[str] = None
+    instagram_collaborators: Optional[str] = None
 
 def enqueue_output(out, job_id, output_dir):
     """Reads output from a subprocess and appends it to jobs logs."""
@@ -2746,6 +3480,24 @@ async def update_job_overlay_defaults(req: JobOverlayDefaultsRequest):
     }
 
 
+@app.post("/api/job/social-defaults")
+async def update_job_social_defaults(req: JobSocialDefaultsRequest):
+    _get_job_record_or_404(req.job_id)
+
+    persisted_defaults = _persist_job_social_defaults(
+        req.job_id,
+        instagram_collaborators=req.instagram_collaborators if req.instagram_collaborators is not None else _METADATA_UNSET,
+    )
+    if persisted_defaults is None:
+        raise HTTPException(status_code=500, detail="Failed to persist job social defaults.")
+
+    return {
+        "success": True,
+        "job_id": req.job_id,
+        "job_social_defaults": persisted_defaults,
+    }
+
+
 @app.delete("/api/jobs/{job_id}")
 async def delete_job(job_id: str):
     normalized_job_id, output_dir_abs = _resolve_safe_job_output_dir(job_id)
@@ -2915,6 +3667,773 @@ from subtitles import burn_subtitles, transcribe_audio
 from hooks import add_hook_to_video
 from translate import translate_video, get_supported_languages
 from thumbnail import analyze_video_for_titles, refine_titles, generate_thumbnail, generate_youtube_description
+
+
+def _normalize_visual_effect_type(value: Any) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    alias_map = {
+        "zoom": "zoom_pulse",
+        "zoom_in": "zoom_pulse",
+        "punch_in": "zoom_pulse",
+        "punchin": "zoom_pulse",
+        "flash": "light_flash",
+        "lightflash": "light_flash",
+        "white_flash": "light_flash",
+        "zoom_and_flash": "zoom_flash",
+    }
+    normalized = alias_map.get(normalized, normalized)
+    return normalized if normalized in {"zoom_pulse", "light_flash", "zoom_flash"} else "zoom_pulse"
+
+
+def _normalize_visual_effect_strength(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"low", "light", "soft", "small"}:
+        return "low"
+    if normalized in {"high", "strong", "hard", "big"}:
+        return "high"
+    return "medium"
+
+
+def _sanitize_pattern_interrupt_plan(
+    plan: Optional[Dict[str, Any]],
+    duration: float,
+    *,
+    interview_mode: bool,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(plan, dict):
+        return None
+
+    safe_duration = max(0.0, float(duration or 0.0))
+    if safe_duration < 0.9:
+        return None
+
+    min_spacing = 1.15 if interview_mode else 0.9
+    raw_interrupts = plan.get("pattern_interrupts")
+    if not isinstance(raw_interrupts, list):
+        raw_interrupts = []
+
+    sanitized: List[Dict[str, Any]] = []
+    for item in raw_interrupts:
+        if not isinstance(item, dict):
+            continue
+        event_time = _coerce_float(item.get("time"))
+        if event_time is None:
+            continue
+        event_time = max(0.4, min(safe_duration - 0.4, event_time))
+        effect_type = _normalize_visual_effect_type(item.get("effect"))
+        strength = _normalize_visual_effect_strength(item.get("strength"))
+
+        duration_value = _coerce_float(item.get("duration"))
+        if duration_value is None or duration_value <= 0:
+            if effect_type == "light_flash":
+                duration_value = 0.10 if interview_mode else 0.12
+            elif effect_type == "zoom_flash":
+                duration_value = 0.95 if interview_mode else 1.05
+            else:
+                duration_value = 0.88 if interview_mode else 1.0
+
+        sanitized.append({
+            "time": round(event_time, 3),
+            "effect": effect_type,
+            "strength": strength,
+            "duration": round(max(0.06, min(1.4, duration_value)), 3),
+            "reason": str(item.get("reason") or "").strip(),
+        })
+
+    sanitized.sort(key=lambda item: item["time"])
+    filtered: List[Dict[str, Any]] = []
+    for item in sanitized:
+        if filtered and (item["time"] - filtered[-1]["time"]) < min_spacing:
+            strength_rank = {"low": 0, "medium": 1, "high": 2}
+            if strength_rank[item["strength"]] > strength_rank[filtered[-1]["strength"]]:
+                filtered[-1] = item
+            continue
+        filtered.append(item)
+
+    max_count = 6 if interview_mode else 8
+    return {
+        "source": str(plan.get("source") or "").strip() or "ai",
+        "effect_notes": str(plan.get("effect_notes") or "").strip(),
+        "pattern_interrupts": filtered[:max_count],
+    }
+
+
+def _heuristic_pattern_interrupt_plan(
+    transcript: Optional[Dict[str, Any]],
+    duration: float,
+    *,
+    interview_mode: bool,
+) -> Dict[str, Any]:
+    safe_duration = max(0.0, float(duration or 0.0))
+    target_count = 4 if interview_mode else 5
+    if safe_duration >= 18:
+        target_count += 1
+    if safe_duration >= 32 and not interview_mode:
+        target_count += 1
+
+    candidates: List[Tuple[float, float, str]] = []
+    if isinstance(transcript, dict):
+        for segment in transcript.get("segments") or []:
+            if not isinstance(segment, dict):
+                continue
+            seg_start = _coerce_float(segment.get("start"))
+            seg_end = _coerce_float(segment.get("end"))
+            text = str(segment.get("text") or "").strip()
+            if seg_start is None or seg_end is None or seg_end <= seg_start or not text:
+                continue
+            if seg_start < 0.4 or seg_start > (safe_duration - 0.6):
+                continue
+
+            word_count = len(re.findall(r"\w+", text))
+            if word_count < 3:
+                continue
+
+            score = min(word_count, 12) * 0.12
+            if any(marker in text for marker in ("?", "!")):
+                score += 0.5
+            if re.search(r"\d|€|\$|%|k\b|million|tausend", text.lower()):
+                score += 0.45
+            if len(text) <= 80:
+                score += 0.2
+            score += min(seg_start / max(1.0, safe_duration), 0.5)
+            candidates.append((score, seg_start, text))
+
+    if not candidates:
+        step = max(2.15 if interview_mode else 1.75, safe_duration / max(1, target_count + 1))
+        generated = []
+        cursor = min(1.2, max(0.5, safe_duration * 0.15))
+        while cursor < max(0.4, safe_duration - 0.6) and len(generated) < target_count:
+            generated.append((1.0, cursor, "Fallback beat"))
+            cursor += step
+        candidates = generated
+
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    chosen: List[Tuple[float, float, str]] = []
+    min_spacing = 1.2 if interview_mode else 0.95
+    for candidate in candidates:
+        if all(abs(candidate[1] - existing[1]) >= min_spacing for existing in chosen):
+            chosen.append(candidate)
+        if len(chosen) >= target_count:
+            break
+
+    chosen.sort(key=lambda item: item[1])
+    interrupts: List[Dict[str, Any]] = []
+    for index, (_, event_time, reason) in enumerate(chosen):
+        if interview_mode:
+            cycle = ["zoom_pulse", "light_flash", "zoom_pulse", "light_flash", "zoom_pulse"]
+            effect = cycle[index % len(cycle)]
+            strength = (
+                "low"
+                if effect == "light_flash"
+                else ("high" if index == 0 else "medium")
+            )
+        else:
+            cycle = ["zoom_flash", "light_flash", "zoom_pulse", "light_flash", "zoom_pulse", "light_flash"]
+            effect = cycle[index % len(cycle)]
+            strength = "high" if effect == "zoom_flash" and index == 0 else ("medium" if effect != "light_flash" else "low")
+
+        interrupts.append({
+            "time": round(event_time, 3),
+            "effect": effect,
+            "strength": strength,
+            "reason": reason[:140],
+        })
+
+    return {
+        "source": "heuristic",
+        "effect_notes": (
+            "Interview mode uses smoother panel zooms and slightly more frequent micro flashes."
+            if interview_mode
+            else "Face-aware smoother zoom holds with more frequent micro-flashes for retention."
+        ),
+        "pattern_interrupts": interrupts,
+    }
+
+
+def _build_zoom_cycle_plan(
+    duration: float,
+    *,
+    interview_mode: bool,
+    seed_key: str = "",
+) -> Dict[str, Any]:
+    safe_duration = max(0.0, float(duration or 0.0))
+    rng_seed = hashlib.sha1(
+        f"{seed_key}:{safe_duration:.3f}:{'interview' if interview_mode else 'standard'}".encode("utf-8")
+    ).hexdigest()
+    rng = random.Random(rng_seed)
+
+    zoom_in_duration = 0.78 if interview_mode else 0.70
+    zoom_out_duration = 0.94 if interview_mode else 0.84
+    min_hold = 5.0
+    max_hold = 8.0
+    min_cooldown = 5.0
+    max_cooldown = 6.8
+    initial_start = 0.18
+    end_buffer = 0.28
+
+    zoom_cycles: List[Dict[str, Any]] = []
+    flash_events: List[Dict[str, Any]] = []
+    pattern_interrupts: List[Dict[str, Any]] = []
+    cursor = initial_start
+    cycle_index = 0
+
+    while cursor < max(0.0, safe_duration - 1.1):
+        remaining = safe_duration - cursor - end_buffer
+        if remaining < (zoom_in_duration + zoom_out_duration + 1.0):
+            break
+
+        hold_duration = min(rng.uniform(min_hold, max_hold), max(1.0, remaining - zoom_in_duration - zoom_out_duration))
+        zoom_delta = rng.uniform(0.22, 0.33) if interview_mode else rng.uniform(0.28, 0.40)
+        zoom_out_start = cursor + zoom_in_duration + hold_duration
+        cycle_end = zoom_out_start + zoom_out_duration
+        if cycle_end > safe_duration - end_buffer:
+            hold_duration = max(1.0, (safe_duration - end_buffer) - cursor - zoom_in_duration - zoom_out_duration)
+            zoom_out_start = cursor + zoom_in_duration + hold_duration
+            cycle_end = zoom_out_start + zoom_out_duration
+
+        zoom_cycles.append({
+            "index": cycle_index,
+            "zoom_in_start": round(cursor, 3),
+            "zoom_in_duration": round(zoom_in_duration, 3),
+            "hold_duration": round(hold_duration, 3),
+            "zoom_out_start": round(zoom_out_start, 3),
+            "zoom_out_duration": round(zoom_out_duration, 3),
+            "zoom_delta": round(zoom_delta, 4),
+        })
+
+        flash_in_strength = "medium" if cycle_index == 0 else ("low" if interview_mode else "medium")
+        flash_events.append({
+            "time": round(cursor, 3),
+            "effect": "light_flash",
+            "strength": flash_in_strength,
+            "duration": 0.11 if interview_mode else 0.12,
+            "reason": f"zoom_in_cycle_{cycle_index + 1}",
+        })
+
+        pattern_interrupts.extend([
+            {
+                "time": round(cursor, 3),
+                "effect": "zoom_in",
+                "strength": "medium" if interview_mode else "high",
+                "duration": round(zoom_in_duration, 3),
+                "reason": f"cycle_{cycle_index + 1}_zoom_in",
+            },
+            {
+                "time": round(zoom_out_start, 3),
+                "effect": "zoom_out",
+                "strength": "low" if interview_mode else "medium",
+                "duration": round(zoom_out_duration, 3),
+                "reason": f"cycle_{cycle_index + 1}_zoom_out",
+            },
+        ])
+        pattern_interrupts.append(flash_events[-1])
+
+        cooldown = rng.uniform(min_cooldown, max_cooldown)
+        cursor = cycle_end + cooldown
+        cycle_index += 1
+
+    if not zoom_cycles and safe_duration > 1.6:
+        fallback_hold = max(1.0, safe_duration - initial_start - zoom_in_duration - zoom_out_duration - end_buffer)
+        zoom_delta = 0.25 if interview_mode else 0.32
+        zoom_out_start = initial_start + zoom_in_duration + fallback_hold
+        zoom_cycles.append({
+            "index": 0,
+            "zoom_in_start": round(initial_start, 3),
+            "zoom_in_duration": round(zoom_in_duration, 3),
+            "hold_duration": round(fallback_hold, 3),
+            "zoom_out_start": round(zoom_out_start, 3),
+            "zoom_out_duration": round(zoom_out_duration, 3),
+            "zoom_delta": round(zoom_delta, 4),
+        })
+        flash_events.extend([
+            {
+                "time": round(initial_start, 3),
+                "effect": "light_flash",
+                "strength": "medium",
+                "duration": 0.11 if interview_mode else 0.12,
+                "reason": "zoom_in_cycle_1",
+            },
+        ])
+        pattern_interrupts = [
+            {
+                "time": round(initial_start, 3),
+                "effect": "zoom_in",
+                "strength": "medium",
+                "duration": round(zoom_in_duration, 3),
+                "reason": "cycle_1_zoom_in",
+            },
+            {
+                "time": round(zoom_out_start, 3),
+                "effect": "zoom_out",
+                "strength": "medium",
+                "duration": round(zoom_out_duration, 3),
+                "reason": "cycle_1_zoom_out",
+            },
+            *flash_events,
+        ]
+
+    return {
+        "source": "cycle",
+        "effect_notes": (
+            "Every short starts with a zoom-in plus flash, stays zoomed for 5-8 seconds, then zooms out without an extra flash."
+        ),
+        "zoom_cycles": zoom_cycles,
+        "flash_events": flash_events,
+        "pattern_interrupts": pattern_interrupts,
+    }
+
+
+def _plan_pattern_interrupts_for_clip(
+    *,
+    transcript: Optional[Dict[str, Any]],
+    duration: float,
+    interview_mode: bool,
+    ai_runtime: Dict[str, Any],
+    seed_key: str = "",
+) -> Dict[str, Any]:
+    return _build_zoom_cycle_plan(
+        duration,
+        interview_mode=interview_mode,
+        seed_key=seed_key,
+    )
+
+
+def _select_face_anchor_from_candidates(
+    candidates: List[Dict[str, Any]],
+    frame_width: int,
+    frame_height: int,
+    *,
+    interview_mode: bool,
+) -> Tuple[float, float]:
+    if not candidates:
+        return 0.5, 0.5 if interview_mode else 0.42
+
+    if interview_mode or len(candidates) > 1:
+        weighted_x = 0.0
+        weighted_y = 0.0
+        total_weight = 0.0
+        for candidate in candidates:
+            box = candidate.get("box") or [0, 0, frame_width, frame_height]
+            x, y, w, h = box
+            weight = max(1.0, float(candidate.get("score") or (w * h) or 1.0))
+            weighted_x += (x + (w / 2.0)) * weight
+            weighted_y += (y + (h * 0.45)) * weight
+            total_weight += weight
+        return (
+            max(0.0, min(1.0, weighted_x / max(1.0, total_weight) / max(1.0, frame_width))),
+            max(0.0, min(1.0, weighted_y / max(1.0, total_weight) / max(1.0, frame_height))),
+        )
+
+    biggest = max(candidates, key=lambda item: float(item.get("score") or 0.0))
+    x, y, w, h = biggest.get("box") or [0, 0, frame_width, frame_height]
+    return (
+        max(0.0, min(1.0, (x + (w / 2.0)) / max(1.0, frame_width))),
+        max(0.0, min(1.0, (y + (h * 0.42)) / max(1.0, frame_height))),
+    )
+
+
+def _smoothstep01(value: float) -> float:
+    clamped = max(0.0, min(1.0, float(value)))
+    return clamped * clamped * (3.0 - (2.0 * clamped))
+
+
+def _resolve_zoom_profile(
+    *,
+    effect: str,
+    duration_hint: float,
+    interview_mode: bool,
+) -> Tuple[float, float, float]:
+    total_duration = max(0.25, float(duration_hint or 0.0))
+    if effect == "zoom_flash":
+        attack = 0.20 if interview_mode else 0.18
+        hold = min(0.24 if interview_mode else 0.28, max(0.10, total_duration * 0.24))
+    else:
+        attack = 0.24 if interview_mode else 0.20
+        hold = min(0.34 if interview_mode else 0.38, max(0.14, total_duration * 0.28))
+    release = max(0.24 if interview_mode else 0.28, total_duration - attack - hold)
+    return attack, hold, release
+
+
+def _compute_zoom_event_strength(
+    current_time: float,
+    *,
+    event_time: float,
+    duration_hint: float,
+    effect: str,
+    interview_mode: bool,
+) -> float:
+    attack, hold, release = _resolve_zoom_profile(
+        effect=effect,
+        duration_hint=duration_hint,
+        interview_mode=interview_mode,
+    )
+    start_time = event_time - (attack * 0.6)
+    peak_start = start_time + attack
+    peak_end = peak_start + hold
+    end_time = peak_end + release
+
+    if current_time < start_time or current_time > end_time:
+        return 0.0
+    if current_time <= peak_start:
+        progress = (current_time - start_time) / max(attack, 1e-6)
+        return _smoothstep01(progress)
+    if current_time <= peak_end:
+        return 1.0
+    progress = (current_time - peak_end) / max(release, 1e-6)
+    return 1.0 - _smoothstep01(progress)
+
+
+def _compute_flash_event_strength(
+    current_time: float,
+    *,
+    event_time: float,
+    duration_hint: float,
+) -> float:
+    flash_duration = max(0.04, float(duration_hint or 0.08))
+    attack = flash_duration * 0.35
+    release = max(0.02, flash_duration - attack)
+    start_time = event_time - attack
+    end_time = event_time + release
+    if current_time < start_time or current_time > end_time:
+        return 0.0
+    if current_time <= event_time:
+        progress = (current_time - start_time) / max(attack, 1e-6)
+        return _smoothstep01(progress)
+    progress = (current_time - event_time) / max(release, 1e-6)
+    return 1.0 - _smoothstep01(progress)
+
+
+def _zoom_frame_to_anchor(frame, anchor_x: float, anchor_y: float, zoom_delta: float):
+    import cv2
+
+    frame_height, frame_width = frame.shape[:2]
+    zoom_factor = 1.0 + max(0.0, zoom_delta)
+    crop_w = max(2, min(frame_width, int(round(frame_width / zoom_factor))))
+    crop_h = max(2, min(frame_height, int(round(frame_height / zoom_factor))))
+    center_x = int(round(max(0.0, min(1.0, anchor_x)) * frame_width))
+    center_y = int(round(max(0.0, min(1.0, anchor_y)) * frame_height))
+    x1 = max(0, min(frame_width - crop_w, center_x - (crop_w // 2)))
+    y1 = max(0, min(frame_height - crop_h, center_y - (crop_h // 2)))
+    cropped = frame[y1:y1 + crop_h, x1:x1 + crop_w]
+    if cropped.size == 0:
+        return frame
+    return cv2.resize(cropped, (frame_width, frame_height), interpolation=cv2.INTER_CUBIC)
+
+
+def _move_anchor_towards(current: float, target: float, max_step: float) -> float:
+    delta = max(-max_step, min(max_step, target - current))
+    return current + delta
+
+
+def _resolve_zoom_amount(strength: str, *, interview_mode: bool) -> float:
+    if interview_mode:
+        return {
+            "low": 0.11,
+            "medium": 0.16,
+            "high": 0.21,
+        }.get(strength, 0.16)
+    return {
+        "low": 0.14,
+        "medium": 0.20,
+        "high": 0.26,
+    }.get(strength, 0.20)
+
+
+def _resolve_flash_amount(strength: str, *, interview_mode: bool) -> float:
+    if interview_mode:
+        return {
+            "low": 0.75,
+            "medium": 1.05,
+            "high": 1.35,
+        }.get(strength, 1.05)
+    return {
+        "low": 0.95,
+        "medium": 1.35,
+        "high": 1.75,
+    }.get(strength, 1.35)
+
+
+def _apply_face_aware_pattern_interrupts_to_clip(
+    *,
+    input_path: str,
+    output_path: str,
+    transcript: Optional[Dict[str, Any]],
+    pattern_plan: Dict[str, Any],
+    interview_mode: bool,
+    ai_runtime: Dict[str, Any],
+) -> Tuple[bool, Dict[str, Any]]:
+    zoom_cycles = list((pattern_plan or {}).get("zoom_cycles") or [])
+    flash_events = list((pattern_plan or {}).get("flash_events") or [])
+    if not zoom_cycles and not flash_events:
+        return False, {
+            "applied": False,
+            "warning": "No pattern interrupts planned.",
+            "pattern_plan": pattern_plan,
+        }
+
+    try:
+        import cv2
+        from main import detect_face_candidates
+    except Exception as exc:
+        return False, {
+            "applied": False,
+            "warning": f"Face-aware visuals unavailable: {exc}",
+            "pattern_plan": pattern_plan,
+        }
+
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        return False, {
+            "applied": False,
+            "warning": "Could not open rendered clip for face-aware effects.",
+            "pattern_plan": pattern_plan,
+        }
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1080)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1920)
+    width = width if width % 2 == 0 else width - 1
+    height = height if height % 2 == 0 else height - 1
+    sample_stride = max(1, int(round(fps / (4.5 if interview_mode else 5.0))))
+    anchor_x = 0.5
+    anchor_y = 0.42
+    target_anchor_x = anchor_x
+    target_anchor_y = anchor_y
+    top_anchor_x = 0.5
+    top_anchor_y = 0.44
+    top_target_anchor_x = top_anchor_x
+    top_target_anchor_y = top_anchor_y
+    bottom_anchor_x = 0.5
+    bottom_anchor_y = 0.44
+    bottom_target_anchor_x = bottom_anchor_x
+    bottom_target_anchor_y = bottom_anchor_y
+    detection_blend = 0.10 if interview_mode else 0.12
+    anchor_step = 0.055 if interview_mode else 0.075
+    max_target_delta = 0.08 if interview_mode else 0.10
+    detected_samples = 0
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-loglevel",
+        "error",
+        "-f",
+        "rawvideo",
+        "-vcodec",
+        "rawvideo",
+        "-s",
+        f"{width}x{height}",
+        "-pix_fmt",
+        "bgr24",
+        "-r",
+        f"{fps:.6f}",
+        "-i",
+        "-",
+        "-i",
+        input_path,
+        *ffmpeg_thread_args(),
+        "-map",
+        "0:v:0",
+    ]
+    if _video_has_audio(input_path):
+        command.extend(["-map", "1:a:0", "-c:a", "copy"])
+    else:
+        command.append("-an")
+    command.extend([
+        "-c:v",
+        "libx264",
+        "-preset",
+        os.environ.get("OVERLAY_FFMPEG_PRESET", "veryfast").strip() or "veryfast",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        "-shortest",
+        output_path,
+    ])
+
+    ffmpeg_process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        **subprocess_priority_kwargs(),
+    )
+
+    frame_index = 0
+    try:
+        while True:
+            success, frame = cap.read()
+            if not success:
+                break
+
+            frame = frame[:height, :width]
+            if frame_index % sample_stride == 0:
+                if interview_mode:
+                    split_y = height // 2
+                    top_frame = frame[:split_y, :]
+                    bottom_frame = frame[split_y:, :]
+                    try:
+                        top_candidates = detect_face_candidates(top_frame)
+                    except Exception:
+                        top_candidates = []
+                    try:
+                        bottom_candidates = detect_face_candidates(bottom_frame)
+                    except Exception:
+                        bottom_candidates = []
+
+                    if top_candidates:
+                        detected_samples += 1
+                        next_anchor_x, next_anchor_y = _select_face_anchor_from_candidates(
+                            top_candidates,
+                            width,
+                            max(1, top_frame.shape[0]),
+                            interview_mode=False,
+                        )
+                        top_dx = max(-max_target_delta, min(max_target_delta, next_anchor_x - top_target_anchor_x))
+                        top_dy = max(-max_target_delta, min(max_target_delta, next_anchor_y - top_target_anchor_y))
+                        top_target_anchor_x = top_target_anchor_x + (top_dx * detection_blend)
+                        top_target_anchor_y = top_target_anchor_y + (top_dy * detection_blend)
+
+                    if bottom_candidates:
+                        detected_samples += 1
+                        next_anchor_x, next_anchor_y = _select_face_anchor_from_candidates(
+                            bottom_candidates,
+                            width,
+                            max(1, bottom_frame.shape[0]),
+                            interview_mode=False,
+                        )
+                        bottom_dx = max(-max_target_delta, min(max_target_delta, next_anchor_x - bottom_target_anchor_x))
+                        bottom_dy = max(-max_target_delta, min(max_target_delta, next_anchor_y - bottom_target_anchor_y))
+                        bottom_target_anchor_x = bottom_target_anchor_x + (bottom_dx * detection_blend)
+                        bottom_target_anchor_y = bottom_target_anchor_y + (bottom_dy * detection_blend)
+                else:
+                    try:
+                        candidates = detect_face_candidates(frame)
+                    except Exception:
+                        candidates = []
+                    if candidates:
+                        detected_samples += 1
+                        next_anchor_x, next_anchor_y = _select_face_anchor_from_candidates(
+                            candidates,
+                            width,
+                            height,
+                            interview_mode=False,
+                        )
+                        target_dx = max(-max_target_delta, min(max_target_delta, next_anchor_x - target_anchor_x))
+                        target_dy = max(-max_target_delta, min(max_target_delta, next_anchor_y - target_anchor_y))
+                        target_anchor_x = target_anchor_x + (target_dx * detection_blend)
+                        target_anchor_y = target_anchor_y + (target_dy * detection_blend)
+
+            if interview_mode:
+                top_anchor_x = top_anchor_x + ((top_target_anchor_x - top_anchor_x) * anchor_step)
+                top_anchor_y = top_anchor_y + ((top_target_anchor_y - top_anchor_y) * anchor_step)
+                bottom_anchor_x = bottom_anchor_x + ((bottom_target_anchor_x - bottom_anchor_x) * anchor_step)
+                bottom_anchor_y = bottom_anchor_y + ((bottom_target_anchor_y - bottom_anchor_y) * anchor_step)
+            else:
+                anchor_x = anchor_x + ((target_anchor_x - anchor_x) * anchor_step)
+                anchor_y = anchor_y + ((target_anchor_y - anchor_y) * anchor_step)
+
+            current_time = frame_index / max(1.0, fps)
+            zoom_delta = 0.0
+            flash_level = 0.0
+            for cycle in zoom_cycles:
+                zoom_in_start = float(cycle.get("zoom_in_start") or 0.0)
+                zoom_in_duration = max(0.1, float(cycle.get("zoom_in_duration") or 0.56))
+                hold_duration = max(0.0, float(cycle.get("hold_duration") or 5.0))
+                zoom_out_start = float(cycle.get("zoom_out_start") or (zoom_in_start + zoom_in_duration + hold_duration))
+                zoom_out_duration = max(0.1, float(cycle.get("zoom_out_duration") or 0.64))
+                cycle_zoom_delta = max(0.0, float(cycle.get("zoom_delta") or 0.0))
+
+                if current_time < zoom_in_start:
+                    continue
+                if current_time <= (zoom_in_start + zoom_in_duration):
+                    progress = (current_time - zoom_in_start) / max(zoom_in_duration, 1e-6)
+                    active_zoom = cycle_zoom_delta * _smoothstep01(progress)
+                elif current_time <= zoom_out_start:
+                    active_zoom = cycle_zoom_delta
+                elif current_time <= (zoom_out_start + zoom_out_duration):
+                    progress = (current_time - zoom_out_start) / max(zoom_out_duration, 1e-6)
+                    active_zoom = cycle_zoom_delta * (1.0 - _smoothstep01(progress))
+                else:
+                    active_zoom = 0.0
+
+                zoom_delta = max(zoom_delta, active_zoom)
+
+            for event in flash_events:
+                event_time = float(event.get("time") or 0.0)
+                event_duration = max(0.05, float(event.get("duration") or 0.1))
+                strength = event.get("strength") or "medium"
+                flash_level = max(
+                    flash_level,
+                    _resolve_flash_amount(strength, interview_mode=interview_mode)
+                    * _compute_flash_event_strength(
+                        current_time,
+                        event_time=event_time,
+                        duration_hint=event_duration,
+                    ),
+                )
+
+            processed = frame
+            if zoom_delta > 0.001:
+                if interview_mode:
+                    split_y = height // 2
+                    top_frame = frame[:split_y, :]
+                    bottom_frame = frame[split_y:, :]
+                    top_processed = _zoom_frame_to_anchor(top_frame, top_anchor_x, top_anchor_y, zoom_delta)
+                    bottom_processed = _zoom_frame_to_anchor(bottom_frame, bottom_anchor_x, bottom_anchor_y, zoom_delta)
+                    processed = np.vstack((top_processed, bottom_processed))
+                    cv2.line(processed, (0, split_y), (width, split_y), (255, 255, 255), 3)
+                else:
+                    processed = _zoom_frame_to_anchor(frame, anchor_x, anchor_y, zoom_delta)
+
+            if flash_level > 0.001:
+                processed = cv2.convertScaleAbs(
+                    processed,
+                    alpha=1.0 + ((0.10 if interview_mode else 0.14) * flash_level),
+                    beta=(42.0 if interview_mode else 64.0) * flash_level,
+                )
+
+            ffmpeg_process.stdin.write(processed.tobytes())
+            frame_index += 1
+
+        ffmpeg_process.stdin.close()
+        ffmpeg_process.stdin = None
+        stderr = ffmpeg_process.stderr.read().decode("utf-8", errors="ignore")
+        return_code = ffmpeg_process.wait()
+        if return_code != 0:
+            raise RuntimeError(stderr or f"FFmpeg exited with code {return_code}")
+    except Exception as exc:
+        try:
+            if ffmpeg_process.stdin:
+                ffmpeg_process.stdin.close()
+        except Exception:
+            pass
+        try:
+            ffmpeg_process.kill()
+        except Exception:
+            pass
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except Exception:
+                pass
+        return False, {
+            "applied": False,
+            "warning": str(exc),
+            "pattern_plan": pattern_plan,
+        }
+    finally:
+        cap.release()
+
+    return True, {
+        "applied": True,
+        "warning": ai_runtime.get("warning") or "",
+        "pattern_plan": pattern_plan,
+        "face_detection_samples": detected_samples,
+    }
 
 class EditRequest(BaseModel):
     job_id: str
@@ -3325,6 +4844,7 @@ async def update_clip_text_metadata(req: ClipTextMetadataUpdateRequest):
         video_title_for_youtube_short=req.video_title_for_youtube_short if req.video_title_for_youtube_short is not None else _METADATA_UNSET,
         video_description_for_tiktok=req.video_description_for_tiktok if req.video_description_for_tiktok is not None else _METADATA_UNSET,
         video_description_for_instagram=req.video_description_for_instagram if req.video_description_for_instagram is not None else _METADATA_UNSET,
+        instagram_collaborators=req.instagram_collaborators if req.instagram_collaborators is not None else _METADATA_UNSET,
     )
     if updated_clip is None:
         raise HTTPException(status_code=404, detail="Clip not found.")
@@ -3457,6 +4977,7 @@ class RenderClipRequest(BaseModel):
     apply_hook: Optional[bool] = True
     hook_settings: Optional[Dict[str, Any]] = None
     interview_mode: Optional[bool] = None
+    apply_stock_overlay: Optional[bool] = False
 
 
 @app.post("/api/clip/preview/render")
@@ -3921,6 +5442,318 @@ async def render_clip(req: RenderClipRequest):
         "clip": clip_data,
     }
 
+
+@app.post("/api/clip/render/viral-original")
+async def render_clip_viral_original(request: Request, req: RenderClipRequest):
+    _get_job_record_or_404(req.job_id)
+    output_dir, metadata_path, data = _load_job_metadata_or_404(req.job_id)
+
+    clips = data.get("shorts", [])
+    if req.clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    clip_data = clips[req.clip_index]
+    clip_data["clip_index"] = req.clip_index
+
+    source_input_path = _resolve_clip_source_input_path(req.job_id, output_dir, clip_data)
+    if not source_input_path:
+        raise HTTPException(status_code=404, detail="Source input video for clip not found")
+
+    source_start = float(clip_data.get("start", clip_data.get("preview_start", 0.0)) or 0.0)
+    source_end = float(clip_data.get("end", clip_data.get("preview_end", source_start)) or source_start)
+    if source_end <= source_start:
+        raise HTTPException(status_code=400, detail="Invalid clip timestamps")
+
+    manifest = load_job_manifest(output_dir)
+    request_meta = manifest.get("request", {})
+    tight_edit_preset = _coerce_tight_edit_preset(req.tight_edit_preset or request_meta.get("tight_edit_preset"))
+    apply_tight_edit = req.apply_tight_edit if req.apply_tight_edit is not None else True
+    interview_mode = req.interview_mode if req.interview_mode is not None else bool(request_meta.get("interview_mode"))
+
+    subtitle_settings = _sanitize_subtitle_settings_dict(req.subtitle_settings, clip_data)
+    hook_settings = _sanitize_hook_settings_dict(req.hook_settings, clip_data)
+    apply_subtitles = bool(req.apply_subtitles) and bool(subtitle_settings)
+    apply_hook = bool(req.apply_hook) and bool(hook_settings)
+
+    transcript = data.get("transcript")
+    base_keep_segments = [(source_start, source_end)]
+    tight_edit_plan = None
+    if apply_tight_edit and transcript:
+        tight_edit_plan = build_tight_edit_plan(transcript, source_start, source_end, tight_edit_preset)
+        base_keep_segments = tight_edit_plan.get("keep_segments") or base_keep_segments
+
+    final_keep_segments = list(base_keep_segments)
+    base_output_duration = max(
+        0.0,
+        sum(max(0.0, float(end) - float(start)) for start, end in final_keep_segments),
+    )
+    final_remapped_transcript = _remap_transcript_to_keep_segments(transcript, final_keep_segments)
+    ai_runtime = _resolve_ai_editor_runtime(request)
+    pattern_plan = _plan_pattern_interrupts_for_clip(
+        transcript=final_remapped_transcript,
+        duration=base_output_duration,
+        interview_mode=bool(interview_mode),
+        ai_runtime=ai_runtime,
+        seed_key=f"{req.job_id}:{req.clip_index}:{os.path.basename(source_input_path)}",
+    )
+    request_token = int(time.time() * 1000)
+    temp_source_filename = f"temp_viral_source_{request_token}_{req.clip_index + 1}.mp4"
+    temp_vertical_filename = f"temp_viral_vertical_{request_token}_{req.clip_index + 1}.mp4"
+    viral_render_filename = f"viral_rendered_{request_token}_clip_{req.clip_index + 1}.mp4"
+    temp_source_path = os.path.join(output_dir, temp_source_filename)
+    temp_vertical_path = os.path.join(output_dir, temp_vertical_filename)
+    viral_render_path = os.path.join(output_dir, viral_render_filename)
+
+    def run_render_pipeline():
+        render_keep_segments(
+            source_input_path,
+            final_keep_segments,
+            temp_source_path,
+            ffmpeg_preset=os.environ.get("OVERLAY_FFMPEG_PRESET", "veryfast").strip() or "veryfast",
+            crf="18",
+            audio_bitrate="192k",
+            thread_args=ffmpeg_thread_args(),
+            subprocess_kwargs=subprocess_priority_kwargs(),
+        )
+        from main import process_video_to_vertical
+        return process_video_to_vertical(
+            temp_source_path,
+            temp_vertical_path,
+            interview_mode=bool(interview_mode),
+        )
+
+    loop = asyncio.get_event_loop()
+    try:
+        render_success = await loop.run_in_executor(None, run_render_pipeline)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        if os.path.exists(temp_source_path):
+            os.remove(temp_source_path)
+
+    if not render_success or not os.path.exists(temp_vertical_path):
+        raise HTTPException(status_code=500, detail="Viral render failed")
+
+    ai_visuals_applied, ai_visuals_result = await loop.run_in_executor(
+        None,
+        lambda: _apply_face_aware_pattern_interrupts_to_clip(
+            input_path=temp_vertical_path,
+            output_path=viral_render_path,
+            transcript=final_remapped_transcript,
+            pattern_plan=pattern_plan,
+            ai_runtime=ai_runtime,
+            interview_mode=bool(interview_mode),
+        ),
+    )
+
+    if not ai_visuals_applied:
+        if os.path.exists(viral_render_path):
+            os.remove(viral_render_path)
+        shutil.move(temp_vertical_path, viral_render_path)
+    elif os.path.exists(temp_vertical_path):
+        os.remove(temp_vertical_path)
+
+    pexels_key = _resolve_pexels_api_key(request)
+    if pexels_key and ai_runtime.get("enabled") and req.apply_stock_overlay:
+        from main import describe_output_language
+
+        language_code = "en"
+        language_name = "English"
+        if isinstance(final_remapped_transcript, dict):
+            language_code = str(final_remapped_transcript.get("language") or "en").strip().lower()
+            language_name = describe_output_language(language_code)[1]
+        elif isinstance(data.get("transcript"), dict):
+            language_code = str(data.get("transcript").get("language") or "en").strip().lower()
+            language_name = describe_output_language(language_code)[1]
+
+        prompt = _build_stock_overlay_prompt(
+            base_output_duration,
+            final_remapped_transcript,
+            language_name,
+            hook_text=str(clip_data.get("viral_hook_text") or "").strip() or None,
+        )
+        llm_payload = _call_stock_overlay_llm(ai_runtime, prompt)
+        stock_overlay_plan = _sanitize_stock_overlay_plan(llm_payload, base_output_duration)
+        if stock_overlay_plan:
+            search_query = " ".join(stock_overlay_plan["search_keywords"][:3])
+            image_info = _search_pexels_image(search_query, pexels_key)
+            if image_info and image_info.get("photo_url"):
+                image_path = os.path.join(output_dir, f"temp_pexels_{request_token}.jpg")
+                overlay_temp_path = f"{viral_render_path}.pexels.mp4"
+                try:
+                    if _download_stock_image(image_info["photo_url"], image_path):
+                        overlay_success = _apply_pexels_overlay_to_video(
+                            viral_render_path,
+                            overlay_temp_path,
+                            image_path,
+                            stock_overlay_plan["overlay_time"],
+                            stock_overlay_plan["overlay_duration"],
+                        )
+                        if overlay_success and os.path.exists(overlay_temp_path):
+                            os.remove(viral_render_path)
+                            shutil.move(overlay_temp_path, viral_render_path)
+                            clip_data["stock_overlay"] = {
+                                "search_keywords": stock_overlay_plan["search_keywords"],
+                                "overlay_time": stock_overlay_plan["overlay_time"],
+                                "overlay_duration": stock_overlay_plan["overlay_duration"],
+                                "photo_url": image_info.get("photo_url"),
+                                "photographer": image_info.get("photographer"),
+                            }
+                finally:
+                    if os.path.exists(image_path):
+                        os.remove(image_path)
+
+    current_path = viral_render_path
+    current_filename = viral_render_filename
+
+    try:
+        rendered_duration = _probe_video_duration(current_path)
+    except Exception:
+        rendered_duration = base_output_duration or max(0.15, source_end - source_start)
+    rendered_duration = max(0.15, rendered_duration)
+
+    if tight_edit_plan and tight_edit_plan.get("compacted"):
+        clip_data["display_duration"] = round(rendered_duration, 3)
+        clip_data["tight_edit_preset"] = tight_edit_preset
+        clip_data["tight_edit_removed_ranges"] = [
+            {"start": round(range_start, 3), "end": round(range_end, 3)}
+            for range_start, range_end in tight_edit_plan.get("remove_ranges", [])
+        ]
+    else:
+        clip_data["display_duration"] = round(rendered_duration, 3)
+        clip_data.pop("tight_edit_preset", None)
+        clip_data.pop("tight_edit_removed_ranges", None)
+
+    clip_data["source_video_filename"] = os.path.basename(source_input_path)
+    clip_data["preview_video_filename"] = os.path.basename(source_input_path)
+    clip_data["preview_start"] = round(source_start, 3)
+    clip_data["preview_end"] = round(source_end, 3)
+    if subtitle_settings:
+        clip_data["subtitle_settings"] = subtitle_settings
+    if hook_settings:
+        clip_data["hook_settings"] = hook_settings
+
+    _append_clip_version(
+        req.job_id,
+        output_dir,
+        clip_data,
+        output_filename=viral_render_filename,
+        operation="viral_render",
+        label="Viral Render",
+        transcript_source="audio",
+        transcript_start=None,
+        transcript_end=None,
+        subtitle_settings=subtitle_settings if subtitle_settings else _METADATA_UNSET,
+        hook_settings=hook_settings if hook_settings else _METADATA_UNSET,
+    )
+
+    subtitle_transcript_for_render = final_remapped_transcript
+    subtitle_clip_start = 0.0
+    subtitle_clip_end = rendered_duration
+
+    if apply_subtitles:
+        preferred_language = _resolve_subtitle_language_hint(
+            metadata_data=data,
+            clip_data=clip_data,
+            fallback_filename=os.path.basename(current_path),
+        )
+        if not _transcript_has_word_timestamps(subtitle_transcript_for_render):
+            subtitle_transcript_for_render = transcribe_audio(
+                current_path,
+                preferred_language=preferred_language or None,
+            )
+            subtitle_clip_end = _probe_video_duration(current_path)
+
+        subtitle_filename = f"subtitled_{int(time.time() * 1000)}_{current_filename}"
+        subtitle_path = os.path.join(output_dir, subtitle_filename)
+
+        def run_subtitles():
+            return burn_subtitles(
+                current_path,
+                subtitle_transcript_for_render,
+                subtitle_clip_start,
+                subtitle_clip_end,
+                subtitle_path,
+                alignment=subtitle_settings.get("position", "bottom"),
+                y_position=subtitle_settings.get("y_position"),
+                fontsize=subtitle_settings.get("font_size", 16),
+                font_family=subtitle_settings.get("font_family"),
+                background_style=subtitle_settings.get("background_style"),
+            )
+
+        subtitle_success = await loop.run_in_executor(None, run_subtitles)
+        if not subtitle_success:
+            raise HTTPException(status_code=400, detail="No words found for this clip range.")
+
+        _append_clip_version(
+            req.job_id,
+            output_dir,
+            clip_data,
+            output_filename=subtitle_filename,
+            operation="subtitle",
+            label="Subtitles",
+            transcript_source="audio",
+            transcript_start=None,
+            transcript_end=None,
+            subtitle_settings=subtitle_settings,
+        )
+        current_path = subtitle_path
+        current_filename = subtitle_filename
+
+    if apply_hook:
+        hook_filename = f"hook_{int(time.time() * 1000)}_{current_filename}"
+        hook_path = os.path.join(output_dir, hook_filename)
+        size_map = {"S": 0.8, "M": 1.0, "L": 1.3}
+
+        def run_hook():
+            return add_hook_to_video(
+                current_path,
+                hook_settings["text"],
+                hook_path,
+                position=hook_settings.get("position", "top"),
+                horizontal_position=hook_settings.get("horizontal_position", "center"),
+                x_position=hook_settings.get("x_position"),
+                y_position=hook_settings.get("y_position"),
+                text_align=hook_settings.get("text_align", "center"),
+                font_scale=size_map.get(hook_settings.get("size"), 1.0),
+                width_preset=hook_settings.get("width_preset", "wide"),
+                font_name=hook_settings.get("font_family"),
+                background_style=hook_settings.get("background_style"),
+            )
+
+        await loop.run_in_executor(None, run_hook)
+        _append_clip_version(
+            req.job_id,
+            output_dir,
+            clip_data,
+            output_filename=hook_filename,
+            operation="hook",
+            label="Hook",
+            transcript_source="audio",
+            transcript_start=None,
+            transcript_end=None,
+            hook_settings=hook_settings,
+        )
+        current_path = hook_path
+        current_filename = hook_filename
+
+    clip_data["status"] = "completed"
+    clip_data.pop("error", None)
+    data["shorts"][req.clip_index] = clip_data
+    _write_metadata(metadata_path, data)
+    _refresh_job_result(req.job_id)
+
+    response_payload = {
+        "success": True,
+        "new_video_url": clip_data.get("video_url"),
+        "clip": clip_data,
+        "pattern_plan": pattern_plan,
+        "ai_visuals": ai_visuals_result,
+    }
+    if ai_visuals_result.get("warning"):
+        response_payload["warning"] = ai_visuals_result["warning"]
+    return response_payload
+
 class TranslateRequest(BaseModel):
     job_id: str
     clip_index: int
@@ -4020,6 +5853,7 @@ class SocialPostRequest(BaseModel):
     scheduled_date: Optional[str] = None # ISO-8601 string
     timezone: Optional[str] = "UTC"
     instagram_share_mode: Optional[str] = "CUSTOM"
+    instagram_collaborators: Optional[str] = None
     tiktok_post_mode: Optional[str] = "DIRECT_POST"
     tiktok_is_aigc: Optional[bool] = False
     facebook_page_id: Optional[str] = None
@@ -4294,6 +6128,7 @@ def _build_social_post_request_settings(
     scheduled_date: Optional[str],
     timezone: Optional[str],
     instagram_share_mode: Optional[str],
+    instagram_collaborators: Optional[str],
     tiktok_post_mode: Optional[str],
     tiktok_is_aigc: Optional[bool],
     facebook_page_id: Optional[str],
@@ -4307,6 +6142,7 @@ def _build_social_post_request_settings(
         "scheduled_date": scheduled_date,
         "timezone": timezone or "UTC",
         "instagram_share_mode": instagram_share_mode or "CUSTOM",
+        "instagram_collaborators": _normalize_instagram_collaborators(instagram_collaborators or "") or None,
         "tiktok_post_mode": tiktok_post_mode or "DIRECT_POST",
         "tiktok_is_aigc": bool(tiktok_is_aigc),
         "facebook_page_id": (facebook_page_id or "").strip() or None,
@@ -4325,6 +6161,7 @@ def _normalize_social_post_request_settings(value: Any) -> Optional[Dict[str, An
         scheduled_date=(value.get("scheduled_date") or "").strip() or None,
         timezone=(value.get("timezone") or "UTC").strip() or "UTC",
         instagram_share_mode=(value.get("instagram_share_mode") or "CUSTOM").strip() or "CUSTOM",
+        instagram_collaborators=(value.get("instagram_collaborators") or "").strip() or None,
         tiktok_post_mode=(value.get("tiktok_post_mode") or "DIRECT_POST").strip() or "DIRECT_POST",
         tiktok_is_aigc=bool(value.get("tiktok_is_aigc")),
         facebook_page_id=(value.get("facebook_page_id") or "").strip() or None,
@@ -4563,6 +6400,7 @@ def _build_upload_post_data_payload(
     scheduled_date: Optional[str] = None,
     timezone: Optional[str] = "UTC",
     instagram_share_mode: Optional[str] = "CUSTOM",
+    instagram_collaborators: Optional[str] = None,
     tiktok_post_mode: Optional[str] = "DIRECT_POST",
     tiktok_is_aigc: Optional[bool] = False,
     facebook_page_id: Optional[str] = None,
@@ -4592,6 +6430,9 @@ def _build_upload_post_data_payload(
         data_payload["instagram_title"] = final_description
         data_payload["media_type"] = "REELS"
         data_payload["share_mode"] = instagram_share_mode or "CUSTOM"
+        normalized_collaborators = _normalize_instagram_collaborators(instagram_collaborators or "")
+        if normalized_collaborators and (instagram_share_mode or "CUSTOM") == "CUSTOM":
+            data_payload["collaborators"] = normalized_collaborators
         if first_comment:
             data_payload["instagram_first_comment"] = first_comment
 
@@ -4707,6 +6548,7 @@ async def post_to_socials(req: SocialPostRequest):
     try:
         _, _, metadata_data = _load_job_metadata_or_404(req.job_id)
         clip = _find_result_clip(result, req.clip_index)
+        job_social_defaults = metadata_data.get("job_social_defaults") if isinstance(metadata_data, dict) else {}
 
         filename = clip['video_url'].split('/')[-1]
         file_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
@@ -4717,6 +6559,13 @@ async def post_to_socials(req: SocialPostRequest):
         final_title = req.title or clip.get('video_title_for_youtube_short') or clip.get('title', 'Viral Short')
         final_description = req.description or clip.get('video_description_for_instagram') or clip.get('video_description_for_tiktok') or "Check this out!"
         first_comment = (req.first_comment or "").strip()
+        if req.instagram_collaborators is not None:
+            final_instagram_collaborators = _normalize_instagram_collaborators(req.instagram_collaborators or "")
+        else:
+            final_instagram_collaborators = _normalize_instagram_collaborators(
+                (clip.get("instagram_collaborators") or "").strip()
+                or ((job_social_defaults or {}).get("instagram_collaborators") or "").strip()
+            )
         transcript_language = (
             metadata_data.get("transcript", {}).get("language")
             or metadata_data.get("language")
@@ -4737,6 +6586,7 @@ async def post_to_socials(req: SocialPostRequest):
             scheduled_date=req.scheduled_date,
             timezone=req.timezone,
             instagram_share_mode=req.instagram_share_mode,
+            instagram_collaborators=final_instagram_collaborators,
             tiktok_post_mode=req.tiktok_post_mode,
             tiktok_is_aigc=req.tiktok_is_aigc,
             facebook_page_id=req.facebook_page_id,
@@ -4750,6 +6600,7 @@ async def post_to_socials(req: SocialPostRequest):
             scheduled_date=req.scheduled_date,
             timezone=req.timezone,
             instagram_share_mode=req.instagram_share_mode,
+            instagram_collaborators=final_instagram_collaborators,
             tiktok_post_mode=req.tiktok_post_mode,
             tiktok_is_aigc=req.tiktok_is_aigc,
             facebook_page_id=req.facebook_page_id,
@@ -4831,6 +6682,7 @@ async def retry_social_platform_post(req: SocialPostRetryRequest):
             scheduled_date=None,
             timezone="UTC",
             instagram_share_mode="CUSTOM",
+            instagram_collaborators=clip.get("instagram_collaborators"),
             tiktok_post_mode="DIRECT_POST",
             tiktok_is_aigc=False,
             facebook_page_id=None,
@@ -4861,6 +6713,7 @@ async def retry_social_platform_post(req: SocialPostRetryRequest):
             scheduled_date=effective_scheduled_date,
             timezone=request_settings.get("timezone") or "UTC",
             instagram_share_mode=request_settings.get("instagram_share_mode") or "CUSTOM",
+            instagram_collaborators=request_settings.get("instagram_collaborators"),
             tiktok_post_mode=request_settings.get("tiktok_post_mode") or "DIRECT_POST",
             tiktok_is_aigc=bool(request_settings.get("tiktok_is_aigc")),
             facebook_page_id=request_settings.get("facebook_page_id"),

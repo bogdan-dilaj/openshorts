@@ -125,7 +125,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     <span>
                         <span className="block text-sm font-medium text-white">Clips ueber 1 Minute erlauben</span>
                         <span className="block text-xs text-zinc-500">
-                            Laesst bei starken Momenten auch laengere Clips zu. Ueber 60 Sekunden werden sie auf 1:01 bis maximal 1:15 begrenzt.
+                            Laesst bei starken Momenten auch laengere Clips zu. Ueber 60 Sekunden werden sie auf 1:01 bis maximal 1:20 begrenzt.
                         </span>
                     </span>
                 </label>

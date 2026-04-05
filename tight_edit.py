@@ -63,6 +63,7 @@ TIGHT_EDIT_PRESETS: Dict[str, Dict[str, float | int | bool | str]] = {
 }
 
 DEFAULT_TIGHT_EDIT_PRESET = "aggressive"
+MIN_LONG_CLIP_OUTPUT_DURATION = 60.0
 
 FILLER_WORDS = {
     "ah",
@@ -145,6 +146,137 @@ def invert_ranges(window_start: float, window_end: float, remove_ranges: Sequenc
         keep_segments.append((_round_time(cursor), safe_end))
 
     return keep_segments
+
+
+def _sum_range_duration(ranges: Sequence[RangeTuple]) -> float:
+    return _round_time(sum(max(0.0, float(end) - float(start)) for start, end in ranges))
+
+
+def _build_gap_candidates(window_start: float, window_end: float, keep_segments: Sequence[RangeTuple]) -> List[Dict[str, float | int | None]]:
+    merged_keep_segments = merge_ranges(keep_segments)
+    if not merged_keep_segments:
+        return []
+
+    gaps: List[Dict[str, float | int | None]] = []
+
+    leading_gap = merged_keep_segments[0][0] - window_start
+    if leading_gap > 0:
+        gaps.append({
+            "start": _round_time(window_start),
+            "end": _round_time(merged_keep_segments[0][0]),
+            "duration": _round_time(leading_gap),
+            "left_index": None,
+            "right_index": 0,
+        })
+
+    for index in range(1, len(merged_keep_segments)):
+        gap_start = merged_keep_segments[index - 1][1]
+        gap_end = merged_keep_segments[index][0]
+        gap_duration = gap_end - gap_start
+        if gap_duration <= 0:
+            continue
+        gaps.append({
+            "start": _round_time(gap_start),
+            "end": _round_time(gap_end),
+            "duration": _round_time(gap_duration),
+            "left_index": index - 1,
+            "right_index": index,
+        })
+
+    trailing_gap = window_end - merged_keep_segments[-1][1]
+    if trailing_gap > 0:
+        gaps.append({
+            "start": _round_time(merged_keep_segments[-1][1]),
+            "end": _round_time(window_end),
+            "duration": _round_time(trailing_gap),
+            "left_index": len(merged_keep_segments) - 1,
+            "right_index": None,
+        })
+
+    return gaps
+
+
+def _expand_keep_segments_to_min_duration(
+    window_start: float,
+    window_end: float,
+    keep_segments: Sequence[RangeTuple],
+    min_output_duration: float,
+) -> List[RangeTuple]:
+    expanded_keep_segments = merge_ranges(keep_segments)
+    if not expanded_keep_segments:
+        return []
+
+    target_duration = min(float(min_output_duration), float(window_end) - float(window_start))
+    current_duration = _sum_range_duration(expanded_keep_segments)
+    if current_duration >= target_duration:
+        return expanded_keep_segments
+
+    while current_duration < target_duration:
+        gap_candidates = _build_gap_candidates(window_start, window_end, expanded_keep_segments)
+        if not gap_candidates:
+            break
+
+        gap = min(gap_candidates, key=lambda item: (float(item["duration"]), float(item["start"])))
+        gap_duration = float(gap["duration"])
+        if gap_duration <= 0:
+            break
+
+        restore_duration = min(gap_duration, target_duration - current_duration)
+        left_index = gap["left_index"]
+        right_index = gap["right_index"]
+
+        if left_index is None and right_index is not None:
+            start, end = expanded_keep_segments[int(right_index)]
+            expanded_keep_segments[int(right_index)] = (
+                _round_time(max(window_start, start - restore_duration)),
+                end,
+            )
+        elif right_index is None and left_index is not None:
+            start, end = expanded_keep_segments[int(left_index)]
+            expanded_keep_segments[int(left_index)] = (
+                start,
+                _round_time(min(window_end, end + restore_duration)),
+            )
+        elif left_index is not None and right_index is not None:
+            left_restore = restore_duration / 2.0
+            right_restore = restore_duration - left_restore
+            left_start, left_end = expanded_keep_segments[int(left_index)]
+            right_start, right_end = expanded_keep_segments[int(right_index)]
+            expanded_keep_segments[int(left_index)] = (
+                left_start,
+                _round_time(min(window_end, left_end + left_restore)),
+            )
+            expanded_keep_segments[int(right_index)] = (
+                _round_time(max(window_start, right_start - right_restore)),
+                right_end,
+            )
+        else:
+            break
+
+        expanded_keep_segments = merge_ranges(expanded_keep_segments)
+        current_duration = _sum_range_duration(expanded_keep_segments)
+
+    return expanded_keep_segments
+
+
+def _remove_ranges_from_keep_segments(window_start: float, window_end: float, keep_segments: Sequence[RangeTuple]) -> List[RangeTuple]:
+    remove_ranges: List[RangeTuple] = []
+    cursor = _round_time(window_start)
+    safe_end = _round_time(window_end)
+
+    for start, end in merge_ranges(keep_segments):
+        clamped_start = max(cursor, _round_time(start))
+        clamped_end = min(safe_end, _round_time(end))
+        if clamped_end <= cursor:
+            continue
+        if clamped_start > cursor:
+            remove_ranges.append((_round_time(cursor), _round_time(clamped_start)))
+        cursor = max(cursor, clamped_end)
+
+    if safe_end > cursor:
+        remove_ranges.append((_round_time(cursor), safe_end))
+
+    return remove_ranges
 
 
 def plan_manual_keep_segments(
@@ -280,8 +412,18 @@ def build_tight_edit_plan(transcript: Optional[Dict], clip_start: float, clip_en
         keep_segments = base_segment
         merged_remove_ranges = []
 
+    original_duration = safe_end - safe_start
+    if original_duration > MIN_LONG_CLIP_OUTPUT_DURATION:
+        keep_segments = _expand_keep_segments_to_min_duration(
+            safe_start,
+            safe_end,
+            keep_segments,
+            MIN_LONG_CLIP_OUTPUT_DURATION,
+        )
+        merged_remove_ranges = _remove_ranges_from_keep_segments(safe_start, safe_end, keep_segments)
+
     compacted = len(keep_segments) != 1 or keep_segments[0] != base_segment[0]
-    output_duration = _round_time(sum(end - start for start, end in keep_segments))
+    output_duration = _sum_range_duration(keep_segments)
 
     return {
         "preset": preset_key,
