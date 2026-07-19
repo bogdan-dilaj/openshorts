@@ -27,6 +27,7 @@ sync_store/
 
 # Secrets
 .env
+openshorts-settings-*.json
 
 # Generated metadata
 *_metadata.json

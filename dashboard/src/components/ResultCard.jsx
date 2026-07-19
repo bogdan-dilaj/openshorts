@@ -7,6 +7,7 @@ import HookModal from './HookModal';
 import TranslateModal from './TranslateModal';
 import TrimModal from './TrimModal';
 import { DEFAULT_SOCIAL_POST_SETTINGS, INSTAGRAM_SHARE_MODES, SOCIAL_PLATFORM_OPTIONS, TIKTOK_POST_MODES } from '../socialOptions';
+import { DEFAULT_HOOK_STYLE, PATTERN_FLASH_MODE_OPTIONS } from '../overlayOptions';
 
 const resolveVideoUrl = (value) => {
     if (!value) return '';
@@ -24,6 +25,98 @@ const extractFilenameFromVideoUrl = (value) => {
         const [withoutQuery] = String(value).split('?');
         return decodeURIComponent((withoutQuery.split('/').pop() || '').trim());
     }
+};
+
+const formatTimestampInput = (value) => {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds < 0) {
+        return '00:00';
+    }
+    const totalMilliseconds = Math.round(seconds * 1000);
+    const hours = Math.floor(totalMilliseconds / 3600000);
+    const minutes = Math.floor((totalMilliseconds % 3600000) / 60000);
+    const secs = Math.floor((totalMilliseconds % 60000) / 1000);
+    const millis = totalMilliseconds % 1000;
+    const base = hours
+        ? `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+        : `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    if (!millis) {
+        return base;
+    }
+    return `${base}.${String(millis).padStart(3, '0').replace(/0+$/, '')}`;
+};
+
+const normalizePatternFlashMode = (value, fallback = DEFAULT_HOOK_STYLE.flashMode || 'every_10s') => {
+    const normalized = String(value || '').trim().toLowerCase().replace(/-/g, '_');
+    const aliases = {
+        off: 'none',
+        false: 'none',
+        disabled: 'none',
+        no: 'none',
+        never: 'none',
+        initial: 'start',
+        beginning: 'start',
+        start_only: 'start',
+        only_start: 'start',
+        '30': 'every_30s',
+        '30s': 'every_30s',
+        every30: 'every_30s',
+        every_30: 'every_30s',
+        very_rare: 'every_30s',
+        sehr_selten: 'every_30s',
+        '20': 'every_20s',
+        '20s': 'every_20s',
+        every20: 'every_20s',
+        every_20: 'every_20s',
+        '10': 'every_10s',
+        '10s': 'every_10s',
+        every10: 'every_10s',
+        every_10: 'every_10s',
+        rare: 'every_10s',
+        selten: 'every_10s',
+        '8': 'every_8s',
+        '8s': 'every_8s',
+        every8: 'every_8s',
+        every_8: 'every_8s',
+        normal: 'every_8s',
+        medium: 'every_8s',
+        '5': 'every_5s',
+        '5s': 'every_5s',
+        every5: 'every_5s',
+        every_5: 'every_5s',
+        frequent: 'every_5s',
+        haeufig: 'every_5s',
+        häufig: 'every_5s',
+    };
+    const candidate = aliases[normalized] || normalized;
+    return PATTERN_FLASH_MODE_OPTIONS.some((option) => option.value === candidate) ? candidate : fallback;
+};
+
+const parseTimestampInput = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    if (/^\d+(\.\d+)?$/.test(raw)) {
+        const seconds = Number(raw);
+        return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+    }
+    const parts = raw.split(':').map((part) => part.trim());
+    if (!parts.length || parts.some((part) => part === '')) return null;
+    if (parts.length > 3) return null;
+
+    const numericParts = parts.map((part) => Number(part));
+    if (numericParts.some((part) => !Number.isFinite(part) || part < 0)) {
+        return null;
+    }
+
+    let seconds = 0;
+    if (numericParts.length === 3) {
+        seconds = (numericParts[0] * 3600) + (numericParts[1] * 60) + numericParts[2];
+    } else if (numericParts.length === 2) {
+        seconds = (numericParts[0] * 60) + numericParts[1];
+    } else {
+        seconds = numericParts[0];
+    }
+    return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
 };
 
 const POST_STATUS_POLL_INTERVAL_MS = 4000;
@@ -101,6 +194,15 @@ const resolveClipPostHighlight = (clip) => {
     const failureCount = Number(status.failure_count || 0);
     const normalizedStatus = String(status.status || '').toLowerCase();
 
+    if (normalizedStatus === 'upcoming') {
+        return {
+            label: 'Geplant',
+            badgeClass: 'border-zinc-500/30 bg-zinc-500/10 text-zinc-100',
+            cardClass: 'border-zinc-500/30 bg-zinc-900/60 shadow-[0_0_0_1px_rgba(161,161,170,0.10)]',
+            previewClass: 'bg-zinc-900/80 border-b border-zinc-500/20',
+            contentClass: 'bg-zinc-900/60',
+        };
+    }
     if (normalizedStatus === 'scheduled' || pendingCount > 0) {
         return {
             label: 'Gequeued',
@@ -132,9 +234,9 @@ const resolveClipPostHighlight = (clip) => {
         return {
             label: 'Fehlgeschlagen',
             badgeClass: 'border-red-500/30 bg-red-500/10 text-red-100',
-            cardClass: 'border-red-500/25 bg-red-950/35 shadow-[0_0_0_1px_rgba(239,68,68,0.08)]',
-            previewClass: 'bg-red-950/55 border-b border-red-500/20',
-            contentClass: 'bg-red-950/30',
+            cardClass: 'border-red-500/35 bg-red-950/65 shadow-[0_0_0_1px_rgba(239,68,68,0.12)]',
+            previewClass: 'bg-red-950/80 border-b border-red-500/25',
+            contentClass: 'bg-red-950/60',
         };
     }
     return {
@@ -146,17 +248,30 @@ const resolveClipPostHighlight = (clip) => {
     };
 };
 
-export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, llmProvider, ollamaBaseUrl, ollamaModel, elevenLabsKey, pexelsKey, subtitleStyle, hookStyle, tightEditPreset, socialPostSettings = DEFAULT_SOCIAL_POST_SETTINGS, jobInstagramCollaborators = '', activeUploadProfile, onApplySubtitleDefaultsToJob, onApplyHookDefaultsToJob, onApplyInstagramCollaboratorsToJob, currentVideoOverride, onVideoVariantChange, onClipUpdated, onPlay, onPause, hookDraftText, onHookDraftChange, isSelected = false, onToggleSelect }) {
+export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUserId, geminiApiKey, geminiModel, openaiKey, openaiModel, claudeKey, claudeModel, minimaxKey, minimaxAuthMode, minimaxModel, llmProvider, ollamaBaseUrl, ollamaModel, elevenLabsKey, pexelsKey, subtitleStyle, hookStyle, tightEditPreset, socialPostSettings = DEFAULT_SOCIAL_POST_SETTINGS, jobInstagramCollaborators = '', podcastDmSettings = {}, activeUploadProfile, onApplySubtitleDefaultsToJob, onApplyHookDefaultsToJob, onApplyInstagramCollaboratorsToJob, currentVideoOverride, onVideoVariantChange, onClipUpdated, onPlay, onPause, hookDraftText, onHookDraftChange, deferPreviewLoading = false, isSelected = false, onToggleSelect }) {
     const [showModal, setShowModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
+    const cardRef = React.useRef(null);
     const videoRef = React.useRef(null);
     const originalVideoUrl = resolveVideoUrl(clip.original_video_url || clip.base_video_url || clip.video_url);
     const currentVideoUrl = resolveVideoUrl(currentVideoOverride || clip.video_url || clip.preview_video_url);
+    const currentVideoFilename = extractFilenameFromVideoUrl(currentVideoUrl);
+    const previewVideoFilename = extractFilenameFromVideoUrl(clip.preview_video_url || clip.preview_video_filename || '');
+    const sourceVideoFilename = extractFilenameFromVideoUrl(
+        clip.source_video_filename || clip.original_video_filename || clip.base_video_filename || ''
+    );
     const clipIndex = clip.clip_index ?? index;
     const clipVersions = clip.versions || [];
-    const activeVersionId = clip.active_version_id || clipVersions[clipVersions.length - 1]?.id || '';
+    const activeVersionId = clip.video_url
+        ? (clip.active_version_id || clipVersions[clipVersions.length - 1]?.id || '')
+        : '';
     const originalVersionId = clip.original_version_id || clipVersions[0]?.id || '';
-    const isPreviewOnly = !clip.video_url && !!clip.preview_video_url;
+    const isPreviewOnly = !clip.video_url && (!!clip.preview_video_url || !!sourceVideoFilename);
+    const clipRangeStart = Math.max(0, Number(clip.preview_source_start ?? clip.start ?? clip.preview_start ?? 0));
+    const clipRangeEnd = Math.max(
+        clipRangeStart + 0.15,
+        Number(clip.preview_source_end ?? clip.end ?? clip.preview_end ?? clipRangeStart + 15)
+    );
     const previewStart = Math.max(0, Number(clip.preview_start ?? clip.start ?? 0));
     const previewEnd = Math.max(previewStart + 0.15, Number(clip.preview_end ?? clip.end ?? previewStart + 15));
     const resolvedHookDraftText = hookDraftText ?? clip.hook_settings?.text ?? clip.viral_hook_text ?? '';
@@ -164,7 +279,24 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const resolvedClipDescription = clip.video_description_for_instagram || clip.video_description_for_tiktok || "";
     const resolvedClipInstagramCollaborators = String(clip.instagram_collaborators || '').trim();
     const resolvedJobInstagramCollaborators = String(jobInstagramCollaborators || '').trim();
+    const resolvedClipZoomFactor = Number.isFinite(Number(clip?.hook_settings?.zoom_factor))
+        ? Number(clip.hook_settings.zoom_factor)
+        : Number.isFinite(Number(hookStyle?.zoomFactor))
+            ? Number(hookStyle.zoomFactor)
+            : 1;
+    const resolvedClipStartZoomFactor = Number.isFinite(Number(clip?.hook_settings?.start_zoom_factor))
+        ? Number(clip.hook_settings.start_zoom_factor)
+        : Number.isFinite(Number(hookStyle?.startZoomFactor))
+            ? Number(hookStyle.startZoomFactor)
+            : 0;
+    const resolvedClipFlashMode = normalizePatternFlashMode(
+        clip?.hook_settings?.flash_mode ?? hookStyle?.flashMode,
+        DEFAULT_HOOK_STYLE.flashMode
+    );
     const clipPostHighlight = resolveClipPostHighlight(clip);
+    const clipQualityFlags = Array.isArray(clip?.quality_flags) ? clip.quality_flags : [];
+    const fillerStartFlag = clipQualityFlags.find((flag) => flag?.type === 'starts_with_filler');
+    const weakOpeningFlag = clipQualityFlags.find((flag) => flag?.type === 'weak_opening_hook');
 
     const [platforms, setPlatforms] = useState({ ...DEFAULT_SOCIAL_POST_SETTINGS.platforms, ...(socialPostSettings.platforms || {}) });
     const [postTitle, setPostTitle] = useState("");
@@ -203,21 +335,70 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const [titleDraft, setTitleDraft] = useState(resolvedClipTitle);
     const [descriptionDraft, setDescriptionDraft] = useState(resolvedClipDescription);
     const [instagramCollaboratorsDraft, setInstagramCollaboratorsDraft] = useState(resolvedClipInstagramCollaborators);
+    const [startZoomFactorDraft, setStartZoomFactorDraft] = useState(resolvedClipStartZoomFactor);
+    const [zoomFactorDraft, setZoomFactorDraft] = useState(resolvedClipZoomFactor);
+    const [flashModeDraft, setFlashModeDraft] = useState(resolvedClipFlashMode);
     const [isSavingTextMetadata, setIsSavingTextMetadata] = useState(false);
     const [isApplyingJobCollaborators, setIsApplyingJobCollaborators] = useState(false);
+    const [isApplyingJobZoomFactor, setIsApplyingJobZoomFactor] = useState(false);
+    const [isAdjustingSuggestedRange, setIsAdjustingSuggestedRange] = useState(false);
     const [textMetadataStatus, setTextMetadataStatus] = useState(null);
+    const [rangeStartDraft, setRangeStartDraft] = useState(() => formatTimestampInput(clipRangeStart));
+    const [rangeEndDraft, setRangeEndDraft] = useState(() => formatTimestampInput(clipRangeEnd));
+    const [isPreviewOpen, setIsPreviewOpen] = useState(!deferPreviewLoading);
+    const [hasLoadedPreview, setHasLoadedPreview] = useState(!deferPreviewLoading);
+    const hasDerivedPreviewAsset = Boolean(
+        previewVideoFilename
+        && sourceVideoFilename
+        && previewVideoFilename !== sourceVideoFilename
+    );
+    const currentVideoLooksLikeSourceAsset = Boolean(
+        sourceVideoFilename
+        && currentVideoFilename
+        && sourceVideoFilename === currentVideoFilename
+    );
+    const previewRequestFilename = currentVideoLooksLikeSourceAsset
+        ? sourceVideoFilename
+        : (currentVideoFilename || sourceVideoFilename || previewVideoFilename || '');
+    const shouldUseBrowserPreview = Boolean(
+        ((!clip.video_url && !hasDerivedPreviewAsset) || currentVideoLooksLikeSourceAsset)
+        && previewRequestFilename
+    );
+    const existingBrowserPreviewUrl = resolveVideoUrl(clip.browser_preview_url || '');
+    const [browserPreviewUrl, setBrowserPreviewUrl] = useState(() => {
+        if (!shouldUseBrowserPreview) {
+            return '';
+        }
+        const previewSourceFilename = String(clip.browser_preview_source_filename || '').trim();
+        if (!currentVideoLooksLikeSourceAsset && previewSourceFilename && previewRequestFilename && previewSourceFilename !== previewRequestFilename) {
+            return '';
+        }
+        return resolveVideoUrl(clip.browser_preview_url || '');
+    });
+    const [isBrowserPreviewLoading, setIsBrowserPreviewLoading] = useState(false);
+    const [browserPreviewError, setBrowserPreviewError] = useState('');
     const isBusy = isEditing || isSubtitling || isHooking || isTranslating || isTrimming || isPreviewRendering || isRenderingClip || isSelectingVersion;
     const clipDuration = Number.isFinite(Number(clip.display_duration))
         ? Number(clip.display_duration)
         : Math.max(0, (clip.end || 0) - (clip.start || 0));
     const displayPlatformResults = buildDisplayPlatformResults(postResult);
     const resolvedUploadUserId = activeUploadProfile || uploadUserId;
+    const playbackVideoUrl = shouldUseBrowserPreview ? (browserPreviewUrl || existingBrowserPreviewUrl) : currentVideoUrl;
+    const effectivePreviewOnly = shouldUseBrowserPreview && !playbackVideoUrl && isPreviewOnly;
 
     useEffect(() => {
         setTitleDraft(resolvedClipTitle);
         setDescriptionDraft(resolvedClipDescription);
         setInstagramCollaboratorsDraft(resolvedClipInstagramCollaborators);
-    }, [resolvedClipTitle, resolvedClipDescription, resolvedClipInstagramCollaborators]);
+        setStartZoomFactorDraft(resolvedClipStartZoomFactor);
+        setZoomFactorDraft(resolvedClipZoomFactor);
+        setFlashModeDraft(resolvedClipFlashMode);
+    }, [resolvedClipTitle, resolvedClipDescription, resolvedClipInstagramCollaborators, resolvedClipStartZoomFactor, resolvedClipZoomFactor, resolvedClipFlashMode]);
+
+    useEffect(() => {
+        setRangeStartDraft(formatTimestampInput(clipRangeStart));
+        setRangeEndDraft(formatTimestampInput(clipRangeEnd));
+    }, [clipRangeStart, clipRangeEnd]);
 
     // Initialize/Reset form when modal opens
     useEffect(() => {
@@ -248,10 +429,32 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     }, [showModal, clip, socialPostSettings, resolvedClipInstagramCollaborators, resolvedJobInstagramCollaborators]);
 
     useEffect(() => {
+        if (!shouldUseBrowserPreview) {
+            setBrowserPreviewUrl('');
+        } else {
+            const previewSourceFilename = String(clip.browser_preview_source_filename || '').trim();
+            if (!currentVideoLooksLikeSourceAsset && previewSourceFilename && previewRequestFilename && previewSourceFilename !== previewRequestFilename) {
+                setBrowserPreviewUrl('');
+            } else {
+                setBrowserPreviewUrl(resolveVideoUrl(clip.browser_preview_url || ''));
+            }
+        }
+        setBrowserPreviewError('');
+        setIsBrowserPreviewLoading(false);
+    }, [jobId, clipIndex, previewRequestFilename, clip.browser_preview_url, clip.browser_preview_source_filename, shouldUseBrowserPreview, currentVideoLooksLikeSourceAsset]);
+
+    useEffect(() => {
         if (videoRef.current) {
             videoRef.current.load();
         }
-    }, [currentVideoUrl]);
+    }, [playbackVideoUrl]);
+
+    useEffect(() => {
+        if (!deferPreviewLoading) {
+            setIsPreviewOpen(true);
+            setHasLoadedPreview(true);
+        }
+    }, [deferPreviewLoading]);
 
     useEffect(() => () => {
         if (postStatusTimeoutRef.current) {
@@ -284,18 +487,150 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         return () => window.clearTimeout(timer);
     }, [textMetadataStatus]);
 
+    const clampZoomFactor = (value, fallback = 1) => {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return fallback;
+        return Math.max(0, Math.min(2, Math.round(numeric * 100) / 100));
+    };
+
+    const getSelectedInputFilename = (clipSnapshot = clip) => {
+        const overrideUrl = clipSnapshot === clip ? currentVideoOverride : '';
+        const sourceFilename = extractFilenameFromVideoUrl(
+            clipSnapshot?.source_video_filename
+            || clipSnapshot?.original_video_filename
+            || clipSnapshot?.base_video_filename
+            || ''
+        );
+        const snapshotPreviewFilename = extractFilenameFromVideoUrl(
+            clipSnapshot?.preview_video_url || clipSnapshot?.preview_video_filename || ''
+        );
+        const currentFilename = extractFilenameFromVideoUrl(
+            overrideUrl
+            || clipSnapshot?.video_url
+            || clipSnapshot?.preview_video_url
+            || ''
+        );
+        return currentFilename || sourceFilename || snapshotPreviewFilename || undefined;
+    };
+
+    const requestBrowserPreview = async ({ clipSnapshot = clip, forceRegenerate = false, quiet = false } = {}) => {
+        const inputFilename = getSelectedInputFilename(clipSnapshot);
+        if (!inputFilename) {
+            throw new Error('Keine Quelldatei fuer die Vorschau gefunden.');
+        }
+        setIsBrowserPreviewLoading(true);
+        try {
+            if (!quiet) {
+                setBrowserPreviewError('');
+            }
+            const res = await fetch(getApiUrl('/api/clip/preview/browser'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    job_id: jobId,
+                    clip_index: clipIndex,
+                    input_filename: inputFilename,
+                    force_regenerate: forceRegenerate,
+                }),
+            });
+            if (!res.ok) {
+                const message = await readErrorText(res);
+                if (!quiet) {
+                    setBrowserPreviewError(message);
+                }
+                throw new Error(message);
+            }
+            const data = await res.json();
+            setBrowserPreviewUrl(resolveVideoUrl(data?.preview_video_url || ''));
+            setHasLoadedPreview(true);
+            setIsPreviewOpen(true);
+            setBrowserPreviewError('');
+            return data;
+        } finally {
+            setIsBrowserPreviewLoading(false);
+        }
+    };
+
+    const persistClipSuggestedRange = async ({ deltaStart = 0, deltaEnd = 0, absoluteStart = null, absoluteEnd = null, regeneratePreview = true } = {}) => {
+        setIsAdjustingSuggestedRange(true);
+        setEditError(null);
+        try {
+            const res = await fetch(getApiUrl('/api/clip/range-adjust'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    job_id: jobId,
+                    clip_index: clipIndex,
+                    delta_start: deltaStart,
+                    delta_end: deltaEnd,
+                    absolute_start: absoluteStart,
+                    absolute_end: absoluteEnd,
+                })
+            });
+
+            if (!res.ok) {
+                throw new Error(await readErrorText(res));
+            }
+
+            const data = await res.json();
+            setBrowserPreviewUrl('');
+            setBrowserPreviewError('');
+            setHasLoadedPreview(true);
+            setIsPreviewOpen(true);
+            applyClipResponse(data);
+            if (regeneratePreview && data?.clip) {
+                await requestBrowserPreview({
+                    clipSnapshot: data.clip,
+                    forceRegenerate: true,
+                    quiet: true,
+                });
+            }
+            setTextMetadataStatus({ type: 'success', message: 'Clipbereich angepasst' });
+        } catch (e) {
+            setEditError(e.message || 'Clipbereich konnte nicht angepasst werden.');
+            setTimeout(() => setEditError(null), 6000);
+        } finally {
+            setIsAdjustingSuggestedRange(false);
+            setIsBrowserPreviewLoading(false);
+        }
+    };
+
+    const handleRegenerateSuggestedPreview = async () => {
+        const parsedStart = parseTimestampInput(rangeStartDraft);
+        const parsedEnd = parseTimestampInput(rangeEndDraft);
+        if (parsedStart === null || parsedEnd === null) {
+            setEditError('Bitte gueltige Von/Bis-Zeitstempel eingeben, z. B. 01:23.4 oder 00:01:23.');
+            setTimeout(() => setEditError(null), 6000);
+            return;
+        }
+        await persistClipSuggestedRange({
+            absoluteStart: parsedStart,
+            absoluteEnd: parsedEnd,
+            regeneratePreview: true,
+        });
+    };
+
     const persistClipTextMetadata = async () => {
         const normalizedTitle = String(titleDraft || '').trim();
         const normalizedDescription = String(descriptionDraft || '').trim();
         const normalizedCollaborators = String(instagramCollaboratorsDraft || '').trim();
+        const normalizedStartZoomFactor = clampZoomFactor(startZoomFactorDraft, resolvedClipStartZoomFactor);
+        const normalizedZoomFactor = clampZoomFactor(zoomFactorDraft, resolvedClipZoomFactor);
+        const normalizedFlashMode = normalizePatternFlashMode(flashModeDraft, resolvedClipFlashMode);
         const currentTitle = String(clip.video_title_for_youtube_short || '').trim();
         const currentDescription = String(resolvedClipDescription || '').trim();
         const currentCollaborators = String(clip.instagram_collaborators || '').trim();
+        const currentStartZoomFactor = clampZoomFactor(clip?.hook_settings?.start_zoom_factor, resolvedClipStartZoomFactor);
+        const currentZoomFactor = clampZoomFactor(clip?.hook_settings?.zoom_factor, resolvedClipZoomFactor);
+        const currentFlashMode = normalizePatternFlashMode(clip?.hook_settings?.flash_mode, resolvedClipFlashMode);
 
         if (
             normalizedTitle === currentTitle
             && normalizedDescription === currentDescription
             && normalizedCollaborators === currentCollaborators
+            && normalizedStartZoomFactor === currentStartZoomFactor
+            && normalizedZoomFactor === currentZoomFactor
+            && normalizedFlashMode === currentFlashMode
         ) {
             return;
         }
@@ -314,6 +649,9 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     video_description_for_tiktok: normalizedDescription,
                     video_description_for_instagram: normalizedDescription,
                     instagram_collaborators: normalizedCollaborators,
+                    start_zoom_factor: normalizedStartZoomFactor,
+                    zoom_factor: normalizedZoomFactor,
+                    flash_mode: normalizedFlashMode,
                 })
             });
 
@@ -345,6 +683,26 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             setTextMetadataStatus({ type: 'error', message: e.message || 'Konnte Job-Default nicht speichern.' });
         } finally {
             setIsApplyingJobCollaborators(false);
+        }
+    };
+
+    const handleApplyZoomFactorToJob = async () => {
+        if (!onApplyHookDefaultsToJob) return;
+
+        setIsApplyingJobZoomFactor(true);
+        try {
+            await persistClipTextMetadata();
+            await onApplyHookDefaultsToJob({
+                ...(hookStyle || {}),
+                startZoomFactor: clampZoomFactor(startZoomFactorDraft, resolvedClipStartZoomFactor),
+                zoomFactor: clampZoomFactor(zoomFactorDraft, resolvedClipZoomFactor),
+                flashMode: normalizePatternFlashMode(flashModeDraft, resolvedClipFlashMode),
+            });
+            setTextMetadataStatus({ type: 'success', message: 'Pattern-Interrupts fuer den Job uebernommen' });
+        } catch (e) {
+            setTextMetadataStatus({ type: 'error', message: e.message || 'Konnte Job-Zoomfaktor nicht speichern.' });
+        } finally {
+            setIsApplyingJobZoomFactor(false);
         }
     };
 
@@ -384,6 +742,14 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const buildLlmHeaders = () => {
         const provider = (llmProvider || localStorage.getItem('llm_provider') || 'gemini').trim().toLowerCase();
         const apiKey = geminiApiKey || localStorage.getItem('gemini_key');
+        const resolvedGeminiModel = geminiModel || localStorage.getItem('gemini_model') || 'gemini-2.5-flash';
+        const resolvedOpenaiKey = openaiKey || localStorage.getItem('openai_key');
+        const resolvedOpenaiModel = openaiModel || localStorage.getItem('openai_model') || 'gpt-4.1-mini';
+        const resolvedClaudeKey = claudeKey || localStorage.getItem('claude_key');
+        const resolvedClaudeModel = claudeModel || localStorage.getItem('claude_model') || 'claude-3-5-sonnet-latest';
+        const resolvedMinimaxKey = minimaxKey || localStorage.getItem('minimax_key');
+        const resolvedMinimaxAuthMode = minimaxAuthMode || localStorage.getItem('minimax_auth_mode') || 'token_plan';
+        const resolvedMinimaxModel = minimaxModel || localStorage.getItem('minimax_model') || 'MiniMax-M3';
         const pexelsApiKey = pexelsKey;
         const resolvedOllamaBaseUrl = ollamaBaseUrl || localStorage.getItem('ollama_base_url') || 'http://127.0.0.1:11434';
         const resolvedOllamaModel = normalizeOllamaModelName(
@@ -396,6 +762,20 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         };
         if (provider === 'gemini' && apiKey) {
             headers['X-Gemini-Key'] = apiKey;
+            if (resolvedGeminiModel) headers['X-Gemini-Model'] = resolvedGeminiModel;
+        }
+        if (provider === 'openai' && resolvedOpenaiKey) {
+            headers['X-OpenAI-Key'] = resolvedOpenaiKey;
+            if (resolvedOpenaiModel) headers['X-OpenAI-Model'] = resolvedOpenaiModel;
+        }
+        if (provider === 'claude' && resolvedClaudeKey) {
+            headers['X-Claude-Key'] = resolvedClaudeKey;
+            if (resolvedClaudeModel) headers['X-Claude-Model'] = resolvedClaudeModel;
+        }
+        if (provider === 'minimax' && resolvedMinimaxKey) {
+            headers['X-Minimax-Key'] = resolvedMinimaxKey;
+            headers['X-Minimax-Auth-Mode'] = resolvedMinimaxAuthMode;
+            if (resolvedMinimaxModel) headers['X-Minimax-Model'] = resolvedMinimaxModel;
         }
         if (provider === 'ollama') {
             if (resolvedOllamaBaseUrl) headers['X-Ollama-Base-Url'] = resolvedOllamaBaseUrl;
@@ -483,6 +863,9 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         try {
             const provider = llmProvider || localStorage.getItem('llm_provider') || 'gemini';
             const apiKey = geminiApiKey || localStorage.getItem('gemini_key');
+            const resolvedOpenaiKey = openaiKey || localStorage.getItem('openai_key');
+            const resolvedClaudeKey = claudeKey || localStorage.getItem('claude_key');
+            const resolvedMinimaxKey = minimaxKey || localStorage.getItem('minimax_key');
             const resolvedOllamaBaseUrl = ollamaBaseUrl || localStorage.getItem('ollama_base_url') || 'http://127.0.0.1:11434';
             const resolvedOllamaModel = normalizeOllamaModelName(
                 ollamaModel || localStorage.getItem('ollama_model') || 'llama3.1:8b'
@@ -491,20 +874,31 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             if (provider === 'gemini' && !apiKey) {
                 throw new Error("Gemini API-Key fehlt. Bitte in den Einstellungen setzen.");
             }
+            if (provider === 'openai' && !resolvedOpenaiKey) {
+                throw new Error("OpenAI API-Key fehlt. Bitte in den Einstellungen setzen.");
+            }
+            if (provider === 'claude' && !resolvedClaudeKey) {
+                throw new Error("Claude API-Key fehlt. Bitte in den Einstellungen setzen.");
+            }
+            if (provider === 'minimax' && !resolvedMinimaxKey) {
+                throw new Error("MiniMax-Key fehlt. Bitte in den Einstellungen setzen.");
+            }
             if (provider === 'ollama' && !resolvedOllamaModel) {
                 throw new Error("Ollama-Modell fehlt. Bitte in den Einstellungen setzen.");
+            }
+            if (!['gemini', 'ollama'].includes(provider)) {
+                throw new Error("Auto-Edit unterstuetzt aktuell Gemini oder Ollama. Die Short-Auswahl selbst kann bereits ueber OpenAI, MiniMax und Claude laufen.");
             }
 
             const res = await fetch(getApiUrl('/api/edit'), {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
-                    ...(provider === 'gemini' && apiKey ? { 'X-Gemini-Key': apiKey } : {})
+                    ...buildLlmHeaders()
                 },
                 body: JSON.stringify({
                     job_id: jobId,
                     clip_index: clipIndex,
-                    input_filename: currentVideoUrl.split('/').pop(),
+                    input_filename: getSelectedInputFilename(),
                     provider,
                     ...(provider === 'ollama' ? {
                         ollama_base_url: resolvedOllamaBaseUrl,
@@ -543,7 +937,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     font_size: options.fontSize,
                     font_family: options.fontFamily,
                     background_style: options.backgroundStyle,
-                    input_filename: currentVideoUrl.split('/').pop()
+                    input_filename: getSelectedInputFilename(),
                 })
             });
 
@@ -589,7 +983,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     width_preset: payload.widthPreset,
                     font_family: payload.fontFamily,
                     background_style: payload.backgroundStyle,
-                    input_filename: currentVideoUrl.split('/').pop()
+                    input_filename: getSelectedInputFilename(),
                 })
             });
 
@@ -625,7 +1019,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 job_id: jobId,
                 clip_index: clipIndex,
                 target_language: options.targetLanguage,
-                input_filename: currentVideoUrl.split('/').pop()
+                input_filename: getSelectedInputFilename(),
             };
             console.log('[Translate] Request body:', requestBody);
             console.log('[Translate] Sending request to /api/translate');
@@ -710,7 +1104,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     const handleTrim = async ({ trimStart, trimEnd, removeRanges }) => {
         setIsTrimming(true);
         setEditError(null);
-        const trimSourceFilename = extractFilenameFromVideoUrl(trimDialogVideoUrl || currentVideoUrl);
+        const trimSourceFilename = extractFilenameFromVideoUrl(trimDialogVideoUrl || currentVideoUrl) || getSelectedInputFilename();
         try {
             const res = await fetch(getApiUrl('/api/trim'), {
                 method: 'POST',
@@ -742,7 +1136,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
     };
 
     const openTrimModal = () => {
-        setTrimDialogVideoUrl(currentVideoUrl);
+        setTrimDialogVideoUrl(currentVideoUrl || resolveVideoUrl(clip.preview_video_url || clip.video_url || ''));
         setShowTrimModal(true);
     };
 
@@ -777,6 +1171,9 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             widthPreset: payload.widthPreset,
             fontFamily: payload.fontFamily,
             backgroundStyle: payload.backgroundStyle,
+            startZoomFactor: clampZoomFactor(startZoomFactorDraft, resolvedClipStartZoomFactor),
+            zoomFactor: clampZoomFactor(zoomFactorDraft, resolvedClipZoomFactor),
+            flashMode: normalizePatternFlashMode(flashModeDraft, resolvedClipFlashMode),
         });
         setEditError('Hook-Vorgaben für alle Clips dieses Jobs gesetzt.');
         setTimeout(() => setEditError(null), 2500);
@@ -817,6 +1214,9 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             width_preset: hookStyle?.widthPreset || 'wide',
             font_family: hookStyle?.fontFamily,
             background_style: hookStyle?.backgroundStyle,
+            start_zoom_factor: clampZoomFactor(startZoomFactorDraft, resolvedClipStartZoomFactor),
+            zoom_factor: clampZoomFactor(zoomFactorDraft, resolvedClipZoomFactor),
+            flash_mode: normalizePatternFlashMode(flashModeDraft, resolvedClipFlashMode),
         };
     };
 
@@ -853,14 +1253,13 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
     const handleQuickRenderWithDefaults = async () => {
         const hookText = String(resolvedHookDraftText || '').trim();
-        if (!hookText) {
-            setEditError('Hook-Text darf nicht leer sein.');
-            return;
-        }
+        const shouldApplyHook = !!hookText;
 
         setIsRenderingClip(true);
         setEditError(null);
-        onHookDraftChange && onHookDraftChange(hookText);
+        if (shouldApplyHook) {
+            onHookDraftChange && onHookDraftChange(hookText);
+        }
         try {
             const res = await fetch(getApiUrl('/api/clip/render/viral-original'), {
                 method: 'POST',
@@ -872,8 +1271,9 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     tight_edit_preset: tightEditPreset || 'aggressive',
                     apply_subtitles: true,
                     subtitle_settings: buildSubtitleSettingsPayload(),
-                    apply_hook: true,
-                    hook_settings: buildHookSettingsPayload(hookText),
+                    apply_hook: shouldApplyHook,
+                    hook_settings: shouldApplyHook ? buildHookSettingsPayload(hookText) : null,
+                    pattern_flash_mode: normalizePatternFlashMode(flashModeDraft, resolvedClipFlashMode),
                     apply_stock_overlay: applyStockOverlay,
                 })
             });
@@ -973,6 +1373,8 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                 tiktok_is_aigc: tiktokIsAigc,
                 facebook_page_id: facebookPageId,
                 pinterest_board_id: pinterestBoardId,
+                podcast_dm_relay_url: podcastDmSettings.relayUrl || undefined,
+                podcast_dm_relay_password: podcastDmSettings.relayPassword || undefined,
             };
 
             if (isScheduling && scheduleDate) {
@@ -1044,6 +1446,8 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                     user_id: resolvedUploadUserId,
                     platform,
                     retry_mode: retryMode,
+                    podcast_dm_relay_url: podcastDmSettings.relayUrl || undefined,
+                    podcast_dm_relay_password: podcastDmSettings.relayPassword || undefined,
                 })
             });
 
@@ -1077,7 +1481,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
 
     const handleReplayFromStart = () => {
         if (!videoRef.current) return;
-        const startTime = isPreviewOnly ? previewStart : 0;
+        const startTime = effectivePreviewOnly ? previewStart : 0;
         videoRef.current.currentTime = startTime;
         const playPromise = videoRef.current.play();
         if (playPromise && typeof playPromise.catch === 'function') {
@@ -1085,79 +1489,183 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
         }
     };
 
+    const openPreviewExplicitly = async () => {
+        setHasLoadedPreview(true);
+        setIsPreviewOpen(true);
+        if (shouldUseBrowserPreview && !browserPreviewUrl && !existingBrowserPreviewUrl) {
+            try {
+                await requestBrowserPreview();
+            } catch (error) {
+                setBrowserPreviewError(error.message || 'Leichte Vorschau konnte nicht erzeugt werden.');
+            }
+        }
+    };
+
+    const togglePreviewOpen = () => {
+        if (isPreviewOpen) {
+            if (videoRef.current) {
+                videoRef.current.pause();
+            }
+            setIsPreviewOpen(false);
+            return;
+        }
+        openPreviewExplicitly();
+    };
+
     return (
-        <div className={`bg-surface border rounded-2xl overflow-hidden flex flex-col group transition-all animate-[fadeIn_0.5s_ease-out] min-h-[300px] h-auto ${
+        <div ref={cardRef} className={`bg-surface border rounded-2xl overflow-hidden grid grid-cols-1 lg:grid-cols-[minmax(300px,390px)_minmax(0,1fr)] group transition-all animate-[fadeIn_0.5s_ease-out] min-h-[300px] h-auto ${
             clipPostHighlight?.cardClass || 'border-white/5 hover:border-white/10'
         }`} style={{ animationDelay: `${index * 0.1}s` }}>
             {/* Top: Video Preview (Full Width) */}
-            <div className={`w-full p-3 ${clipPostHighlight?.previewClass || 'bg-black/40 border-b border-white/5'}`}>
+            <div className={`w-full p-3 lg:border-r lg:border-b-0 ${clipPostHighlight?.previewClass || 'bg-black/40 border-b border-white/5'}`}>
                 <div className="mx-auto w-full max-w-[360px] aspect-[9/16] bg-black rounded-xl overflow-hidden relative group/video">
-                <video
-                    ref={videoRef}
-                    src={currentVideoUrl}
-                    controls
-                    className="w-full h-full object-contain"
-                    playsInline
-                    preload="metadata"
-                    onLoadedMetadata={() => {
-                        if (isPreviewOnly && videoRef.current) {
-                            videoRef.current.currentTime = previewStart;
-                        }
-                    }}
-                    onSeeking={() => {
-                        if (!videoRef.current || !isPreviewOnly) return;
-                        const current = videoRef.current.currentTime;
-                        if (current < previewStart || current >= previewEnd) {
-                            videoRef.current.currentTime = previewStart;
-                        }
-                    }}
-                    onTimeUpdate={() => {
-                        if (!videoRef.current) return;
-                        if (isPreviewOnly && videoRef.current.currentTime < previewStart) {
-                            videoRef.current.currentTime = previewStart;
-                            return;
-                        }
-                        if (isPreviewOnly && videoRef.current.currentTime >= previewEnd) {
-                            videoRef.current.pause();
-                            videoRef.current.currentTime = previewStart;
-                            return;
-                        }
-                    }}
-                    onPlay={() => {
-                        if (videoRef.current && isPreviewOnly) {
+                {hasLoadedPreview && isPreviewOpen ? (
+                  isBrowserPreviewLoading ? (
+                    <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-gradient-to-b from-black via-zinc-950 to-black text-center text-zinc-300">
+                      <Loader2 size={28} className="animate-spin text-cyan-300" />
+                      <div>
+                        <div className="text-sm font-medium text-white">Leichte Vorschau wird erstellt</div>
+                        <div className="mt-1 text-xs text-zinc-500">
+                          Der Browser bekommt nur eine kleine Proxy-Datei, nicht das Original.
+                        </div>
+                      </div>
+                    </div>
+                  ) : playbackVideoUrl ? (
+                  <>
+                    <video
+                        key={playbackVideoUrl}
+                        ref={videoRef}
+                        src={playbackVideoUrl}
+                        controls
+                        className="w-full h-full object-contain"
+                        playsInline
+                        preload="metadata"
+                        onLoadedMetadata={() => {
+                            if (effectivePreviewOnly && videoRef.current) {
+                                videoRef.current.currentTime = previewStart;
+                            }
+                        }}
+                        onSeeking={() => {
+                            if (!videoRef.current || !effectivePreviewOnly) return;
                             const current = videoRef.current.currentTime;
                             if (current < previewStart || current >= previewEnd) {
                                 videoRef.current.currentTime = previewStart;
                             }
-                        }
-                        const currentTime = videoRef.current ? videoRef.current.currentTime : 0;
-                        onPlay && onPlay(isPreviewOnly ? currentTime : (clip.start + currentTime));
-                    }}
-                    onPause={() => onPause && onPause()}
-                    onEnded={() => {
-                        if (videoRef.current) {
-                            videoRef.current.currentTime = isPreviewOnly ? previewStart : 0;
-                            videoRef.current.play();
-                        }
-                    }}
-                />
+                        }}
+                        onTimeUpdate={() => {
+                            if (!videoRef.current) return;
+                            if (effectivePreviewOnly && videoRef.current.currentTime < previewStart) {
+                                videoRef.current.currentTime = previewStart;
+                                return;
+                            }
+                            if (effectivePreviewOnly && videoRef.current.currentTime >= previewEnd) {
+                                videoRef.current.pause();
+                                videoRef.current.currentTime = previewStart;
+                                return;
+                            }
+                        }}
+                        onPlay={() => {
+                            if (videoRef.current && effectivePreviewOnly) {
+                                const current = videoRef.current.currentTime;
+                                if (current < previewStart || current >= previewEnd) {
+                                    videoRef.current.currentTime = previewStart;
+                                }
+                            }
+                            const currentTime = videoRef.current ? videoRef.current.currentTime : 0;
+                            onPlay && onPlay(effectivePreviewOnly ? currentTime : (clip.start + currentTime));
+                        }}
+                        onPause={() => onPause && onPause()}
+                        onEnded={() => {
+                            if (videoRef.current) {
+                                videoRef.current.currentTime = effectivePreviewOnly ? previewStart : 0;
+                                videoRef.current.play();
+                            }
+                        }}
+                    />
+                    <button
+                        type="button"
+                        onClick={handleReplayFromStart}
+                        className="absolute top-3 right-3 bg-black/60 hover:bg-black/75 backdrop-blur-md text-white text-[10px] font-bold px-2 py-1 rounded-md border border-white/10 uppercase tracking-wide flex items-center gap-1"
+                    >
+                        <RotateCcw size={11} /> Von vorne
+                    </button>
+                  </>
+                  ) : (
+                    <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-gradient-to-b from-black via-zinc-950 to-black px-5 text-center text-zinc-300">
+                      {shouldUseBrowserPreview ? (
+                        <Video size={28} className="text-cyan-300" />
+                      ) : (
+                        <AlertCircle size={28} className="text-amber-300" />
+                      )}
+                      <div>
+                        <div className="text-sm font-medium text-white">
+                          {shouldUseBrowserPreview ? 'Proxy-Vorschau noch nicht erstellt' : 'Vorschau konnte nicht geladen werden'}
+                        </div>
+                        <div className="mt-1 text-xs text-zinc-500">
+                          {browserPreviewError || (shouldUseBrowserPreview
+                            ? 'Erstellt nur fuer diesen Clip eine kleine Low-Quality-Datei.'
+                            : 'Die leichte Browser-Vorschau konnte nicht erzeugt werden.')}
+                        </div>
+                      </div>
+                      {shouldUseBrowserPreview ? (
+                        <button
+                          type="button"
+                          onClick={openPreviewExplicitly}
+                          disabled={isBrowserPreviewLoading}
+                          className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-100 hover:bg-cyan-500/15 disabled:opacity-60"
+                        >
+                          Proxy-Vorschau erstellen
+                        </button>
+                      ) : null}
+                      {currentVideoUrl ? (
+                        <a
+                          href={currentVideoUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="rounded-full border border-zinc-600 bg-zinc-900/70 px-3 py-1 text-xs text-white"
+                        >
+                          Original separat öffnen
+                        </a>
+                      ) : null}
+                    </div>
+                  )
+                ) : (
+                  <button
+                    type="button"
+                    onClick={togglePreviewOpen}
+                    className="flex h-full w-full flex-col items-center justify-center gap-3 bg-gradient-to-b from-black via-zinc-950 to-black text-center text-zinc-300"
+                  >
+                    <Video size={28} className="text-zinc-500" />
+                    <div>
+                      <div className="text-sm font-medium text-white">Preview nicht vorgeladen</div>
+                      <div className="mt-1 text-xs text-zinc-500">
+                        Aufklappen, wenn du diesen Clip ansehen willst.
+                      </div>
+                    </div>
+                    <span className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-100">
+                      Preview laden
+                    </span>
+                  </button>
+                )}
                 <div className="absolute top-3 left-3 flex gap-2">
                     <span className="bg-black/60 backdrop-blur-md text-white text-[10px] font-bold px-2 py-1 rounded-md border border-white/10 uppercase tracking-wide">
                         Clip {index + 1}
                     </span>
-                    {isPreviewOnly && (
+                    {effectivePreviewOnly && (
                             <span className="bg-cyan-500/20 backdrop-blur-md text-cyan-200 text-[10px] font-bold px-2 py-1 rounded-md border border-cyan-400/30 uppercase tracking-wide">
                             Vorschau-Entwurf
                         </span>
                     )}
                 </div>
-                <button
-                    type="button"
-                    onClick={handleReplayFromStart}
-                    className="absolute top-3 right-3 bg-black/60 hover:bg-black/75 backdrop-blur-md text-white text-[10px] font-bold px-2 py-1 rounded-md border border-white/10 uppercase tracking-wide flex items-center gap-1"
-                >
-                    <RotateCcw size={11} /> Von vorne
-                </button>
+                {deferPreviewLoading && (
+                    <button
+                        type="button"
+                        onClick={togglePreviewOpen}
+                        className="absolute top-12 right-3 bg-black/70 hover:bg-black/85 backdrop-blur-md text-white text-[10px] font-bold px-2 py-1 rounded-md border border-white/10 uppercase tracking-wide flex items-center gap-1"
+                    >
+                        {isPreviewOpen ? 'Preview ausblenden' : 'Preview oeffnen'}
+                    </button>
+                )}
 
                 {/* Auto Edit Overlay if Processing */}
                 {isEditing && (
@@ -1171,7 +1679,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
             </div>
 
             {/* Bottom: Content & Details */}
-            <div className={`flex-1 p-4 md:p-5 flex flex-col overflow-y-auto md:overflow-hidden custom-scrollbar touch-scroll min-w-0 ${
+            <div className={`flex-1 p-4 md:p-5 flex flex-col overflow-visible custom-scrollbar touch-scroll min-w-0 ${
                 clipPostHighlight?.contentClass || 'bg-[#121214]'
             }`}>
                 <div className="mb-4 space-y-3">
@@ -1200,6 +1708,22 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                     {clipPostHighlight && (
                                         <span className={`rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wide ${clipPostHighlight.badgeClass}`}>
                                             {clipPostHighlight.label}
+                                        </span>
+                                    )}
+                                    {fillerStartFlag && (
+                                        <span
+                                            className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-amber-100"
+                                            title={fillerStartFlag.label || 'Startet mit Fuellwort'}
+                                        >
+                                            Fuellwort-Start
+                                        </span>
+                                    )}
+                                    {!fillerStartFlag && weakOpeningFlag && (
+                                        <span
+                                            className="rounded-full border border-yellow-500/25 bg-yellow-500/10 px-2 py-0.5 text-[10px] uppercase tracking-wide text-yellow-100"
+                                            title={weakOpeningFlag.label || 'Schwacher Einstieg'}
+                                        >
+                                            Schwacher Einstieg
                                         </span>
                                     )}
                                     <span className={`rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wide ${
@@ -1268,6 +1792,7 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                         </span>
                     </div>
                     {clipVersions.length > 1 ? (
+                        activeVersionId ? (
                         <select
                             value={activeVersionId}
                             onChange={(e) => handleVersionSelect(e.target.value)}
@@ -1280,6 +1805,11 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                 </option>
                             ))}
                         </select>
+                        ) : (
+                            <div className="text-xs text-cyan-200 rounded-lg border border-cyan-400/20 bg-cyan-500/10 px-3 py-2">
+                                Vorschau auf den aktuell angepassten Von/Bis-Bereich. Alte Render-Versionen bleiben erhalten, sind aber gerade nicht aktiv.
+                            </div>
+                        )
                     ) : (
                         <div className="text-xs text-zinc-400">
                             {clipVersions[0]?.label || (isPreviewOnly ? 'Entwurf (noch nicht gerendert)' : 'Original')}
@@ -1370,6 +1900,166 @@ export default function ResultCard({ clip, index, jobId, uploadPostKey, uploadUs
                                 </div>
                                 <p className="mt-2 text-[11px] text-zinc-500">
                                     Mit oder ohne `@` moeglich, empfohlen ohne `@`. Der Button setzt den aktuellen Wert dieser Card global fuer den ganzen Job.
+                                </p>
+                            </div>
+
+                            <div className="col-span-2 rounded-lg border border-white/10 bg-black/20 p-3">
+                                <div className="mb-3 flex items-center justify-between gap-3">
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Vorgeschlagener Clipbereich</span>
+                                    <span className="text-[10px] text-zinc-500 font-mono">
+                                        {clipRangeStart.toFixed(1)}s - {clipRangeEnd.toFixed(1)}s
+                                    </span>
+                                </div>
+                                <div className="mb-3 grid grid-cols-1 gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+                                    <input
+                                        type="text"
+                                        value={rangeStartDraft}
+                                        onChange={(e) => setRangeStartDraft(e.target.value)}
+                                        className="rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-primary/50"
+                                        placeholder="Von, z. B. 01:23.4"
+                                    />
+                                    <input
+                                        type="text"
+                                        value={rangeEndDraft}
+                                        onChange={(e) => setRangeEndDraft(e.target.value)}
+                                        className="rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-primary/50"
+                                        placeholder="Bis, z. B. 01:54.0"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={handleRegenerateSuggestedPreview}
+                                        disabled={isBusy || isAdjustingSuggestedRange}
+                                        className="inline-flex items-center justify-center rounded-lg border border-cyan-400/20 bg-cyan-500/10 px-3 py-2 text-xs font-semibold text-cyan-100 hover:bg-cyan-500/15 disabled:opacity-60"
+                                    >
+                                        {isAdjustingSuggestedRange ? 'Aktualisiert...' : 'Preview neu generieren'}
+                                    </button>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                                    <button
+                                        type="button"
+                                        onClick={() => persistClipSuggestedRange({ deltaStart: -1 })}
+                                        disabled={isBusy || isAdjustingSuggestedRange}
+                                        className="inline-flex items-center justify-center rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-zinc-100 hover:bg-white/10 disabled:opacity-60"
+                                    >
+                                        Start -1s
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => persistClipSuggestedRange({ deltaStart: 1 })}
+                                        disabled={isBusy || isAdjustingSuggestedRange}
+                                        className="inline-flex items-center justify-center rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-zinc-100 hover:bg-white/10 disabled:opacity-60"
+                                    >
+                                        Start +1s
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => persistClipSuggestedRange({ deltaEnd: -1 })}
+                                        disabled={isBusy || isAdjustingSuggestedRange}
+                                        className="inline-flex items-center justify-center rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-zinc-100 hover:bg-white/10 disabled:opacity-60"
+                                    >
+                                        Ende -1s
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => persistClipSuggestedRange({ deltaEnd: 1 })}
+                                        disabled={isBusy || isAdjustingSuggestedRange}
+                                        className="inline-flex items-center justify-center rounded-lg border border-cyan-400/20 bg-cyan-500/10 px-3 py-2 text-xs font-semibold text-cyan-100 hover:bg-cyan-500/15 disabled:opacity-60"
+                                    >
+                                        {isAdjustingSuggestedRange ? 'Anpassen...' : 'Ende +1s'}
+                                    </button>
+                                </div>
+                                <p className="mt-2 text-[11px] text-zinc-500">
+                                    Du kannst die Grenzen schnell per +/- verschieben oder direkt per Freitext setzen. Akzeptiert werden Sekunden sowie `MM:SS` oder `HH:MM:SS`. Die Vorschau wird danach gezielt fuer diesen Bereich neu aufgebaut.
+                                </p>
+                            </div>
+
+                            <div className="col-span-2 rounded-lg border border-white/10 bg-black/20 p-3">
+                                <div className="mb-2 flex items-center justify-between gap-3">
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Start-Zoom</span>
+                                    <span className="text-[10px] text-zinc-500">Clip-Override, Standard {(resolvedClipStartZoomFactor || 0).toFixed(2)}x</span>
+                                </div>
+                                <input
+                                    type="range"
+                                    min="0"
+                                    max="2"
+                                    step="0.05"
+                                    value={startZoomFactorDraft}
+                                    onChange={(e) => {
+                                        const nextStart = clampZoomFactor(e.target.value, resolvedClipStartZoomFactor);
+                                        const currentMax = clampZoomFactor(zoomFactorDraft, resolvedClipZoomFactor);
+                                        setStartZoomFactorDraft(Math.min(nextStart, currentMax));
+                                    }}
+                                    onMouseUp={persistClipTextMetadata}
+                                    onTouchEnd={persistClipTextMetadata}
+                                    className="w-full accent-cyan-500"
+                                />
+                                <div className="mt-2 flex items-center justify-between text-[11px] text-zinc-500">
+                                    <span>0.00x</span>
+                                    <span>{clampZoomFactor(startZoomFactorDraft, resolvedClipStartZoomFactor).toFixed(2)}x</span>
+                                    <span>2.00x</span>
+                                </div>
+                                <div className="mb-2 mt-4 flex items-center justify-between gap-3">
+                                    <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Ziel-Zoom</span>
+                                    <span className="text-[10px] text-zinc-500">Clip-Override, Standard {(resolvedClipZoomFactor || 1).toFixed(2)}x</span>
+                                </div>
+                                <input
+                                    type="range"
+                                    min="0"
+                                    max="2"
+                                    step="0.05"
+                                    value={zoomFactorDraft}
+                                    onChange={(e) => {
+                                        const nextMax = clampZoomFactor(e.target.value, resolvedClipZoomFactor);
+                                        const currentStart = clampZoomFactor(startZoomFactorDraft, resolvedClipStartZoomFactor);
+                                        setZoomFactorDraft(Math.max(nextMax, currentStart));
+                                    }}
+                                    onMouseUp={persistClipTextMetadata}
+                                    onTouchEnd={persistClipTextMetadata}
+                                    className="w-full accent-fuchsia-500"
+                                />
+                                <div className="mt-2 flex items-center justify-between text-[11px] text-zinc-500">
+                                    <span>0.00x</span>
+                                    <span>{clampZoomFactor(zoomFactorDraft, resolvedClipZoomFactor).toFixed(2)}x</span>
+                                    <span>2.00x</span>
+                                </div>
+                                <div className="mt-4">
+                                    <div className="mb-2 flex items-center justify-between gap-3">
+                                        <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Flash-Interrupts</span>
+                                        <span className="text-[10px] text-zinc-500">
+                                            Standard {PATTERN_FLASH_MODE_OPTIONS.find((option) => option.value === resolvedClipFlashMode)?.label || resolvedClipFlashMode}
+                                        </span>
+                                    </div>
+                                    <select
+                                        value={normalizePatternFlashMode(flashModeDraft, resolvedClipFlashMode)}
+                                        onChange={(e) => setFlashModeDraft(normalizePatternFlashMode(e.target.value, resolvedClipFlashMode))}
+                                        onBlur={persistClipTextMetadata}
+                                        className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-xs text-zinc-100 outline-none focus:border-fuchsia-400/50"
+                                    >
+                                        {PATTERN_FLASH_MODE_OPTIONS.map((option) => (
+                                            <option key={option.value} value={option.value}>{option.label}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div className="mt-3 flex flex-col gap-2 md:flex-row">
+                                    <button
+                                        type="button"
+                                        onClick={persistClipTextMetadata}
+                                        disabled={isSavingTextMetadata}
+                                        className="inline-flex items-center justify-center rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-zinc-100 hover:bg-white/10 disabled:opacity-60"
+                                    >
+                                        {isSavingTextMetadata ? 'Speichert...' : 'Fuer diesen Clip speichern'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleApplyZoomFactorToJob}
+                                        disabled={isApplyingJobZoomFactor}
+                                        className="inline-flex items-center justify-center rounded-lg border border-fuchsia-400/20 bg-fuchsia-500/10 px-3 py-2 text-xs font-semibold text-fuchsia-100 hover:bg-fuchsia-500/15 disabled:opacity-60"
+                                    >
+                                        {isApplyingJobZoomFactor ? 'Speichert...' : 'Fuer alle uebernehmen'}
+                                    </button>
+                                </div>
+                                <p className="mt-2 text-[11px] text-zinc-500">
+                                    Start-Zoom legt das Grundniveau fest, Ziel-Zoom den echten Peak. Flash-Interrupts steuern nur die hellen Blitze, nicht die Zoom-Pulse.
                                 </p>
                             </div>
 

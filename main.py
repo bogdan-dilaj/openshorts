@@ -46,13 +46,22 @@ ASPECT_RATIO = 9 / 16
 YOLO_MODEL_PATH = os.environ.get("YOLO_MODEL_PATH", "/tmp/Ultralytics/yolov8n.pt")
 TARGET_VERTICAL_WIDTH = int(os.environ.get("TARGET_VERTICAL_WIDTH", "1080"))
 TARGET_VERTICAL_HEIGHT = int(os.environ.get("TARGET_VERTICAL_HEIGHT", "1920"))
-MIN_CLIP_DURATION = 15.0
-MAX_CLIP_DURATION = 60.0
-MIN_OVER_ONE_MINUTE_CLIP_DURATION = 61.0
-MAX_LONG_CLIP_DURATION = float(os.environ.get("MAX_LONG_CLIP_DURATION", "80"))
+MIN_CLIP_DURATION = float(os.environ.get("MIN_CLIP_DURATION", "60"))
+MAX_CLIP_DURATION = float(os.environ.get("MAX_CLIP_DURATION", "180"))
+MIN_OVER_ONE_MINUTE_CLIP_DURATION = 60.0
+MAX_LONG_CLIP_DURATION = float(os.environ.get("MAX_LONG_CLIP_DURATION", "180"))
 MAX_GENERATED_CLIPS = int(os.environ.get("MAX_GENERATED_CLIPS", "10"))
+PREFERRED_MIN_CLIP_DURATION = float(os.environ.get("PREFERRED_MIN_CLIP_DURATION", "90"))
+SHORT_CLIP_EXCEPTION_MIN_DURATION = float(os.environ.get("SHORT_CLIP_EXCEPTION_MIN_DURATION", "18"))
 OLLAMA_CHUNK_SECONDS = int(os.environ.get("OLLAMA_CHUNK_SECONDS", "180"))
 OLLAMA_CHUNK_OVERLAP_SECONDS = int(os.environ.get("OLLAMA_CHUNK_OVERLAP_SECONDS", "20"))
+MINIMAX_CHUNK_SECONDS = int(os.environ.get("MINIMAX_CHUNK_SECONDS", "360"))
+MINIMAX_CHUNK_OVERLAP_SECONDS = int(os.environ.get("MINIMAX_CHUNK_OVERLAP_SECONDS", "45"))
+MINIMAX_REQUEST_TIMEOUT_SECONDS = int(os.environ.get("MINIMAX_REQUEST_TIMEOUT_SECONDS", "240"))
+MINIMAX_CONTEXT_SUMMARY_MAX_CHARS = int(os.environ.get("MINIMAX_CONTEXT_SUMMARY_MAX_CHARS", "200000"))
+MINIMAX_FORCE_CHUNKED = str(os.environ.get("MINIMAX_FORCE_CHUNKED", "true")).strip().lower() in {"1", "true", "yes", "on"}
+MINIMAX_USE_REMOTE_SUMMARY = str(os.environ.get("MINIMAX_USE_REMOTE_SUMMARY", "true")).strip().lower() in {"1", "true", "yes", "on"}
+MINIMAX_THINKING_TYPE = str(os.environ.get("MINIMAX_THINKING_TYPE", "disabled")).strip().lower() or "disabled"
 OLLAMA_RETRIES = int(os.environ.get("OLLAMA_RETRIES", "2"))
 OLLAMA_RETRY_DELAY_SECONDS = int(os.environ.get("OLLAMA_RETRY_DELAY_SECONDS", "20"))
 OLLAMA_REQUEST_TIMEOUT_SECONDS = int(os.environ.get("OLLAMA_REQUEST_TIMEOUT_SECONDS", "1800"))
@@ -84,32 +93,49 @@ LANGUAGE_LABELS = {
 }
 
 GEMINI_PROMPT_TEMPLATE = """
-You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose the 3-{max_clips} MOST VIRAL moments for TikTok/IG Reels/YouTube Shorts. Each clip must be between {min_clip_duration} and {max_clip_duration} seconds long.
+You are a senior short-form video editor. Read the ENTIRE transcript and word-level timestamps to choose up to {max_clips} high-value long shorts for TikTok/IG Reels/YouTube Shorts. Each clip must be between {min_clip_duration} and {max_clip_duration} seconds long.
 
 ⚠️ FFMPEG TIME CONTRACT — STRICT REQUIREMENTS:
 - Return timestamps in ABSOLUTE SECONDS from the start of the video (usable in: ffmpeg -ss <start> -to <end> -i <input> ...).
 - Only NUMBERS with decimal point, up to 3 decimals (examples: 0, 1.250, 17.350).
 - Ensure 0 ≤ start < end ≤ VIDEO_DURATION_SECONDS.
 - Each clip between {min_clip_duration} and {max_clip_duration} seconds (inclusive).
-- {over_one_minute_rule_1}
-- {over_one_minute_rule_2}
-- {over_one_minute_rule_3}
+- HARD LENGTH RANGE: 60 to 180 seconds. Do not return clips under 60 seconds.
+- Prefer 90 to 150 seconds when that helps the story breathe.
+- The clip must cover a complete, coherent thought: setup, claim/conflict, explanation, and payoff or meaningful open loop.
+- Return fewer clips when only a few moments are truly strong. Quality beats count.
 - Prefer starting 0.2–0.4 s BEFORE the hook and ending 0.2–0.4 s AFTER the payoff.
 - Use silence moments for natural cuts; never cut in the middle of a word or phrase.
 - STRICTLY FORBIDDEN to use time formats other than absolute seconds.
+- Every clip must feel semantically meaningful as a standalone short: it must contain a clear claim, insight, story beat, confession, conflict, payoff, or an unresolved but understandable curiosity gap.
+- Reject clips that are mostly isolated keywords, sentence fragments, contextless filler, or references that only make sense if the viewer already knows the previous conversation.
+- The FIRST spoken words of the clip must already be the hook, claim, reveal, tension, or provocative statement. Never start with filler such as "ok", "okay", "genau", "also", "ja", "gut", "äh", "ähm", "so", or a half-finished lead-in.
+- Most clips should be at least {preferred_min_clip_duration} seconds long.
+- Clips between {min_clip_duration} and {preferred_min_clip_duration} seconds are acceptable only when they are dense, self-contained, and still deliver a complete high-value thought.
+- Clips shorter than {min_clip_duration} seconds are forbidden.
+- If the transcript only contains a few truly strong moments, return fewer clips. Do NOT force the requested count with weak filler clips.
 
 VIDEO_DURATION_SECONDS: {video_duration}
+
+EDITORIAL_CONTEXT:
+{editorial_context}
+
+GLOBAL_CONTEXT_SUMMARY:
+{global_context_summary}
 
 TRANSCRIPT_TEXT (raw):
 {transcript_text}
 
-WORDS_JSON (array of {{w, s, e}} where s/e are seconds):
+WORDS_JSON (array of {{w, s, e, spk?}} where s/e are seconds; spk is the
+speaker label for that word when diarization is available, e.g. SPEAKER_00,
+SPEAKER_01, HOST, GUEST, etc. Use spk to keep host vs. guest statements
+strictly separate when choosing start/end):
 {words_json}
 
 STRICT EXCLUSIONS:
 - No generic intros/outros or purely sponsorship segments unless they contain the hook.
 - No clips shorter than {min_clip_duration} seconds or longer than {max_clip_duration} seconds.
-- {over_one_minute_exclusion}
+- No short punchline-only excerpts. The clip must have enough context to be useful without the full video.
 - Return at most {max_clips} clips.
 - The transcript language is {output_language_name} (code: {output_language_code}).
 - ALL user-facing text fields MUST stay in {output_language_name}: `video_description_for_tiktok`, `video_description_for_instagram`, `video_title_for_youtube_short`, and `viral_hook_text`.
@@ -118,7 +144,15 @@ STRICT EXCLUSIONS:
 - STYLE: Use "Scroll-Stopper" copywriting. No boring summaries. Use the "Curiosity Gap" technique.
 - VIRAL_HOOK_TEXT: Max 5 words. Make it aggressive, controversial, or mysterious. Use "STOP doing X", "The secret to Y", or "POV: You just Z".
 - VIDEO_TITLE: Max 40 characters. High-impact keywords only. No full sentences.
-- VIDEO_DESCRIPTION: Start with a punchy first line that creates FOMO (Fear Of Missing Out).
+- VIDEO_DESCRIPTION: The FIRST sentence must instantly be interesting, provocative, surprising, or curiosity-driven. It must work as a scroll-stopper even if a viewer only reads that first sentence. Start with a punchy first line that creates FOMO (Fear Of Missing Out).
+
+SPEAKER ATTRIBUTION — MANDATORY:
+- The upload profile/channel owner in EDITORIAL_CONTEXT is editorial background only. NEVER assume that this person is the speaker or owner of a story.
+- In interviews, distinguish the questioner/host from every respondent/guest and from third parties mentioned in the conversation.
+- Attribute first-person experiences ("ich", "mein Bruder", "meine Familie") only to the speaker who actually says them. A host asking a question does not own the guest's biography.
+- When converting first-person speech into third-person copy, preserve the speaker's actual grammatical gender: e.g. a male guest saying "mein Bruder" becomes "sein Bruder", not "ihr Bruder". A female speaker becomes "ihr Bruder".
+- If speaker identity or gender is not supported by the labeled transcript, use neutral wording such as "Warum der Bruder ausgeschlossen wurde". Never guess based on the channel profile.
+- Do not merge the host's identity with a guest's experience. Do not assign one speaker's claim, family, exit, trauma, or belief to another speaker.
 
 OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by predicted performance (best to worst). In the descriptions, ALWAYS include a CTA like "Follow me and comment X and I'll send you the workflow" (especially if discussing an n8n workflow):
 {{
@@ -129,7 +163,9 @@ OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by pre
       "video_description_for_tiktok": "<description for TikTok oriented to get views>",
       "video_description_for_instagram": "<description for Instagram oriented to get views>",
       "video_title_for_youtube_short": "<title for YouTube Short oriented to get views 100 chars max>",
-      "viral_hook_text": "<SHORT punchy text overlay (max 10 words). MUST BE IN THE SAME LANGUAGE AS THE VIDEO TRANSCRIPT. Examples: 'POV: You realized...', 'Did you know?', 'Stop doing this!'>"
+      "viral_hook_text": "<SHORT punchy text overlay (max 10 words). MUST BE IN THE SAME LANGUAGE AS THE VIDEO TRANSCRIPT. Examples: 'POV: You realized...', 'Did you know?', 'Stop doing this!'>",
+      "subject_speaker": "<speaker label from transcript, or unknown>",
+      "speaker_attribution_confidence": <number from 0 to 1>
     }}
   ]
 }}
@@ -143,12 +179,20 @@ Task:
 - Return up to {max_clips} clips.
 - Use ABSOLUTE seconds from the full video.
 - Every clip must be between {min_clip_duration} and {max_clip_duration} seconds.
-- {over_one_minute_rule_1}
-- {over_one_minute_rule_2}
-- {over_one_minute_rule_3}
+- HARD LENGTH RANGE: 60 to 180 seconds. Do not return clips under 60 seconds.
+- Prefer 90 to 150 seconds when that helps the story breathe.
+- The clip must cover a complete, coherent thought: setup, claim/conflict, explanation, and payoff or meaningful open loop.
+- Return fewer clips when only a few moments are truly strong. Quality beats count.
 - Prefer conflict, surprise, confession, tension, controversy, emotional payoff, concrete insights, and moments that stop the scroll.
 - Avoid filler, greetings, outros, sponsor sections, and context that has no payoff.
 - Prefer starting slightly before the hook and ending slightly after the payoff.
+- Every clip must make sense as a standalone short: clear thought, conflict, insight, story beat, or understandable teaser with enough context.
+- Reject clips that are just fragments, disconnected buzzwords, filler, or incomplete context without payoff.
+- The FIRST spoken words of the clip must already be the hook, claim, reveal, tension, or provocative statement. Never start with filler such as "ok", "okay", "genau", "also", "ja", "gut", "äh", "ähm", "so", or a half-finished lead-in.
+- Most clips should be at least {preferred_min_clip_duration} seconds long.
+- Clips between {min_clip_duration} and {preferred_min_clip_duration} seconds are acceptable only when they are dense, self-contained, and still deliver a complete high-value thought.
+- Clips shorter than {min_clip_duration} seconds are forbidden.
+- If the transcript only contains a few truly strong moments, return fewer clips. Do NOT force the requested count with weak filler clips.
 - The transcript language is {output_language_name} (code: {output_language_code}).
 - ALL user-facing text fields MUST be written in {output_language_name}: `video_description_for_tiktok`, `video_description_for_instagram`, `video_title_for_youtube_short`, and `viral_hook_text`.
 - NEVER translate the transcript into English unless the transcript itself is English.
@@ -157,12 +201,28 @@ Task:
 - STYLE: Use "Scroll-Stopper" copywriting. No boring summaries. Use the "Curiosity Gap" technique.
 - VIRAL_HOOK_TEXT: Max 5 words. Make it aggressive, controversial, or mysterious. Use "STOP doing X", "The secret to Y", or "POV: You just Z".
 - VIDEO_TITLE: Max 40 characters. High-impact keywords only. No full sentences.
-- VIDEO_DESCRIPTION: Start with a punchy first line that creates FOMO (Fear Of Missing Out).
+- VIDEO_DESCRIPTION: The FIRST sentence must instantly be interesting, provocative, surprising, or curiosity-driven. It must work as a scroll-stopper even if a viewer only reads that first sentence. Start with a punchy first line that creates FOMO (Fear Of Missing Out).
+
+SPEAKER ATTRIBUTION — MANDATORY:
+- The upload profile/channel owner in EDITORIAL_CONTEXT is editorial background only. NEVER assume that this person is the speaker or owner of a story.
+- Use the SPEAKER labels in TRANSCRIPT_SEGMENTS to separate host/questioner, guest/respondent, and mentioned third parties.
+- Attribute first-person experiences only to the labeled speaker who says them. Questions from the host do not make the guest's biography the host's biography.
+- Preserve grammatical gender when rewriting first-person statements: a male speaker saying "mein Bruder" becomes "sein Bruder"; a female speaker becomes "ihr Bruder".
+- If identity or gender is uncertain, avoid names and gendered possessives. Prefer neutral wording such as "Warum der Bruder ausgeschlossen wurde".
+- Never combine the host's identity with the guest's family, exit, trauma, beliefs, or personal history.
 
 VIDEO_DURATION_SECONDS: {video_duration}
 CHUNK_RANGE_SECONDS: {chunk_start} - {chunk_end}
 
-TRANSCRIPT_SEGMENTS:
+EDITORIAL_CONTEXT:
+{editorial_context}
+
+GLOBAL_CONTEXT_SUMMARY:
+{global_context_summary}
+
+TRANSCRIPT_SEGMENTS (each line: [start-end SPEAKER] text; lines starting with
+WORDS: contain per-word timings as token|start|end|speaker so the model can
+pick exact word-aligned clip boundaries AND keep host vs. guest separate):
 {segment_lines}
 
 OUTPUT JSON SCHEMA:
@@ -174,10 +234,34 @@ OUTPUT JSON SCHEMA:
       "video_description_for_tiktok": "<short tiktok caption>",
       "video_description_for_instagram": "<short instagram caption>",
       "video_title_for_youtube_short": "<youtube short title, max 100 chars>",
-      "viral_hook_text": "<very short hook overlay in the same language as the transcript, max 10 words>"
+      "viral_hook_text": "<very short hook overlay in the same language as the transcript, max 10 words>",
+      "subject_speaker": "<speaker label from transcript, or unknown>",
+      "speaker_attribution_confidence": <number from 0 to 1>
     }}
   ]
 }}
+"""
+
+TRANSCRIPT_CONTEXT_SUMMARY_PROMPT_TEMPLATE = """
+You are preparing context for short-form clip selection.
+
+Summarize the FULL transcript in {output_language_name} as plain text for another editor model.
+
+EDITORIAL_CONTEXT (channel positioning and job-specific instructions; obey it when framing the summary):
+{editorial_context}
+
+Requirements:
+- 4 to 7 short bullet points
+- Capture the central topic, the main tensions/conflicts, the strongest claims, the important reveals, and the overall narrative arc
+- Mention what would count as real standalone value for a short from this video
+- Mention any especially controversial or emotionally charged subtopics if present
+- Keep host, guests, and mentioned third parties separate. State whose experience, family, belief, or biography each point belongs to.
+- The channel owner from EDITORIAL_CONTEXT is not automatically the speaker or subject.
+- No markdown code fences
+- No JSON
+
+TRANSCRIPT_TEXT:
+{transcript_text}
 """
 
 HOOK_GENERATION_PROMPT_TEMPLATE = """
@@ -190,6 +274,12 @@ Task:
 - Make it reisserisch: curiosity gap, tension, surprise, conflict, payoff.
 - No hashtags. No quotes. No emojis. No generic filler like "wait for the ending".
 - Return ONLY valid JSON. No markdown. No commentary.
+
+EDITORIAL_CONTEXT:
+{editorial_context}
+
+FULL_TRANSCRIPT_CONTEXT_SUMMARY:
+{global_context_summary}
 
 CLIPS_JSON:
 {clips_json}
@@ -205,8 +295,85 @@ OUTPUT JSON:
 }}
 """
 
+INTERVIEW_ATTRIBUTION_REVIEW_PROMPT_TEMPLATE = """
+You are the final factual copy editor for interview-based short-form clips.
+
+Review every candidate against its SPEAKER-LABELED transcript excerpt. Rewrite title, hook, and both descriptions when attribution is wrong or ambiguous. Do not change clip_index, start, or end.
+
+STRICT RULES:
+- EDITORIAL_CONTEXT describes the channel and its owner. It does NOT identify the speaker or subject of a clip.
+- Keep host/questioner, guest/respondent, and mentioned third parties separate.
+- A question from the host does not make the guest's experience the host's biography.
+- Attribute "ich", "mein Bruder", "meine Familie", personal exits, trauma, beliefs, and experiences only to the speaker who says them.
+- Preserve grammatical gender when converting first-person speech to third person. Example: a male guest saying "mein Bruder" must become "sein Bruder", never "ihr Bruder".
+- If the labeled excerpt does not establish gender or identity, use neutral copy such as "Warum der Bruder ausgeschlossen wurde". Never guess from the channel profile.
+- Do not invent names, relationships, events, motives, or quotes.
+- Keep all copy in {output_language_name}.
+- Titles: max 60 characters. Hooks: max 8 words. Descriptions: engaging but factually faithful.
+- Return ONLY valid JSON.
+
+EDITORIAL_CONTEXT:
+{editorial_context}
+
+FULL_TRANSCRIPT_CONTEXT_SUMMARY:
+{global_context_summary}
+
+CANDIDATES_JSON:
+{candidates_json}
+
+OUTPUT JSON:
+{{
+  "clips": [
+    {{
+      "clip_index": <integer>,
+      "video_title_for_youtube_short": "<fact-checked title>",
+      "viral_hook_text": "<fact-checked hook>",
+      "video_description_for_tiktok": "<fact-checked description>",
+      "video_description_for_instagram": "<fact-checked description>",
+      "subject_speaker": "<speaker label or unknown>",
+      "speaker_attribution_confidence": <number from 0 to 1>
+    }}
+  ]
+}}
+"""
+
 # Load the YOLO model once (Keep for backup or scene analysis if needed)
 model = YOLO(YOLO_MODEL_PATH)
+
+
+def _load_shortform_editorial_context():
+    context = {}
+    context_path = str(os.environ.get("SHORTFORM_ANALYSIS_CONTEXT_FILE") or "").strip()
+    if context_path:
+        try:
+            with open(context_path, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                context.update(loaded)
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            print(f"⚠️ Could not read short-form analysis context: {exc}")
+
+    context.setdefault("profile_name", os.environ.get("SHORTFORM_UPLOAD_PROFILE", ""))
+    context.setdefault("profile_context", os.environ.get("SHORTFORM_PROFILE_CONTEXT", ""))
+    context.setdefault("job_instructions", os.environ.get("SHORTFORM_JOB_INSTRUCTIONS", ""))
+    return context
+
+
+def _format_shortform_editorial_context():
+    context = _load_shortform_editorial_context()
+    profile_name = re.sub(r"\s+", " ", str(context.get("profile_name") or "")).strip()
+    profile_context = re.sub(r"\s+", " ", str(context.get("profile_context") or "")).strip()
+    job_instructions = re.sub(r"\s+", " ", str(context.get("job_instructions") or "")).strip()
+    lines = []
+    if profile_name:
+        lines.append(f"Upload profile/channel: {profile_name}")
+    if profile_context:
+        lines.append(f"Channel positioning, audience and goals: {profile_context}")
+    if job_instructions:
+        lines.append(f"Mandatory instructions for this job: {job_instructions}")
+    return "\n".join(lines) or "No additional channel or job instructions provided."
 
 
 def build_viral_prompt(
@@ -219,7 +386,9 @@ def build_viral_prompt(
     min_clip_duration=MIN_CLIP_DURATION,
     max_clip_duration=MAX_CLIP_DURATION,
     min_over_one_minute_clip_duration=MIN_OVER_ONE_MINUTE_CLIP_DURATION,
+    minimum_long_clips=0,
     chunk_hint="",
+    global_context_summary="",
 ):
     def _fmt_number(value):
         try:
@@ -228,15 +397,8 @@ def build_viral_prompt(
             return value
         return int(numeric) if numeric.is_integer() else numeric
 
-    over_one_minute_enabled = max_clip_duration > MAX_CLIP_DURATION and min_over_one_minute_clip_duration is not None
     min_clip_duration_fmt = _fmt_number(min_clip_duration)
     max_clip_duration_fmt = _fmt_number(max_clip_duration)
-    min_over_one_minute_fmt = _fmt_number(min_over_one_minute_clip_duration)
-    over_one_minute_exclusion = (
-        f"No clips between 60.001 and {min_over_one_minute_clip_duration - 0.001:.3f} seconds."
-        if over_one_minute_enabled
-        else "No clips over 60 seconds."
-    )
 
     return GEMINI_PROMPT_TEMPLATE.format(
         video_duration=video_duration,
@@ -246,21 +408,11 @@ def build_viral_prompt(
         output_language_name=output_language_name,
         max_clips=max_clips,
         min_clip_duration=min_clip_duration_fmt,
-        min_over_one_minute_clip_duration=min_over_one_minute_fmt,
+        preferred_min_clip_duration=_fmt_number(PREFERRED_MIN_CLIP_DURATION),
         max_clip_duration=max_clip_duration_fmt,
-        over_one_minute_rule_1="Clips up to 60 seconds are always allowed." if over_one_minute_enabled else "Prefer staying near the strongest payoff and avoid unnecessary padding.",
-        over_one_minute_rule_2=(
-            "Only create a clip longer than 60 seconds when the moment clearly needs more room."
-            if over_one_minute_enabled
-            else "Do not exceed 60 seconds."
-        ),
-        over_one_minute_rule_3=(
-            f"If a clip is longer than 60 seconds, it MUST be at least {min_over_one_minute_fmt} seconds and at most {max_clip_duration_fmt} seconds."
-            if over_one_minute_enabled
-            else "Shorter clips are fine if the moment is strongest that way."
-        ),
-        over_one_minute_exclusion=over_one_minute_exclusion,
         chunk_hint=chunk_hint,
+        editorial_context=_format_shortform_editorial_context(),
+        global_context_summary=(global_context_summary or "No extra summary available."),
     )
 
 
@@ -291,6 +443,392 @@ def _extract_json_payload(text):
         except json.JSONDecodeError:
             return None
     return None
+
+
+def _extract_chat_message_text(payload):
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, dict):
+        return _extract_chat_message_text(payload.get("content"))
+    if isinstance(payload, list):
+        parts = []
+        for item in payload:
+            if isinstance(item, str):
+                stripped = item.strip()
+                if stripped:
+                    parts.append(stripped)
+                continue
+            if isinstance(item, dict):
+                candidate_text = item.get("text")
+                if candidate_text is None:
+                    candidate_text = item.get("content")
+                if candidate_text is None and isinstance(item.get("output_text"), str):
+                    candidate_text = item.get("output_text")
+                extracted = _extract_chat_message_text(candidate_text)
+                if extracted.strip():
+                    parts.append(extracted.strip())
+        return "\n".join(parts).strip()
+    return ""
+
+
+def _minimax_chat_endpoint(base_url):
+    normalized = str(base_url or "https://api.minimax.io/v1").rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        return normalized
+    if normalized.endswith("/text/chatcompletion_v2"):
+        return normalized[: -len("/text/chatcompletion_v2")] + "/chat/completions"
+    return f"{normalized}/chat/completions"
+
+
+def _minimax_response_diagnostics(body):
+    diagnostics = {
+        "status_msg": "",
+        "status_code": None,
+        "finish_reason": "",
+        "choices_count": 0,
+        "input_sensitive": None,
+        "input_sensitive_type": None,
+        "output_sensitive": None,
+        "output_sensitive_type": None,
+        "prompt_tokens": None,
+        "completion_tokens": None,
+        "total_tokens": None,
+        "response_keys": [],
+        "message_keys": [],
+    }
+    if not isinstance(body, dict):
+        return diagnostics
+
+    diagnostics["response_keys"] = sorted(str(key) for key in body.keys())
+    base_resp = body.get("base_resp")
+    if isinstance(base_resp, dict):
+        diagnostics["status_msg"] = str(base_resp.get("status_msg") or base_resp.get("statusMessage") or "").strip()
+        diagnostics["status_code"] = base_resp.get("status_code")
+    for key in ("input_sensitive", "input_sensitive_type", "output_sensitive", "output_sensitive_type"):
+        if key in body:
+            diagnostics[key] = body.get(key)
+    usage = body.get("usage")
+    if isinstance(usage, dict):
+        diagnostics["prompt_tokens"] = usage.get("prompt_tokens")
+        diagnostics["completion_tokens"] = usage.get("completion_tokens")
+        diagnostics["total_tokens"] = usage.get("total_tokens")
+    choices = body.get("choices")
+    if isinstance(choices, list):
+        diagnostics["choices_count"] = len(choices)
+        if choices and isinstance(choices[0], dict):
+            diagnostics["finish_reason"] = str(choices[0].get("finish_reason") or "").strip()
+            message = choices[0].get("message")
+            if isinstance(message, dict):
+                diagnostics["message_keys"] = sorted(str(key) for key in message.keys())
+    return diagnostics
+
+
+def _format_minimax_diagnostics(diagnostics):
+    parts = []
+    for key in (
+        "status_code",
+        "status_msg",
+        "finish_reason",
+        "choices_count",
+        "input_sensitive",
+        "input_sensitive_type",
+        "output_sensitive",
+        "output_sensitive_type",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+    ):
+        value = diagnostics.get(key)
+        if value not in (None, ""):
+            parts.append(f"{key}={value}")
+    if diagnostics.get("message_keys"):
+        parts.append(f"message_keys={','.join(diagnostics['message_keys'])}")
+    if diagnostics.get("response_keys"):
+        parts.append(f"response_keys={','.join(diagnostics['response_keys'])}")
+    return "; ".join(parts) or "keine Diagnosefelder"
+
+
+def _is_minimax_sensitive_empty_response(diagnostics):
+    if diagnostics.get("input_sensitive") is True or diagnostics.get("output_sensitive") is True:
+        return True
+    status_msg = str(diagnostics.get("status_msg") or "").lower()
+    return "sensitive" in status_msg or "violation" in status_msg or "content" in status_msg and "empty" in status_msg
+
+
+def _extract_minimax_response_text(body):
+    status_msg = ""
+    raw_text = ""
+    diagnostics = _minimax_response_diagnostics(body)
+    if isinstance(body, dict):
+        base_resp = body.get("base_resp")
+        if isinstance(base_resp, dict):
+            status_msg = str(base_resp.get("status_msg") or base_resp.get("statusMessage") or "").strip()
+        choices = body.get("choices")
+        if isinstance(choices, list) and choices:
+            first_choice = choices[0] if isinstance(choices[0], dict) else {}
+            raw_text = (
+                _extract_chat_message_text((first_choice or {}).get("message"))
+                or _extract_chat_message_text((first_choice or {}).get("delta"))
+                or _extract_chat_message_text((first_choice or {}).get("text"))
+            )
+        if not raw_text:
+            raw_text = (
+                _extract_chat_message_text(body.get("reply"))
+                or _extract_chat_message_text(body.get("content"))
+                or _extract_chat_message_text(body.get("output_text"))
+                or _extract_chat_message_text(body.get("text"))
+                or _extract_chat_message_text(body.get("message"))
+            )
+    return raw_text.strip(), status_msg, diagnostics
+
+
+def _post_json(url, payload, headers, timeout_seconds=120):
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            return json.loads(response.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            body = ""
+        detail = body[:2000] if body else str(exc.reason or "")
+        raise RuntimeError(f"HTTP {exc.code} {exc.reason}: {detail}") from exc
+
+
+def _call_openai_json(prompt, model_name):
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ClipSelectionConfigurationError("OPENAI_API_KEY fehlt.")
+
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": "You are a senior short-form editor. Reply only with valid JSON."},
+            {"role": "user", "content": prompt},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.2,
+        "max_tokens": 4000,
+    }
+    body = _post_json(
+        "https://api.openai.com/v1/chat/completions",
+        payload,
+        {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        timeout_seconds=180,
+    )
+    choices = body.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError("OpenAI lieferte keine choices.")
+    raw_text = _extract_chat_message_text((choices[0] or {}).get("message"))
+    return _extract_json_payload(raw_text)
+
+
+def _call_claude_json(prompt, model_name):
+    api_key = os.getenv("CLAUDE_API_KEY")
+    if not api_key:
+        raise ClipSelectionConfigurationError("CLAUDE_API_KEY fehlt.")
+
+    payload = {
+        "model": model_name,
+        "max_tokens": 4000,
+        "temperature": 0.2,
+        "system": "You are a senior short-form editor. Reply only with valid JSON.",
+        "messages": [
+            {"role": "user", "content": prompt},
+        ],
+    }
+    body = _post_json(
+        "https://api.anthropic.com/v1/messages",
+        payload,
+        {
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        timeout_seconds=180,
+    )
+    raw_text = _extract_chat_message_text(body.get("content"))
+    return _extract_json_payload(raw_text)
+
+
+def _default_minimax_model():
+    auth_mode = str(os.getenv("MINIMAX_AUTH_MODE") or "token_plan").strip().lower()
+    if auth_mode in {"token_plan", "payg"}:
+        return "MiniMax-M3"
+    return "MiniMax-M3"
+
+
+def _candidate_minimax_models(requested_model):
+    auth_mode = str(os.getenv("MINIMAX_AUTH_MODE") or "token_plan").strip().lower()
+    alias_map = {
+        "minimax-text-01": "MiniMax-M3",
+        "minimax-m1": "MiniMax-M3",
+        "minimax-m2.7": "MiniMax-M2.7",
+        "minimax-m3": "MiniMax-M3",
+    }
+    normalized_requested = str(requested_model or "").strip()
+    if normalized_requested:
+        normalized_requested = alias_map.get(normalized_requested.lower(), normalized_requested)
+    if not normalized_requested:
+        normalized_requested = _default_minimax_model()
+
+    candidates = [normalized_requested]
+    if auth_mode == "token_plan":
+        candidates.extend([
+            "MiniMax-M3",
+            "MiniMax-M2.7",
+            "MiniMax-M2.7-highspeed",
+            "MiniMax-M2.5-highspeed",
+            "MiniMax-M2.5",
+            "MiniMax-M2.1-highspeed",
+            "MiniMax-M2.1",
+            "MiniMax-M2",
+        ])
+    else:
+        candidates.extend([
+            "MiniMax-M3",
+            "MiniMax-M2.7",
+            "MiniMax-M2.7-highspeed",
+            "MiniMax-M2.5",
+            "MiniMax-M2.5-highspeed",
+            "MiniMax-M2.1",
+            "MiniMax-M2.1-highspeed",
+            "MiniMax-M2",
+        ])
+
+    deduped = []
+    for candidate in candidates:
+        if candidate and candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
+
+
+def _call_minimax_json(prompt, model_name):
+    api_key = os.getenv("MINIMAX_API_KEY")
+    if not api_key:
+        raise ClipSelectionConfigurationError("MINIMAX_API_KEY fehlt.")
+
+    base_url = str(os.getenv("MINIMAX_BASE_URL") or "https://api.minimax.io/v1").rstrip("/")
+    last_detail = ""
+    for candidate_model in _candidate_minimax_models(model_name):
+        is_m3 = str(candidate_model).strip().lower() == "minimax-m3"
+        default_max_tokens = 8000 if is_m3 else 6000
+        try:
+            max_tokens = int(os.getenv("MINIMAX_JSON_MAX_TOKENS", str(default_max_tokens)))
+        except (TypeError, ValueError):
+            max_tokens = default_max_tokens
+        completion_tokens = max(1000, max_tokens)
+        payload = {
+            "model": candidate_model,
+            "messages": [
+                {"role": "system", "content": "You are a senior short-form editor. Reply only with valid JSON. Do not include markdown."},
+                {"role": "user", "content": prompt},
+            ],
+            "max_completion_tokens": completion_tokens,
+            "temperature": 0.2,
+            "stream": False,
+        }
+        if is_m3:
+            payload["thinking"] = {"type": MINIMAX_THINKING_TYPE if MINIMAX_THINKING_TYPE in {"disabled", "adaptive"} else "disabled"}
+            payload["reasoning_split"] = True
+        request_started_at = time.time()
+        print(
+            f"🌐 MiniMax request started: model={candidate_model}, "
+            f"timeout={MINIMAX_REQUEST_TIMEOUT_SECONDS}s, max_completion_tokens={payload['max_completion_tokens']}, "
+            f"prompt_chars={len(prompt)}"
+        )
+        body = _post_json(
+            _minimax_chat_endpoint(base_url),
+            payload,
+            {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            timeout_seconds=MINIMAX_REQUEST_TIMEOUT_SECONDS,
+        )
+        print(f"✅ MiniMax response received from {candidate_model} after {time.time() - request_started_at:.1f}s")
+        raw_text, status_msg, diagnostics = _extract_minimax_response_text(body)
+        print(f"🔎 MiniMax response diagnostics: {_format_minimax_diagnostics(diagnostics)}")
+        if raw_text:
+            parsed = _extract_json_payload(raw_text)
+            if parsed is not None:
+                return parsed
+            last_detail = f"MiniMax lieferte kein gueltiges JSON. {_format_minimax_diagnostics(diagnostics)}"
+            break
+
+        last_detail = status_msg or f"MiniMax lieferte keinen nutzbaren Antworttext. {_format_minimax_diagnostics(diagnostics)}"
+        if _is_minimax_sensitive_empty_response(diagnostics):
+            break
+        if "not support model" in last_detail.lower():
+            continue
+        break
+
+    raise RuntimeError(f"MiniMax-Antwort unbrauchbar: {last_detail}")
+
+
+def _call_minimax_text(prompt, model_name):
+    api_key = os.getenv("MINIMAX_API_KEY")
+    if not api_key:
+        raise ClipSelectionConfigurationError("MINIMAX_API_KEY fehlt.")
+
+    base_url = str(os.getenv("MINIMAX_BASE_URL") or "https://api.minimax.io/v1").rstrip("/")
+    last_detail = ""
+    for candidate_model in _candidate_minimax_models(model_name):
+        is_m3 = str(candidate_model).strip().lower() == "minimax-m3"
+        payload = {
+            "model": candidate_model,
+            "messages": [
+                {"role": "system", "content": "You are a senior transcript analyst. Reply with plain text only."},
+                {"role": "user", "content": prompt},
+            ],
+            "max_completion_tokens": 2500,
+            "temperature": 0.2,
+            "stream": False,
+        }
+        if is_m3:
+            payload["thinking"] = {"type": MINIMAX_THINKING_TYPE if MINIMAX_THINKING_TYPE in {"disabled", "adaptive"} else "disabled"}
+            payload["reasoning_split"] = True
+        body = _post_json(
+            _minimax_chat_endpoint(base_url),
+            payload,
+            {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            timeout_seconds=MINIMAX_REQUEST_TIMEOUT_SECONDS,
+        )
+        raw_text, status_msg, diagnostics = _extract_minimax_response_text(body)
+        if raw_text:
+            return raw_text.strip()
+
+        last_detail = status_msg or f"MiniMax lieferte keinen nutzbaren Antworttext. {_format_minimax_diagnostics(diagnostics)}"
+        if _is_minimax_sensitive_empty_response(diagnostics):
+            break
+        if "not support model" in last_detail.lower():
+            continue
+        break
+
+    raise RuntimeError(f"MiniMax-Textantwort unbrauchbar: {last_detail}")
+
+
+def _call_shortform_provider_json(provider_name, prompt, *, model_name=None):
+    normalized_provider = (provider_name or "gemini").strip().lower()
+    if normalized_provider == "openai":
+        return _call_openai_json(prompt, model_name or os.getenv("OPENAI_MODEL", "gpt-4.1-mini"))
+    if normalized_provider == "claude":
+        return _call_claude_json(prompt, model_name or os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-latest"))
+    if normalized_provider == "minimax":
+        return _call_minimax_json(prompt, model_name or os.getenv("MINIMAX_MODEL", _default_minimax_model()))
+    raise ClipSelectionConfigurationError(f"Unsupported provider '{normalized_provider}'")
 
 
 def _coerce_float(value):
@@ -377,7 +915,7 @@ def _collect_transcript_excerpt_for_range(transcript_result, clip_start, clip_en
     if not isinstance(transcript_result, dict):
         return ""
 
-    segments = transcript_result.get("segments")
+    segments = transcript_result.get("speaker_segments") or transcript_result.get("segments")
     if not isinstance(segments, list):
         return ""
 
@@ -398,8 +936,10 @@ def _collect_transcript_excerpt_for_range(transcript_result, clip_start, clip_en
         text = re.sub(r"\s+", " ", str(segment.get("text") or "")).strip()
         if not text:
             continue
-        parts.append(text)
-        total_chars += len(text) + 1
+        speaker = re.sub(r"\s+", " ", str(segment.get("speaker") or "")).strip()
+        part = f"[{speaker}] {text}" if speaker else text
+        parts.append(part)
+        total_chars += len(part) + 1
         if total_chars >= max_chars:
             break
 
@@ -407,6 +947,81 @@ def _collect_transcript_excerpt_for_range(transcript_result, clip_start, clip_en
     if len(excerpt) > max_chars:
         excerpt = excerpt[: max_chars - 3].rstrip() + "..."
     return excerpt
+
+
+def _build_heuristic_transcript_context_summary(transcript_result, output_language_name="English"):
+    if not isinstance(transcript_result, dict):
+        return f"- No transcript summary available.\n- Language: {output_language_name}"
+
+    text = re.sub(r"\s+", " ", str(transcript_result.get("text") or "")).strip()
+    segments = transcript_result.get("segments") or []
+    if not text:
+        return f"- No transcript summary available.\n- Language: {output_language_name}"
+
+    bullet_sources = []
+    if isinstance(segments, list) and segments:
+        sample_indices = sorted({0, max(0, len(segments) // 3), max(0, (2 * len(segments)) // 3), len(segments) - 1})
+        for idx in sample_indices:
+            segment = segments[idx] if 0 <= idx < len(segments) else None
+            if not isinstance(segment, dict):
+                continue
+            snippet = re.sub(r"\s+", " ", str(segment.get("text") or "")).strip()
+            if snippet:
+                bullet_sources.append(snippet)
+
+    if not bullet_sources:
+        bullet_sources.append(text[:800])
+
+    bullets = []
+    for snippet in bullet_sources:
+        cleaned = snippet[:220].rstrip(" ,.;:-")
+        if cleaned and cleaned not in bullets:
+            bullets.append(f"- {cleaned}")
+        if len(bullets) >= 5:
+            break
+    if not bullets:
+        bullets = [f"- {text[:220].rstrip(' ,.;:-')}"]
+    return "\n".join(bullets)
+
+
+def _build_transcript_context_summary(transcript_result, *, provider_name, model_name, output_language_code="en", output_language_name="English"):
+    speaker_segments = (transcript_result or {}).get("speaker_segments") or []
+    if speaker_segments:
+        text = "\n".join(
+            f"[{segment.get('speaker') or 'UNKNOWN'} {float(segment.get('start') or 0.0):.2f}-{float(segment.get('end') or 0.0):.2f}] "
+            f"{' '.join(str(segment.get('text') or '').split())}"
+            for segment in speaker_segments
+            if str(segment.get("text") or "").strip()
+        )
+    else:
+        text = re.sub(r"\s+", " ", str((transcript_result or {}).get("text") or "")).strip()
+    if not text:
+        return _build_heuristic_transcript_context_summary(transcript_result, output_language_name=output_language_name)
+
+    normalized_provider = (provider_name or "").strip().lower()
+    if normalized_provider == "minimax" and not MINIMAX_USE_REMOTE_SUMMARY:
+        return _build_heuristic_transcript_context_summary(transcript_result, output_language_name=output_language_name)
+
+    summary_max_chars = 28000
+    if normalized_provider == "minimax" and _is_minimax_m3(model_name):
+        summary_max_chars = max(summary_max_chars, MINIMAX_CONTEXT_SUMMARY_MAX_CHARS)
+
+    prompt = TRANSCRIPT_CONTEXT_SUMMARY_PROMPT_TEMPLATE.format(
+        output_language_code=output_language_code,
+        output_language_name=output_language_name,
+        transcript_text=text[:summary_max_chars],
+        editorial_context=_format_shortform_editorial_context(),
+    )
+    if normalized_provider == "minimax":
+        try:
+            summary = _call_minimax_text(prompt, model_name)
+            summary = re.sub(r"\s+\n", "\n", str(summary or "")).strip()
+            if summary:
+                return summary
+        except Exception as exc:
+            print(f"⚠️  MiniMax transcript summary failed, using heuristic context summary: {exc}")
+
+    return _build_heuristic_transcript_context_summary(transcript_result, output_language_name=output_language_name)
 
 
 def _build_hook_generation_contexts(clips, transcript_result):
@@ -445,11 +1060,18 @@ def _build_hook_generation_contexts(clips, transcript_result):
     return contexts
 
 
-def _build_hook_generation_prompt(clip_contexts, output_language_code="en", output_language_name="English"):
+def _build_hook_generation_prompt(
+    clip_contexts,
+    output_language_code="en",
+    output_language_name="English",
+    global_context_summary="",
+):
     return HOOK_GENERATION_PROMPT_TEMPLATE.format(
         output_language_code=output_language_code,
         output_language_name=output_language_name,
         clips_json=json.dumps(clip_contexts, ensure_ascii=False),
+        editorial_context=_format_shortform_editorial_context(),
+        global_context_summary=(global_context_summary or "No full-transcript summary available."),
     )
 
 
@@ -504,6 +1126,12 @@ def _ensure_generated_clip_hooks(
         return result_json
 
     batch_size = max(1, _env_int("HOOK_GENERATION_BATCH_SIZE", 20))
+    global_context_summary = str(result_json.get("analysis_context_summary") or "").strip()
+    if not global_context_summary:
+        global_context_summary = _build_heuristic_transcript_context_summary(
+            transcript_result,
+            output_language_name=output_language_name,
+        )
     print(f"🪝 Generating AI hook suggestions for {len(clip_contexts)} clips...")
 
     for batch_start in range(0, len(clip_contexts), batch_size):
@@ -512,6 +1140,7 @@ def _ensure_generated_clip_hooks(
             batch,
             output_language_code=output_language_code,
             output_language_name=output_language_name,
+            global_context_summary=global_context_summary,
         )
 
         try:
@@ -520,7 +1149,7 @@ def _ensure_generated_clip_hooks(
                     continue
                 _, response_text = _call_ollama_with_retries(prompt, ollama_base_url, ollama_model_name)
                 payload = _extract_json_payload(response_text)
-            else:
+            elif provider_name == "gemini":
                 if gemini_client is None or not gemini_model_name:
                     continue
                 response = gemini_client.models.generate_content(
@@ -528,6 +1157,15 @@ def _ensure_generated_clip_hooks(
                     contents=prompt,
                 )
                 payload = _extract_json_payload(response.text)
+            else:
+                provider_model = None
+                if provider_name == "openai":
+                    provider_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+                elif provider_name == "claude":
+                    provider_model = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-latest")
+                elif provider_name == "minimax":
+                    provider_model = os.getenv("MINIMAX_MODEL", _default_minimax_model())
+                payload = _call_shortform_provider_json(provider_name, prompt, model_name=provider_model)
 
             updated = _apply_generated_hook_payload(clips, payload)
             print(f"🪝 Hook suggestions updated for {updated}/{len(batch)} clips in batch.")
@@ -543,14 +1181,180 @@ def _clip_overlap_ratio(a_start, a_end, b_start, b_end):
     return overlap / min_len
 
 
+SEMANTIC_WEAK_EDGE_TOKENS = {
+    "und", "oder", "aber", "also", "dann", "halt", "eben", "eigentlich", "quasi", "so",
+    "weil", "dass", "wenn", "nur", "noch", "mal", "ja", "ne", "nee", "hm", "okay",
+    "the", "and", "or", "but", "so", "then", "like", "just", "well", "okay", "yeah",
+}
+
+OPENING_FILLER_TOKENS = {
+    "ok", "okay", "genau", "also", "ja", "gut", "äh", "aeh", "ähm", "aehm", "hm", "hmm",
+    "mhm", "so", "und", "aber", "nee", "ne", "nun", "well", "yeah",
+}
+
+
+def _extract_transcript_window_text(transcript_result, start, end):
+    segments = (transcript_result or {}).get("segments", [])
+    if not isinstance(segments, list):
+        return ""
+
+    parts = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        seg_start = _coerce_float(segment.get("start"))
+        seg_end = _coerce_float(segment.get("end"))
+        if seg_start is None or seg_end is None:
+            continue
+        if seg_end <= start or seg_start >= end:
+            continue
+        text = re.sub(r"\s+", " ", str(segment.get("text") or "")).strip()
+        if text:
+            parts.append(text)
+    return " ".join(parts).strip()
+
+
+def _extract_transcript_window_words(transcript_result, start, end):
+    segments = (transcript_result or {}).get("segments", [])
+    if not isinstance(segments, list):
+        return []
+
+    words = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        for word in segment.get("words", []) or []:
+            word_start = _coerce_float(word.get("start"))
+            word_end = _coerce_float(word.get("end"))
+            if word_start is None or word_end is None:
+                continue
+            if word_end <= start or word_start >= end:
+                continue
+            token = re.sub(r"\s+", " ", str(word.get("word") or "")).strip()
+            if token:
+                words.append(token)
+    return words
+
+
+def _normalize_alpha_tokens(tokens):
+    normalized = []
+    for token in tokens:
+        cleaned = re.sub(r"[^A-Za-zÄÖÜäöüß]+", "", str(token or "").lower()).strip()
+        if cleaned:
+            normalized.append(cleaned)
+    return normalized
+
+
+def _assess_clip_opening_quality(transcript_result, start, end):
+    alpha_tokens = _normalize_alpha_tokens(_extract_transcript_window_words(transcript_result, start, min(end, start + 6.0)))
+    if len(alpha_tokens) < 4:
+        return False, "too_few_opening_words"
+
+    if alpha_tokens[0] in OPENING_FILLER_TOKENS:
+        return False, f"starts_with_filler:{alpha_tokens[0]}"
+
+    lead_tokens = alpha_tokens[:5]
+    strong_lead_tokens = [token for token in lead_tokens if token not in OPENING_FILLER_TOKENS and len(token) > 2]
+    if len(strong_lead_tokens) < 2:
+        return False, "weak_opening_hook"
+    return True, "ok"
+
+
+def _collect_clip_quality_flags(transcript_result, start, end):
+    if not transcript_result:
+        return []
+
+    flags = []
+    opening_ok, opening_detail = _assess_clip_opening_quality(transcript_result, start, end)
+    if not opening_ok:
+        if opening_detail.startswith("starts_with_filler:"):
+            filler_token = opening_detail.split(":", 1)[1].strip() or "unknown"
+            flags.append({
+                "type": "starts_with_filler",
+                "detail": filler_token,
+                "label": f"Startet mit Fuellwort ({filler_token})",
+            })
+        elif opening_detail == "weak_opening_hook":
+            flags.append({
+                "type": "weak_opening_hook",
+                "detail": "",
+                "label": "Schwacher Einstieg",
+            })
+        elif opening_detail == "too_few_opening_words":
+            flags.append({
+                "type": "too_few_opening_words",
+                "detail": "",
+                "label": "Zu wenig klare Einstiegswoerter",
+            })
+    return flags
+
+
+def _qualifies_short_clip_exception(transcript_result, start, end):
+    duration = max(0.0, end - start)
+    if duration < SHORT_CLIP_EXCEPTION_MIN_DURATION:
+        return False
+
+    opening_ok, _ = _assess_clip_opening_quality(transcript_result, start, end)
+    if not opening_ok:
+        return False
+
+    window_text = _extract_transcript_window_text(transcript_result, start, end)
+    alpha_tokens = re.findall(r"[A-Za-zÄÖÜäöüß]+", window_text.lower())
+    content_tokens = [token for token in alpha_tokens if len(token) > 2 and token not in OPENING_FILLER_TOKENS]
+    longest_sentence = max(
+        (
+            len(re.findall(r"[A-Za-zÄÖÜäöüß]+", sentence))
+            for sentence in re.split(r"[.!?…]+", window_text)
+            if sentence.strip()
+        ),
+        default=0,
+    )
+
+    return len(content_tokens) >= 14 and longest_sentence >= 8
+
+
+def _assess_clip_semantic_quality(transcript_result, start, end):
+    window_text = _extract_transcript_window_text(transcript_result, start, end)
+    if not window_text:
+        return False, "empty_context"
+
+    alpha_tokens = re.findall(r"[A-Za-zÄÖÜäöüß]+", window_text.lower())
+    if len(alpha_tokens) < 8:
+        return False, "too_few_words"
+
+    content_tokens = [token for token in alpha_tokens if len(token) > 2]
+    if len(content_tokens) < 5:
+        return False, "too_little_content"
+
+    unique_ratio = len(set(content_tokens)) / max(1, len(content_tokens))
+    longest_sentence = max(
+        (
+            len(re.findall(r"[A-Za-zÄÖÜäöüß]+", sentence))
+            for sentence in re.split(r"[.!?…]+", window_text)
+            if sentence.strip()
+        ),
+        default=0,
+    )
+    weak_edge_hits = int(alpha_tokens[0] in SEMANTIC_WEAK_EDGE_TOKENS) + int(alpha_tokens[-1] in SEMANTIC_WEAK_EDGE_TOKENS)
+
+    if unique_ratio < 0.34 and longest_sentence < 7:
+        return False, "fragmentary_context"
+    if longest_sentence < 5 and weak_edge_hits >= 1:
+        return False, "incomplete_thought"
+
+    return True, window_text
+
+
 def sanitize_clip_candidates(
     raw_data,
     video_duration,
+    transcript_result=None,
     language_code="en",
     max_clips=MAX_GENERATED_CLIPS,
     min_clip_duration=MIN_CLIP_DURATION,
     max_clip_duration=MAX_CLIP_DURATION,
     min_over_one_minute_clip_duration=None,
+    preferred_min_clip_duration=PREFERRED_MIN_CLIP_DURATION,
 ):
     if not raw_data:
         return None
@@ -579,11 +1383,14 @@ def sanitize_clip_candidates(
             continue
 
         duration = end - start
+        short_exception = False
         if duration < min_clip_duration:
             midpoint = start + (duration / 2.0)
             start = max(0.0, midpoint - (min_clip_duration / 2.0))
             end = min(video_duration, start + min_clip_duration)
             start = max(0.0, end - min_clip_duration)
+            if (end - start) < min_clip_duration:
+                continue
         elif duration > max_clip_duration:
             end = min(video_duration, start + max_clip_duration)
             duration = end - start
@@ -606,7 +1413,8 @@ def sanitize_clip_candidates(
                 end = min(video_duration, start + MAX_CLIP_DURATION)
                 duration = end - start
 
-        if end - start < min_clip_duration * 0.8:
+        effective_duration = end - start
+        if effective_duration < min_clip_duration:
             continue
 
         duplicate = False
@@ -617,6 +1425,24 @@ def sanitize_clip_candidates(
         if duplicate:
             continue
 
+        if transcript_result:
+            quality_flags = _collect_clip_quality_flags(transcript_result, start, end)
+            semantic_ok, semantic_detail = _assess_clip_semantic_quality(transcript_result, start, end)
+            if not semantic_ok:
+                print(
+                    "⚠️  Rejecting clip candidate without enough standalone meaning: "
+                    f"{start:.2f}-{end:.2f}s ({semantic_detail})"
+                )
+                continue
+            if effective_duration < preferred_min_clip_duration and not short_exception:
+                content_token_count = len(re.findall(r"[A-Za-zÄÖÜäöüß]{3,}", semantic_detail))
+                if content_token_count < 18:
+                    print(
+                        "⚠️  Rejecting short low-context clip candidate: "
+                        f"{start:.2f}-{end:.2f}s (content_tokens={content_token_count})"
+                    )
+                    continue
+
         sanitized.append({
             "start": round(start, 3),
             "end": round(end, 3),
@@ -624,6 +1450,12 @@ def sanitize_clip_candidates(
             "video_description_for_instagram": clip.get("video_description_for_instagram") or clip.get("video_description_for_tiktok") or defaults["video_description_for_instagram"],
             "video_title_for_youtube_short": clip.get("video_title_for_youtube_short") or defaults["video_title_for_youtube_short"],
             "viral_hook_text": _sanitize_hook_candidate_text(clip.get("viral_hook_text")) or defaults["viral_hook_text"],
+            "subject_speaker": re.sub(r"\s+", " ", str(clip.get("subject_speaker") or "unknown")).strip()[:80],
+            "speaker_attribution_confidence": max(
+                0.0,
+                min(1.0, _coerce_float(clip.get("speaker_attribution_confidence")) or 0.0),
+            ),
+            "quality_flags": quality_flags if transcript_result else [],
             "status": "pending",
         })
 
@@ -639,8 +1471,346 @@ def sanitize_clip_candidates(
     return result
 
 
+def _count_long_clip_candidates(result_json):
+    if not isinstance(result_json, dict):
+        return 0
+    shorts = result_json.get("shorts")
+    if not isinstance(shorts, list):
+        return 0
+    total = 0
+    for clip in shorts:
+        if not isinstance(clip, dict):
+            continue
+        start = _coerce_float(clip.get("start"))
+        end = _coerce_float(clip.get("end"))
+        if start is None or end is None:
+            continue
+        if end - start > MAX_CLIP_DURATION:
+            total += 1
+    return total
+
+
+def _target_long_clip_count(max_clip_duration, max_clips):
+    if max_clip_duration <= MAX_CLIP_DURATION:
+        return 0
+    if max_clips >= 20:
+        return 20
+    return min(max_clips, max(4, math.ceil(max_clips * 0.4)))
+
+
+def _should_retry_for_long_clips(result_json, max_clip_duration, max_clips):
+    target = _target_long_clip_count(max_clip_duration, max_clips)
+    return target > 0 and _count_long_clip_candidates(result_json) < target
+
+
+def _build_long_clip_retry_prompt(prompt, current_long_count, target_long_count):
+    return (
+        f"{prompt}\n\n"
+        "RETRY REQUIREMENT:\n"
+        f"Your previous output only produced {current_long_count} clips longer than 60 seconds.\n"
+        f"Search again and add more strong >60s candidates until you reach around {target_long_count} long clips, if the transcript truly supports that many.\n"
+        "Focus on longer story beats, explanations, conflicts, reveals, debates, emotional arcs, or multi-part payoffs that justify 60s+ runtime.\n"
+        "Keep the quality bar high. Do not invent timestamps, and do not pad weak moments just to make them longer.\n"
+        "Return a fresh JSON list of strong clips, with special attention to additional long-form-worthy moments.\n"
+    )
+
+
+def _merge_long_clip_results(base_result, supplemental_result, max_clips):
+    if not isinstance(base_result, dict):
+        return supplemental_result
+    if not isinstance(supplemental_result, dict):
+        return base_result
+
+    base_clips = list(base_result.get("shorts") or [])
+    supplemental_clips = list(supplemental_result.get("shorts") or [])
+    if not supplemental_clips:
+        return base_result
+
+    merged = list(base_clips)
+    for candidate in supplemental_clips:
+        if not isinstance(candidate, dict):
+            continue
+        duration = float(candidate.get("end", 0) or 0) - float(candidate.get("start", 0) or 0)
+        if duration <= MAX_CLIP_DURATION:
+            continue
+        duplicate = False
+        for existing in merged:
+            if _clip_overlap_ratio(
+                float(candidate.get("start", 0) or 0),
+                float(candidate.get("end", 0) or 0),
+                float(existing.get("start", 0) or 0),
+                float(existing.get("end", 0) or 0),
+            ) > 0.85:
+                duplicate = True
+                break
+        if duplicate:
+            continue
+        merged.append(candidate)
+        if len(merged) >= max_clips:
+            break
+
+    next_result = dict(base_result)
+    next_result["shorts"] = merged[:max_clips]
+    return next_result
+
+
+def _should_use_chunked_chat_provider(provider_name, transcript_result, model_name=None):
+    provider_name = (provider_name or "").strip().lower()
+    text_length = len(str(transcript_result.get("text") or ""))
+    segment_count = len(transcript_result.get("segments") or [])
+    if provider_name == "minimax":
+        return MINIMAX_FORCE_CHUNKED or text_length > 6000 or segment_count > 20
+    return False
+
+
+def _is_minimax_m3(model_name) -> bool:
+    return str(model_name or "").strip().lower() == "minimax-m3"
+
+
+def _call_shortform_provider_json_with_retries(provider_name, prompt, *, model_name=None, max_attempts=2, retry_label="provider"):
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return _call_shortform_provider_json(provider_name, prompt, model_name=model_name)
+        except ClipSelectionConfigurationError:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= max_attempts:
+                break
+            wait_seconds = 1.25 * attempt
+            print(
+                f"⚠️  {provider_name.title()} {retry_label} attempt {attempt}/{max_attempts} failed: "
+                f"{exc}. Retrying in {wait_seconds:.2f}s..."
+            )
+            time.sleep(wait_seconds)
+    if last_exc:
+        raise last_exc
+    return None
+
+
+def _active_shortform_provider_model(provider_name):
+    provider_name = str(provider_name or "").strip().lower()
+    if provider_name == "minimax":
+        return os.getenv("MINIMAX_MODEL", "MiniMax-M3")
+    if provider_name == "openai":
+        return os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    if provider_name == "claude":
+        return os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-latest")
+    if provider_name == "gemini":
+        return os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    if provider_name == "ollama":
+        return os.getenv("OLLAMA_MODEL", "")
+    return None
+
+
+def review_interview_clip_attribution(result_json, transcript_result, output_language_code="de", output_language_name="German (Deutsch)"):
+    if not isinstance(result_json, dict) or not isinstance(result_json.get("shorts"), list):
+        return result_json
+
+    clips = result_json["shorts"]
+    if not clips:
+        return result_json
+
+    provider_name = str(os.getenv("LLM_PROVIDER") or "gemini").strip().lower()
+    model_name = _active_shortform_provider_model(provider_name)
+    global_context_summary = str(result_json.get("analysis_context_summary") or "").strip()
+    if not global_context_summary:
+        global_context_summary = _build_heuristic_transcript_context_summary(
+            transcript_result,
+            output_language_name=output_language_name,
+        )
+
+    batch_size = max(1, _env_int("INTERVIEW_ATTRIBUTION_REVIEW_BATCH_SIZE", 8))
+    reviewed_count = 0
+    print(f"🧭 Reviewing speaker attribution for {len(clips)} interview clips...")
+    for batch_start in range(0, len(clips), batch_size):
+        candidates = []
+        for clip_index in range(batch_start, min(len(clips), batch_start + batch_size)):
+            clip = clips[clip_index]
+            start = float(clip.get("start") or 0.0)
+            end = float(clip.get("end") or start)
+            candidates.append({
+                "clip_index": clip_index,
+                "start": start,
+                "end": end,
+                "video_title_for_youtube_short": clip.get("video_title_for_youtube_short") or "",
+                "viral_hook_text": clip.get("viral_hook_text") or "",
+                "video_description_for_tiktok": clip.get("video_description_for_tiktok") or "",
+                "video_description_for_instagram": clip.get("video_description_for_instagram") or "",
+                "speaker_labeled_transcript_excerpt": _collect_transcript_excerpt_for_range(
+                    transcript_result,
+                    start,
+                    end,
+                    max_chars=6000,
+                ),
+            })
+
+        prompt = INTERVIEW_ATTRIBUTION_REVIEW_PROMPT_TEMPLATE.format(
+            output_language_code=output_language_code,
+            output_language_name=output_language_name,
+            editorial_context=_format_shortform_editorial_context(),
+            global_context_summary=global_context_summary,
+            candidates_json=json.dumps(candidates, ensure_ascii=False),
+        )
+        try:
+            payload = _call_shortform_provider_json_with_retries(
+                provider_name,
+                prompt,
+                model_name=model_name,
+                max_attempts=1 if provider_name == "minimax" else 2,
+                retry_label=f"speaker attribution batch {batch_start // batch_size + 1}",
+            )
+        except Exception as exc:
+            print(f"⚠️ Speaker attribution review batch failed; keeping original copy: {exc}")
+            continue
+
+        reviewed = payload.get("clips") if isinstance(payload, dict) else None
+        if not isinstance(reviewed, list):
+            print("⚠️ Speaker attribution review returned no clip list; keeping original copy.")
+            continue
+        for item in reviewed:
+            if not isinstance(item, dict):
+                continue
+            try:
+                clip_index = int(item.get("clip_index"))
+            except (TypeError, ValueError):
+                continue
+            if clip_index < 0 or clip_index >= len(clips):
+                continue
+            clip = clips[clip_index]
+            for field in (
+                "video_title_for_youtube_short",
+                "video_description_for_tiktok",
+                "video_description_for_instagram",
+            ):
+                value = re.sub(r"\s+", " ", str(item.get(field) or "")).strip()
+                if value:
+                    clip[field] = value
+            hook = _sanitize_hook_candidate_text(item.get("viral_hook_text"))
+            if hook:
+                clip["viral_hook_text"] = hook
+            clip["subject_speaker"] = re.sub(r"\s+", " ", str(item.get("subject_speaker") or "unknown")).strip()[:80]
+            clip["speaker_attribution_confidence"] = max(
+                0.0,
+                min(1.0, _coerce_float(item.get("speaker_attribution_confidence")) or 0.0),
+            )
+            reviewed_count += 1
+    print(f"✅ Speaker attribution review updated {reviewed_count}/{len(clips)} clips.")
+    return result_json
+
+
+def _get_viral_clips_via_chat_provider_chunked(provider_name, transcript_result, video_duration, *, model_name, language_code, language_name, max_clip_duration, max_clips):
+    provider_name = (provider_name or "").strip().lower()
+    window_seconds = OLLAMA_CHUNK_SECONDS
+    overlap_seconds = OLLAMA_CHUNK_OVERLAP_SECONDS
+    if provider_name == "minimax":
+        window_seconds = MINIMAX_CHUNK_SECONDS
+        overlap_seconds = MINIMAX_CHUNK_OVERLAP_SECONDS
+
+    windows = split_transcript_for_ollama(
+        transcript_result,
+        window_seconds=window_seconds,
+        overlap_seconds=overlap_seconds,
+    )
+    if not windows:
+        return None
+
+    print(f"🧩 {provider_name.title()} chunked analysis over {len(windows)} transcript windows.")
+    global_context_summary = _build_transcript_context_summary(
+        transcript_result,
+        provider_name=provider_name,
+        model_name=model_name,
+        output_language_code=language_code,
+        output_language_name=language_name,
+    )
+    target_long_count = _target_long_clip_count(max_clip_duration, max_clips)
+    all_clips = []
+    chunk_divisor = max(1, min(len(windows), 5))
+    chunk_limit = max_clips if len(windows) == 1 else max(3, min(6, math.ceil(max_clips / chunk_divisor)))
+
+    for idx, window in enumerate(windows):
+        if provider_name == "minimax":
+            prompt = build_ollama_prompt(
+                video_duration,
+                window,
+                output_language_code=language_code,
+                output_language_name=language_name,
+                max_clips=chunk_limit,
+                max_clip_duration=max_clip_duration,
+                min_over_one_minute_clip_duration=MIN_OVER_ONE_MINUTE_CLIP_DURATION if max_clip_duration > MAX_CLIP_DURATION else None,
+                minimum_long_clips=min(target_long_count, chunk_limit) if target_long_count else 0,
+                global_context_summary=global_context_summary,
+            )
+        else:
+            prompt = build_viral_prompt(
+                video_duration,
+                window.get("text") or "",
+                window.get("words") or [],
+                output_language_code=language_code,
+                output_language_name=language_name,
+                max_clips=chunk_limit,
+                max_clip_duration=max_clip_duration,
+                min_over_one_minute_clip_duration=MIN_OVER_ONE_MINUTE_CLIP_DURATION if max_clip_duration > MAX_CLIP_DURATION else None,
+                minimum_long_clips=min(target_long_count, chunk_limit) if target_long_count else 0,
+                chunk_hint=f"Focus especially on transcript window {window['start']:.2f}-{window['end']:.2f} seconds and return clips that overlap this region.",
+                global_context_summary=global_context_summary,
+            )
+        chunk_started_at = time.time()
+        print(
+            f"🧩 {provider_name.title()} chunk {idx + 1}/{len(windows)}: "
+            f"{window['start']:.1f}s - {window['end']:.1f}s, prompt_chars={len(prompt)}"
+        )
+        try:
+            result_json = _call_shortform_provider_json_with_retries(
+                provider_name,
+                prompt,
+                model_name=model_name,
+                max_attempts=1 if provider_name == "minimax" else 2,
+                retry_label=f"chunk {idx + 1}/{len(windows)}",
+            )
+        except Exception as exc:
+            print(f"⚠️  {provider_name.title()} chunk {idx + 1} failed: {exc}")
+            continue
+
+        result_json = sanitize_clip_candidates(
+            result_json,
+            video_duration,
+            transcript_result=transcript_result,
+            language_code=language_code,
+            max_clips=chunk_limit,
+            max_clip_duration=max_clip_duration,
+            min_over_one_minute_clip_duration=MIN_OVER_ONE_MINUTE_CLIP_DURATION if max_clip_duration > MAX_CLIP_DURATION else None,
+        )
+        if not result_json:
+            print(f"⚠️  {provider_name.title()} chunk {idx + 1}/{len(windows)} completed in {time.time() - chunk_started_at:.1f}s but returned no viable clips.")
+            continue
+        chunk_clips = result_json.get("shorts") or []
+        all_clips.extend(chunk_clips)
+        print(
+            f"✅ {provider_name.title()} chunk {idx + 1}/{len(windows)} completed in "
+            f"{time.time() - chunk_started_at:.1f}s with {len(chunk_clips)} viable clips."
+        )
+
+    if not all_clips:
+        return None
+
+    combined_result = sanitize_clip_candidates(
+        {"shorts": all_clips},
+        video_duration,
+        transcript_result=transcript_result,
+        language_code=language_code,
+        max_clips=max_clips,
+        max_clip_duration=max_clip_duration,
+        min_over_one_minute_clip_duration=MIN_OVER_ONE_MINUTE_CLIP_DURATION if max_clip_duration > MAX_CLIP_DURATION else None,
+    )
+    if combined_result:
+        combined_result["analysis_context_summary"] = global_context_summary
+    return combined_result
+
+
 def split_transcript_for_ollama(transcript_result, window_seconds=OLLAMA_CHUNK_SECONDS, overlap_seconds=OLLAMA_CHUNK_OVERLAP_SECONDS):
-    segments = transcript_result.get("segments", [])
+    segments = transcript_result.get("speaker_segments") or transcript_result.get("segments", [])
     if not segments:
         return []
 
@@ -658,13 +1828,17 @@ def split_transcript_for_ollama(transcript_result, window_seconds=OLLAMA_CHUNK_S
             chunk_text_parts = []
             for segment in chunk_segments:
                 chunk_text_parts.append(segment["text"])
+                speaker_label = re.sub(r"\s+", " ", str(segment.get("speaker") or "")).strip()
                 for word in segment.get("words", []):
                     if word["end"] >= start_time and word["start"] <= end_time:
-                        chunk_words.append({
+                        w_entry = {
                             "w": word["word"],
                             "s": word["start"],
                             "e": word["end"],
-                        })
+                        }
+                        if speaker_label:
+                            w_entry["spk"] = speaker_label
+                        chunk_words.append(w_entry)
             windows.append({
                 "start": start_time,
                 "end": end_time,
@@ -681,6 +1855,14 @@ def split_transcript_for_ollama(transcript_result, window_seconds=OLLAMA_CHUNK_S
 
 
 def build_ollama_segment_lines(segments, max_lines=OLLAMA_MAX_SEGMENT_LINES, max_chars=OLLAMA_MAX_PROMPT_CHARS):
+    """Render transcript segments for Ollama chunked prompts.
+
+    Each line keeps both:
+    - the segment-level speaker label (e.g. SPEAKER_00), and
+    - the per-word timing of Whisper (``s``/``e`` in seconds) with the same
+      speaker attached via ``spk`` so the model can pick exact word boundaries
+      while still knowing which speaker is talking.
+    """
     lines = []
     total_chars = 0
 
@@ -692,12 +1874,31 @@ def build_ollama_segment_lines(segments, max_lines=OLLAMA_MAX_SEGMENT_LINES, max
         if len(text) > 220:
             text = text[:217].rstrip() + "..."
 
-        line = f"[{segment['start']:.2f}-{segment['end']:.2f}] {text}"
+        speaker = re.sub(r"\s+", " ", str(segment.get("speaker") or "")).strip()
+        speaker_prefix = f" {speaker}" if speaker else ""
+        line = f"[{segment['start']:.2f}-{segment['end']:.2f}{speaker_prefix}] {text}"
         if lines and (len(lines) >= max_lines or (total_chars + len(line) + 1) > max_chars):
             break
 
         lines.append(line)
         total_chars += len(line) + 1
+
+        # Word-level timings (with speaker) so the chunked model can pick
+        # exact word-aligned clip boundaries without losing attribution.
+        word_pieces = []
+        for word in segment.get("words") or []:
+            start = word.get("start")
+            end = word.get("end")
+            token = str(word.get("word") or "").strip()
+            if not token or start is None or end is None:
+                continue
+            spk = speaker or "UNKNOWN"
+            word_pieces.append(f"{token}|{float(start):.3f}|{float(end):.3f}|{spk}")
+        if word_pieces:
+            word_line = "WORDS: " + " ".join(word_pieces)
+            if total_chars + len(word_line) + 1 <= max_chars:
+                lines.append(word_line)
+                total_chars += len(word_line) + 1
 
     return "\n".join(lines)
 
@@ -711,8 +1912,9 @@ def build_ollama_prompt(
     min_clip_duration=MIN_CLIP_DURATION,
     max_clip_duration=MAX_CLIP_DURATION,
     min_over_one_minute_clip_duration=MIN_OVER_ONE_MINUTE_CLIP_DURATION,
+    minimum_long_clips=0,
+    global_context_summary="",
 ):
-    over_one_minute_enabled = max_clip_duration > MAX_CLIP_DURATION and min_over_one_minute_clip_duration is not None
     segment_lines = build_ollama_segment_lines(transcript_window.get("segments", []))
     return OLLAMA_PROMPT_TEMPLATE.format(
         video_duration=video_duration,
@@ -723,18 +1925,10 @@ def build_ollama_prompt(
         output_language_name=output_language_name,
         max_clips=max_clips,
         min_clip_duration=int(min_clip_duration) if float(min_clip_duration).is_integer() else min_clip_duration,
+        preferred_min_clip_duration=int(PREFERRED_MIN_CLIP_DURATION) if float(PREFERRED_MIN_CLIP_DURATION).is_integer() else PREFERRED_MIN_CLIP_DURATION,
         max_clip_duration=int(max_clip_duration) if float(max_clip_duration).is_integer() else max_clip_duration,
-        over_one_minute_rule_1="Clips up to 60 seconds are always allowed." if over_one_minute_enabled else "Do not exceed 60 seconds.",
-        over_one_minute_rule_2=(
-            "Only create a clip longer than 60 seconds when the moment clearly needs more room."
-            if over_one_minute_enabled
-            else "Shorter clips are fine if the moment is strongest that way."
-        ),
-        over_one_minute_rule_3=(
-            f"If a clip is longer than 60 seconds, it MUST be at least {int(min_over_one_minute_clip_duration) if float(min_over_one_minute_clip_duration).is_integer() else min_over_one_minute_clip_duration} seconds and at most {int(max_clip_duration) if float(max_clip_duration).is_integer() else max_clip_duration} seconds."
-            if over_one_minute_enabled
-            else "Keep the clip tight and payoff-focused."
-        ),
+        editorial_context=_format_shortform_editorial_context(),
+        global_context_summary=(global_context_summary or "No extra summary available."),
     )
 
 
@@ -1027,6 +2221,7 @@ class SmoothedCameraman:
         # Initial State
         self.current_center_x = video_width / 2
         self.target_center_x = video_width / 2
+        self.velocity_x = 0.0
         
         # Calculate crop dimensions once
         self.crop_height = video_height
@@ -1037,7 +2232,7 @@ class SmoothedCameraman:
              
         # Safe Zone: 20% of the video width
         # As long as the target is within this zone relative to current center, DO NOT MOVE.
-        self.safe_zone_radius = self.crop_width * 0.25
+        self.safe_zone_radius = self.crop_width * 0.18
 
     def update_target(self, face_box):
         """
@@ -1053,31 +2248,26 @@ class SmoothedCameraman:
         """
         if force_snap:
             self.current_center_x = self.target_center_x
+            self.velocity_x = 0.0
         else:
             diff = self.target_center_x - self.current_center_x
-            
-            # SIMPLIFIED LOGIC:
-            # 1. Is the target outside the safe zone?
-            if abs(diff) > self.safe_zone_radius:
-                # 2. If yes, move towards it slowly (Linear Speed)
-                # Determine direction
-                direction = 1 if diff > 0 else -1
-                
-                # Speed: 2 pixels per frame (Slow pan)
-                # If the distance is HUGE (scene change or fast movement), speed up slightly
-                if abs(diff) > self.crop_width * 0.5:
-                    speed = 15.0 # Fast re-frame
-                else:
-                    speed = 3.0  # Slow, steady pan
-                
-                self.current_center_x += direction * speed
-                
-                # Check if we overshot (prevent oscillation)
-                new_diff = self.target_center_x - self.current_center_x
-                if (direction == 1 and new_diff < 0) or (direction == -1 and new_diff > 0):
-                    self.current_center_x = self.target_center_x
-            
-            # If inside safe zone, DO NOTHING (Stationary Camera)
+            abs_diff = abs(diff)
+            dead_zone = self.safe_zone_radius
+            if abs_diff <= dead_zone:
+                desired_velocity = diff * 0.035
+            else:
+                overflow = abs_diff - dead_zone
+                desired_velocity = math.copysign(max(1.2, overflow * 0.12), diff)
+
+            max_speed = 12.0 if abs_diff > self.crop_width * 0.42 else 5.5
+            desired_velocity = max(-max_speed, min(max_speed, desired_velocity))
+            damping = 0.78 if abs_diff > dead_zone else 0.68
+            self.velocity_x = (self.velocity_x * damping) + (desired_velocity * (1.0 - damping))
+            self.current_center_x += self.velocity_x
+
+            if abs(self.target_center_x - self.current_center_x) < 0.9 and abs(self.velocity_x) < 0.12:
+                self.current_center_x = self.target_center_x
+                self.velocity_x = 0.0
                 
         # Clamp center
         half_crop = self.crop_width / 2
@@ -1224,7 +2414,7 @@ class InterviewLayoutTracker:
             [video_width - half_width, 0, half_width, video_height],
         ]
 
-    def _smooth_box(self, previous_box, new_box, alpha=0.35):
+    def _smooth_box(self, previous_box, new_box, alpha=0.18):
         return [
             int(round(previous_box[i] * (1 - alpha) + new_box[i] * alpha))
             for i in range(4)
@@ -1487,6 +2677,65 @@ def probe_video_stream(video_path):
     except Exception:
         pass
     return {}
+
+
+def validate_input_video(video_path):
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration:stream=index,codec_type,codec_name",
+        "-of", "json",
+        video_path,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            **subprocess_priority_kwargs(),
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr_text = (exc.stderr or "").strip()
+        if "moov atom not found" in stderr_text.lower():
+            return {
+                "valid": False,
+                "reason": (
+                    "Die Eingabedatei ist unvollstaendig oder defekt "
+                    "(MP4 moov atom fehlt). Bitte die Quelldatei neu exportieren oder neu hochladen."
+                ),
+                "technical_detail": stderr_text,
+            }
+        return {
+            "valid": False,
+            "reason": "Die Eingabedatei konnte von ffprobe nicht gelesen werden.",
+            "technical_detail": stderr_text or str(exc),
+        }
+    except Exception as exc:
+        return {
+            "valid": False,
+            "reason": "Die Eingabedatei konnte nicht validiert werden.",
+            "technical_detail": str(exc),
+        }
+
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except Exception:
+        payload = {}
+    streams = payload.get("streams") or []
+    has_video = any(str((stream or {}).get("codec_type") or "").lower() == "video" for stream in streams)
+    if not has_video:
+        return {
+            "valid": False,
+            "reason": "Die Eingabedatei enthaelt keinen lesbaren Videostream.",
+            "technical_detail": "ffprobe fand keinen Videostream.",
+        }
+    return {
+        "valid": True,
+        "reason": "",
+        "technical_detail": "",
+    }
 
 
 def get_video_resolution(video_path):
@@ -2137,8 +3386,7 @@ def process_video_to_vertical(
                 break
 
             if interview_mode:
-                if frame_number % 2 == 0:
-                    interview_tracker.update(detect_face_candidates(frame), original_width)
+                interview_tracker.update(detect_face_candidates(frame), original_width)
                 output_frame = create_interview_frame(frame, OUTPUT_WIDTH, OUTPUT_HEIGHT, interview_tracker.get_boxes())
             else:
                 # Update Scene Index
@@ -2162,16 +3410,14 @@ def process_video_to_vertical(
                 else:
                     # "Single Speaker" -> Track & Crop
                     
-                    # Detect every 2nd frame for performance
-                    if frame_number % 2 == 0:
-                        candidates = detect_face_candidates(frame)
-                        target_box = speaker_tracker.get_target(candidates, frame_number, original_width)
-                        if target_box:
-                            cameraman.update_target(target_box)
-                        else:
-                            person_box = detect_person_yolo(frame)
-                            if person_box:
-                                cameraman.update_target(person_box)
+                    candidates = detect_face_candidates(frame)
+                    target_box = speaker_tracker.get_target(candidates, frame_number, original_width)
+                    if target_box:
+                        cameraman.update_target(target_box)
+                    else:
+                        person_box = detect_person_yolo(frame)
+                        if person_box:
+                            cameraman.update_target(person_box)
 
                     # Snap camera on scene change to avoid panning from previous scene position
                     is_scene_start = (frame_number == scene_boundaries[current_scene_index][0])
@@ -2287,12 +3533,74 @@ def _prepare_transcription_input(video_path):
         pass
     return video_path
 
+
+def _normalize_transcript_language(raw):
+    value = str(raw or "").strip().lower()
+    if not value or value == "auto":
+        return ""
+    return value.split("-")[0]
+
+
+def _is_english_biased_whisper_model(model_name):
+    lowered = str(model_name or "").strip().lower()
+    if not lowered:
+        return False
+    if "german" in lowered or lowered.endswith(".de"):
+        return False
+    return "distil-large-v3" in lowered
+
+
+def _looks_like_mismatched_german_transcript(transcript):
+    if not isinstance(transcript, dict):
+        return False
+    language = _normalize_transcript_language(transcript.get("language"))
+    if language != "de":
+        return False
+    text = re.sub(r"\s+", " ", str(transcript.get("text") or "")).strip().lower()
+    if len(text) < 120:
+        return False
+
+    window = f" {text[:5000]} "
+    english_markers = re.findall(
+        r"\b(the|and|with|that|this|there|have|has|had|was|were|you|your|people|from|when|where|because|just|really|week|cool)\b",
+        window,
+    )
+    german_markers = re.findall(
+        r"\b(ich|und|der|die|das|nicht|wir|ihr|euch|ist|war|waren|haben|hat|mit|fuer|für|dass|weil|also|dann|ein|eine|so|ja|genau|aber|oder|wenn|man)\b",
+        window,
+    )
+    umlaut_count = sum(window.count(ch) for ch in ("ä", "ö", "ü", "ß"))
+    if len(english_markers) >= 12 and len(english_markers) > max(6, len(german_markers) * 2 + umlaut_count):
+        return True
+    return False
+
+
+def _should_refresh_resume_transcript(transcript, expected_language):
+    if not isinstance(transcript, dict):
+        return True, "Transcript-Datei ist unlesbar."
+    expected = _normalize_transcript_language(expected_language)
+    transcript_language = _normalize_transcript_language(transcript.get("language"))
+    runtime = transcript.get("runtime") or {}
+    runtime_model = runtime.get("model") or runtime.get("resolved_model") or ""
+    if expected == "de" and transcript_language == "de":
+        if _is_english_biased_whisper_model(runtime_model):
+            return True, f"Deutsch-Transcript wurde mit englisch-biased Whisper-Modell erstellt ({runtime_model})."
+        if _looks_like_mismatched_german_transcript(transcript):
+            return True, "Deutsch-Transcript sieht nach englisch/phonetic Fehltranskription aus."
+    return False, ""
+
+
 def transcribe_video(video_path):
     print("🎙️  Transcribing video with Faster-Whisper...")
     transcription_input = _prepare_transcription_input(video_path)
     cleanup_input = transcription_input != video_path
+    forced_language = (os.environ.get("WHISPER_LANGUAGE") or "de").strip() or "de"
     try:
-        segments, info, runtime_meta = transcribe_with_runtime(transcription_input, word_timestamps=True)
+        segments, info, runtime_meta = transcribe_with_runtime(
+            transcription_input,
+            word_timestamps=True,
+            language=forced_language,
+        )
     finally:
         if cleanup_input:
             try:
@@ -2308,10 +3616,13 @@ def transcribe_video(video_path):
         f"lang={runtime_meta.get('requested_language', 'auto')}"
     )
     print(f"   Detected language '{info.language}' with probability {info.language_probability:.2f}")
+    if runtime_meta.get("word_timestamps") is False:
+        print("⚠️  Whisper word timestamps are disabled for this run; clip boundaries may be less precise.")
     
     # Convert to openai-whisper compatible format
     transcript_segments = []
     full_text = ""
+    word_timestamp_count = 0
     
     for segment in segments:
         # Print progress to keep user informed (and prevent timeouts feeling)
@@ -2332,25 +3643,238 @@ def transcribe_video(video_path):
                     'end': word.end,
                     'probability': word.probability
                 })
+                word_timestamp_count += 1
         
         transcript_segments.append(seg_dict)
         full_text += segment.text + " "
-        
+    if word_timestamp_count:
+        print(f"   Word-level timestamps: {word_timestamp_count} words available for precise clip boundaries.")
+    else:
+        print("⚠️  No word-level timestamps were produced; MiniMax will only see segment-level timing.")
+
     return {
         'text': full_text.strip(),
         'segments': transcript_segments,
-        'language': info.language
+        'language': info.language,
+        'language_probability': float(getattr(info, "language_probability", 0.0) or 0.0),
+        'runtime': {
+            'model': runtime_meta.get('model'),
+            'resolved_model': runtime_meta.get('resolved_model'),
+            'device': runtime_meta.get('device'),
+            'compute_type': runtime_meta.get('compute_type'),
+            'beam_size': runtime_meta.get('beam_size'),
+            'vad_filter': runtime_meta.get('vad_filter'),
+            'requested_language': runtime_meta.get('requested_language'),
+            'word_timestamps': runtime_meta.get('word_timestamps'),
+        },
+        'word_timestamp_count': word_timestamp_count,
     }
 
-def _extract_words(transcript_result):
-    words = []
-    for segment in transcript_result['segments']:
-        for word in segment.get('words', []):
-            words.append({
-                'w': word['word'],
-                's': word['start'],
-                'e': word['end']
+
+def _speaker_for_interval(turns, start, end, start_index=0):
+    while start_index < len(turns) and float(turns[start_index]["end"]) <= start:
+        start_index += 1
+    best_speaker = "UNKNOWN"
+    best_overlap = 0.0
+    index = start_index
+    while index < len(turns) and float(turns[index]["start"]) < end:
+        turn = turns[index]
+        overlap = max(0.0, min(end, float(turn["end"])) - max(start, float(turn["start"])))
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_speaker = str(turn.get("speaker") or "UNKNOWN")
+        index += 1
+    return best_speaker, start_index
+
+
+def _build_speaker_segments(transcript, turns):
+    speaker_segments = []
+    turn_index = 0
+
+    def append_piece(speaker, start, end, text, words=None):
+        normalized_text = re.sub(r"\s+", " ", str(text or "")).strip()
+        if not normalized_text or end <= start:
+            return
+        if (
+            speaker_segments
+            and speaker_segments[-1]["speaker"] == speaker
+            and start <= float(speaker_segments[-1]["end"]) + 0.8
+        ):
+            previous = speaker_segments[-1]
+            previous["end"] = round(max(float(previous["end"]), end), 3)
+            previous["text"] = f"{previous['text']} {normalized_text}".strip()
+            if words:
+                previous.setdefault("words", []).extend(words)
+            return
+        speaker_segments.append({
+            "speaker": speaker,
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "text": normalized_text,
+            "words": list(words or []),
+        })
+
+    for segment in transcript.get("segments") or []:
+        words = [word for word in (segment.get("words") or []) if word.get("start") is not None and word.get("end") is not None]
+        if not words:
+            start = float(segment.get("start") or 0.0)
+            end = float(segment.get("end") or start)
+            speaker, turn_index = _speaker_for_interval(turns, start, end, turn_index)
+            append_piece(speaker, start, end, segment.get("text") or "")
+            continue
+
+        current_speaker = None
+        current_words = []
+        for word in words:
+            start = float(word.get("start") or 0.0)
+            end = float(word.get("end") or start)
+            speaker, turn_index = _speaker_for_interval(turns, start, end, turn_index)
+            if current_words and speaker != current_speaker:
+                append_piece(
+                    current_speaker or "UNKNOWN",
+                    float(current_words[0]["start"]),
+                    float(current_words[-1]["end"]),
+                    "".join(str(item.get("word") or "") for item in current_words),
+                    current_words,
+                )
+                current_words = []
+            current_speaker = speaker
+            current_words.append(dict(word))
+        if current_words:
+            append_piece(
+                current_speaker or "UNKNOWN",
+                float(current_words[0]["start"]),
+                float(current_words[-1]["end"]),
+                "".join(str(item.get("word") or "") for item in current_words),
+                current_words,
+            )
+    return speaker_segments
+
+
+def ensure_shortform_speaker_diarization(video_path, transcript):
+    if not isinstance(transcript, dict):
+        return transcript, False
+    if transcript.get("speaker_segments") and transcript.get("speaker_turns"):
+        return transcript, False
+
+    audio_path = video_path
+    cleanup_audio = False
+    try:
+        from longform.analysis import _load_pyannote_pipeline
+
+        audio_path = _prepare_transcription_input(video_path)
+        cleanup_audio = audio_path != video_path
+        token = (
+            os.environ.get("PYANNOTE_AUTH_TOKEN")
+            or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+            or os.environ.get("HF_TOKEN")
+            or ""
+        ).strip()
+        pipeline = _load_pyannote_pipeline(token_override=token, logger=lambda message: print(f"🗣️ {message}"))
+        try:
+            diarization = pipeline(audio_path, min_speakers=2, max_speakers=4)
+        except TypeError:
+            diarization = pipeline(audio_path)
+
+        turns = []
+        for turn, _, speaker in diarization.itertracks(yield_label=True):
+            start = float(turn.start or 0.0)
+            end = float(turn.end or start)
+            if end - start < 0.08:
+                continue
+            turns.append({
+                "speaker": str(speaker),
+                "start": round(start, 3),
+                "end": round(end, 3),
             })
+        turns.sort(key=lambda item: (item["start"], item["end"]))
+        if not turns:
+            raise RuntimeError("Pyannote returned no speaker turns.")
+
+        speaker_segments = _build_speaker_segments(transcript, turns)
+        if not speaker_segments:
+            raise RuntimeError("Speaker turns could not be aligned to Whisper words.")
+
+        enriched = dict(transcript)
+        enriched["speaker_turns"] = turns
+        enriched["speaker_segments"] = speaker_segments
+        enriched["diarization_runtime"] = {
+            "provider": "pyannote",
+            "speaker_count": len({item["speaker"] for item in turns}),
+            "turn_count": len(turns),
+            "status": "completed",
+        }
+        print(
+            "✅ Shortform speaker diarization complete: "
+            f"speakers={enriched['diarization_runtime']['speaker_count']}, turns={len(turns)}, "
+            f"speaker_segments={len(speaker_segments)}"
+        )
+        return enriched, True
+    except Exception as exc:
+        print(f"⚠️ Shortform speaker diarization unavailable; continuing with strict neutral attribution rules: {exc}")
+        enriched = dict(transcript)
+        enriched["diarization_runtime"] = {
+            "provider": "pyannote",
+            "status": "failed",
+            "error": str(exc)[:500],
+        }
+        return enriched, True
+    finally:
+        if cleanup_audio:
+            try:
+                if os.path.exists(audio_path):
+                    os.remove(audio_path)
+            except Exception:
+                pass
+
+def _word_speaker_lookup(transcript_result):
+    """Build a mapping of word identity (text|start|end) -> speaker label.
+
+    Uses speaker_segments from diarization when available. Each word is matched
+    by (text, rounded start, rounded end) to the words stored inside
+    speaker_segments during _build_speaker_segments. Words that cannot be
+    matched remain absent from the lookup.
+    """
+    lookup = {}
+    if not isinstance(transcript_result, dict):
+        return lookup
+    speaker_segments = transcript_result.get("speaker_segments") or []
+    if not speaker_segments:
+        return lookup
+    for segment in speaker_segments:
+        speaker = re.sub(r"\s+", " ", str(segment.get("speaker") or "")).strip() or "UNKNOWN"
+        for word in segment.get("words") or []:
+            text = str(word.get("word") or "").strip()
+            start = word.get("start")
+            end = word.get("end")
+            if not text or start is None or end is None:
+                continue
+            key = (text, round(float(start), 3), round(float(end), 3))
+            lookup[key] = speaker
+    return lookup
+
+
+def _extract_words(transcript_result, include_speaker=False):
+    words = []
+    speaker_lookup = _word_speaker_lookup(transcript_result) if include_speaker else {}
+    for segment in transcript_result.get('segments') or []:
+        for word in segment.get('words') or []:
+            entry = {
+                'w': word.get('word'),
+                's': word.get('start'),
+                'e': word.get('end'),
+            }
+            if include_speaker and speaker_lookup:
+                text = str(word.get('word') or '').strip()
+                start = word.get('start')
+                end = word.get('end')
+                if text and start is not None and end is not None:
+                    speaker = speaker_lookup.get(
+                        (text, round(float(start), 3), round(float(end), 3))
+                    )
+                    if speaker:
+                        entry['spk'] = speaker
+            words.append(entry)
     return words
 
 
@@ -2358,7 +3882,162 @@ def get_viral_clips(transcript_result, video_duration, max_clip_duration=MAX_CLI
     provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
     if provider == "ollama":
         return get_viral_clips_via_ollama(transcript_result, video_duration, max_clip_duration=max_clip_duration, max_clips=max_clips)
+    if provider in {"openai", "claude", "minimax"}:
+        return get_viral_clips_via_chat_provider(
+            provider,
+            transcript_result,
+            video_duration,
+            max_clip_duration=max_clip_duration,
+            max_clips=max_clips,
+        )
     return get_viral_clips_via_gemini(transcript_result, video_duration, max_clip_duration=max_clip_duration, max_clips=max_clips)
+
+
+def get_viral_clips_via_chat_provider(provider_name, transcript_result, video_duration, max_clip_duration=MAX_CLIP_DURATION, max_clips=MAX_GENERATED_CLIPS):
+    print(f"🤖  Analyzing with {provider_name.title()}...")
+    language_code, language_name = describe_output_language(transcript_result.get("language"))
+    target_long_count = _target_long_clip_count(max_clip_duration, max_clips)
+    model_env_map = {
+        "openai": ("OPENAI_MODEL", "gpt-4.1-mini"),
+        "claude": ("CLAUDE_MODEL", "claude-3-5-sonnet-latest"),
+        "minimax": ("MINIMAX_MODEL", _default_minimax_model()),
+    }
+    model_env, default_model = model_env_map.get(provider_name, ("", ""))
+    model_name = os.getenv(model_env, default_model) if model_env else default_model
+    if provider_name == "minimax":
+        print(f"🤖  MiniMax model selected: {model_name or _default_minimax_model()}")
+    global_context_summary = _build_transcript_context_summary(
+        transcript_result,
+        provider_name=provider_name,
+        model_name=model_name,
+        output_language_code=language_code,
+        output_language_name=language_name,
+    )
+    prompt = build_viral_prompt(
+        video_duration,
+        transcript_result["text"],
+        _extract_words(transcript_result, include_speaker=True),
+        output_language_code=language_code,
+        output_language_name=language_name,
+        max_clips=max_clips,
+        max_clip_duration=max_clip_duration,
+        min_over_one_minute_clip_duration=MIN_OVER_ONE_MINUTE_CLIP_DURATION if max_clip_duration > MAX_CLIP_DURATION else None,
+        minimum_long_clips=target_long_count,
+        global_context_summary=global_context_summary,
+    )
+
+    def _sanitize_provider_result(payload):
+        payload = sanitize_clip_candidates(
+            payload,
+            video_duration,
+            transcript_result=transcript_result,
+            language_code=language_code,
+            max_clips=max_clips,
+            max_clip_duration=max_clip_duration,
+            min_over_one_minute_clip_duration=MIN_OVER_ONE_MINUTE_CLIP_DURATION if max_clip_duration > MAX_CLIP_DURATION else None,
+        )
+        if not payload:
+            return None
+        return payload
+
+    prefer_chunked = _should_use_chunked_chat_provider(provider_name, transcript_result, model_name=model_name)
+    if prefer_chunked:
+        if provider_name == "minimax" and not _is_minimax_m3(model_name):
+            print(f"🧩 MiniMax model {model_name} is not MiniMax-M3; using chunked transcript analysis first for reliability.")
+        else:
+            print(f"🧩 {provider_name.title()} will use chunked transcript analysis first for reliability.")
+        result_json = _get_viral_clips_via_chat_provider_chunked(
+            provider_name,
+            transcript_result,
+            video_duration,
+            model_name=model_name,
+            language_code=language_code,
+            language_name=language_name,
+            max_clip_duration=max_clip_duration,
+            max_clips=max_clips,
+        )
+        result_json = _sanitize_provider_result(result_json)
+        if result_json:
+            result_json["analysis_context_summary"] = global_context_summary
+            return _ensure_generated_clip_hooks(
+                result_json,
+                transcript_result,
+                provider_name=provider_name,
+                output_language_code=language_code,
+                output_language_name=language_name,
+            )
+        if provider_name == "minimax" and not _env_flag("MINIMAX_ALLOW_FULL_FALLBACK", False):
+            raise RuntimeError(
+                "MiniMax chunked analysis returned no usable clips. "
+                "Full-transcript fallback is disabled to protect MiniMax token-plan limits."
+            )
+
+    try:
+        result_json = _call_shortform_provider_json_with_retries(
+            provider_name,
+            prompt,
+            model_name=model_name,
+            max_attempts=1 if provider_name == "minimax" else 2,
+            retry_label="full transcript",
+        )
+        if not result_json:
+            print(f"❌ {provider_name.title()} returned invalid JSON.")
+            raise RuntimeError(f"{provider_name.title()} returned invalid JSON.")
+        result_json = _sanitize_provider_result(result_json)
+        if not result_json:
+            raise RuntimeError(f"{provider_name.title()} returned no viable clip candidates.")
+        result_json["analysis_context_summary"] = global_context_summary
+        if _should_retry_for_long_clips(result_json, max_clip_duration, max_clips):
+            current_long_count = _count_long_clip_candidates(result_json)
+            print(f"🔁 {provider_name.title()} returned only {current_long_count} long clips. Gathering additional >60s candidates toward ~{target_long_count}...")
+            retry_prompt = _build_long_clip_retry_prompt(prompt, current_long_count, target_long_count)
+            supplement_attempts = 0 if provider_name == "minimax" else 2
+            for attempt in range(supplement_attempts):
+                retry_json = _call_shortform_provider_json_with_retries(
+                    provider_name,
+                    retry_prompt,
+                    model_name=model_name,
+                    max_attempts=2,
+                    retry_label=f"long-clip supplement {attempt + 1}/2",
+                )
+                retry_json = _sanitize_provider_result(retry_json)
+                if retry_json:
+                    result_json = _merge_long_clip_results(result_json, retry_json, max_clips)
+                current_long_count = _count_long_clip_candidates(result_json)
+                if current_long_count >= target_long_count:
+                    break
+        return _ensure_generated_clip_hooks(
+            result_json,
+            transcript_result,
+            provider_name=provider_name,
+            output_language_code=language_code,
+            output_language_name=language_name,
+        )
+    except Exception as e:
+        print(f"❌ {provider_name.title()} Error: {e}")
+        if not prefer_chunked:
+            print(f"🧩 {provider_name.title()} falling back to chunked transcript analysis after full-pass failure.")
+            chunked_result = _get_viral_clips_via_chat_provider_chunked(
+                provider_name,
+                transcript_result,
+                video_duration,
+                model_name=model_name,
+                language_code=language_code,
+                language_name=language_name,
+                max_clip_duration=max_clip_duration,
+                max_clips=max_clips,
+            )
+            chunked_result = _sanitize_provider_result(chunked_result)
+            if chunked_result:
+                chunked_result["analysis_context_summary"] = global_context_summary
+                return _ensure_generated_clip_hooks(
+                    chunked_result,
+                    transcript_result,
+                    provider_name=provider_name,
+                    output_language_code=language_code,
+                    output_language_name=language_name,
+                )
+        return None
 
 
 def get_viral_clips_via_gemini(transcript_result, video_duration, max_clip_duration=MAX_CLIP_DURATION, max_clips=MAX_GENERATED_CLIPS):
@@ -2372,15 +4051,25 @@ def get_viral_clips_via_gemini(transcript_result, video_duration, max_clip_durat
     client = genai.Client(api_key=api_key)
     model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     language_code, language_name = describe_output_language(transcript_result.get("language"))
+    target_long_count = _target_long_clip_count(max_clip_duration, max_clips)
+    global_context_summary = _build_transcript_context_summary(
+        transcript_result,
+        provider_name="gemini",
+        model_name=model_name,
+        output_language_code=language_code,
+        output_language_name=language_name,
+    )
     prompt = build_viral_prompt(
         video_duration,
         transcript_result["text"],
-        _extract_words(transcript_result),
+        _extract_words(transcript_result, include_speaker=True),
         output_language_code=language_code,
         output_language_name=language_name,
         max_clips=max_clips,
         max_clip_duration=max_clip_duration,
         min_over_one_minute_clip_duration=MIN_OVER_ONE_MINUTE_CLIP_DURATION if max_clip_duration > MAX_CLIP_DURATION else None,
+        minimum_long_clips=target_long_count,
+        global_context_summary=global_context_summary,
     )
 
     print(f"🤖  Initializing Gemini with model: {model_name}")
@@ -2438,6 +4127,7 @@ def get_viral_clips_via_gemini(transcript_result, video_duration, max_clip_durat
         result_json = sanitize_clip_candidates(
             result_json,
             video_duration,
+            transcript_result=transcript_result,
             language_code=language_code,
             max_clips=max_clips,
             max_clip_duration=max_clip_duration,
@@ -2445,6 +4135,31 @@ def get_viral_clips_via_gemini(transcript_result, video_duration, max_clip_durat
         )
         if not result_json:
             return None
+        result_json["analysis_context_summary"] = global_context_summary
+        if _should_retry_for_long_clips(result_json, max_clip_duration, max_clips):
+            current_long_count = _count_long_clip_candidates(result_json)
+            print(f"🔁 Gemini returned only {current_long_count} long clips. Gathering additional >60s candidates toward ~{target_long_count}...")
+            retry_prompt = _build_long_clip_retry_prompt(prompt, current_long_count, target_long_count)
+            for attempt in range(2):
+                retry_response = client.models.generate_content(
+                    model=model_name,
+                    contents=retry_prompt
+                )
+                retry_json = _extract_json_payload(retry_response.text)
+                retry_json = sanitize_clip_candidates(
+                    retry_json,
+                    video_duration,
+                    transcript_result=transcript_result,
+                    language_code=language_code,
+                    max_clips=max_clips,
+                    max_clip_duration=max_clip_duration,
+                    min_over_one_minute_clip_duration=MIN_OVER_ONE_MINUTE_CLIP_DURATION if max_clip_duration > MAX_CLIP_DURATION else None,
+                )
+                if retry_json:
+                    result_json = _merge_long_clip_results(result_json, retry_json, max_clips)
+                current_long_count = _count_long_clip_candidates(result_json)
+                if current_long_count >= target_long_count:
+                    break
         return _ensure_generated_clip_hooks(
             result_json,
             transcript_result,
@@ -2579,6 +4294,14 @@ def get_viral_clips_via_ollama(transcript_result, video_duration, max_clip_durat
     base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
     model_name = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
     language_code, language_name = describe_output_language(transcript_result.get("language"))
+    target_long_count = _target_long_clip_count(max_clip_duration, max_clips)
+    global_context_summary = _build_transcript_context_summary(
+        transcript_result,
+        provider_name="ollama",
+        model_name=model_name,
+        output_language_code=language_code,
+        output_language_name=language_name,
+    )
 
     print(f"🦙  Analyzing with Ollama: {model_name} @ {base_url}")
     print(f"🗣️  Required output language: {language_name}")
@@ -2620,6 +4343,8 @@ def get_viral_clips_via_ollama(transcript_result, video_duration, max_clip_durat
                 max_clips=chunk_limit,
                 max_clip_duration=max_clip_duration,
                 min_over_one_minute_clip_duration=MIN_OVER_ONE_MINUTE_CLIP_DURATION if max_clip_duration > MAX_CLIP_DURATION else None,
+                minimum_long_clips=min(target_long_count, chunk_limit) if target_long_count else 0,
+                global_context_summary=global_context_summary,
             )
             print(f"🦙  Ollama chunk {idx + 1}/{len(windows)}: {window['start']:.1f}s - {window['end']:.1f}s")
             outer, text = _call_ollama_with_retries(prompt, base_url, model_name)
@@ -2643,6 +4368,7 @@ def get_viral_clips_via_ollama(transcript_result, video_duration, max_clip_durat
             chunk_result = sanitize_clip_candidates(
                 result_json,
                 video_duration,
+                transcript_result=transcript_result,
                 language_code=language_code,
                 max_clips=chunk_limit,
                 max_clip_duration=max_clip_duration,
@@ -2659,6 +4385,7 @@ def get_viral_clips_via_ollama(transcript_result, video_duration, max_clip_durat
         result_json = sanitize_clip_candidates(
             {"shorts": all_clips},
             video_duration,
+            transcript_result=transcript_result,
             language_code=language_code,
             max_clips=max_clips,
             max_clip_duration=max_clip_duration,
@@ -2666,6 +4393,7 @@ def get_viral_clips_via_ollama(transcript_result, video_duration, max_clip_durat
         )
         if not result_json:
             return None
+        result_json["analysis_context_summary"] = global_context_summary
 
         result_json["cost_analysis"] = {
             "model": model_name,
@@ -2747,11 +4475,12 @@ if __name__ == '__main__':
     parser.add_argument('--resume', action='store_true', help="Resume a previous job using existing artifacts in the output directory.")
     parser.add_argument('--analysis-only', action='store_true', help="Run transcript + AI clip detection only. Do not render clips yet.")
     parser.add_argument('--interview-mode', action='store_true', help="Render in two-person interview layout with one detected speaker on top and one on bottom.")
-    parser.add_argument('--allow-long-clips', action='store_true', help="Allow generated clips to exceed 60 seconds.")
+    parser.add_argument('--allow-long-clips', action='store_true', help="Compatibility flag. Shorts are generated as 60-180s value clips by default.")
     parser.add_argument('--max-clips', type=int, default=MAX_GENERATED_CLIPS, help=f"Maximum number of generated clips to keep (default: {MAX_GENERATED_CLIPS}).")
     parser.add_argument('--tight-edit-preset', type=str, default=DEFAULT_TIGHT_EDIT_PRESET_ENV, choices=sorted(TIGHT_EDIT_PRESETS.keys()), help=f"Automatically remove pauses and filler words using the selected preset (default: {DEFAULT_TIGHT_EDIT_PRESET_ENV}).")
     
     args = parser.parse_args()
+    force_clip_reanalysis = str(os.getenv("FORCE_CLIP_REANALYSIS", "")).strip().lower() in {"1", "true", "yes", "on"}
     args.max_clips = max(1, args.max_clips or MAX_GENERATED_CLIPS)
     args.tight_edit_preset = normalize_tight_edit_preset(args.tight_edit_preset, DEFAULT_TIGHT_EDIT_PRESET_ENV)
 
@@ -2798,8 +4527,14 @@ if __name__ == '__main__':
     input_video = None
     video_title = None
 
-    if args.resume and pipeline.get("input_video") and os.path.exists(pipeline["input_video"]):
-        input_video = pipeline["input_video"]
+    if args.resume:
+        resume_source_video = pipeline.get("source_input_video")
+        resume_working_video = pipeline.get("input_video")
+        if resume_source_video and os.path.exists(resume_source_video):
+            input_video = resume_source_video
+        elif resume_working_video and os.path.exists(resume_working_video):
+            input_video = resume_working_video
+    if input_video:
         video_title = pipeline.get("video_title") or os.path.splitext(os.path.basename(input_video))[0]
         print(f"♻️  Resuming from existing source video: {input_video}")
     elif args.url:
@@ -2817,8 +4552,39 @@ if __name__ == '__main__':
         })
         sys.exit(1)
 
+    validation = validate_input_video(input_video)
+    if not validation.get("valid"):
+        reason = validation.get("reason") or "Die Eingabedatei ist ungueltig."
+        technical_detail = validation.get("technical_detail") or ""
+        print(f"❌ {reason}")
+        if technical_detail:
+            print(f"   Details: {technical_detail}")
+        update_job_manifest(output_dir, {
+            "status": "failed",
+            "error": f"{reason}{f' Details: {technical_detail}' if technical_detail else ''}",
+            "can_resume": False,
+        })
+        sys.exit(1)
+
     source_input_video = input_video
-    input_video = ensure_cv2_compatible_video(input_video, output_dir)
+    if args.skip_analysis:
+        input_video = ensure_cv2_compatible_video(input_video, output_dir)
+    else:
+        source_stream = probe_video_stream(source_input_video)
+        source_codec = (source_stream.get("codec_name") or "").lower()
+        source_ext = os.path.splitext(source_input_video)[1].lower()
+        if source_ext != ".mp4" or source_codec != "h264":
+            reason_parts = []
+            if source_codec and source_codec != "h264":
+                reason_parts.append(f"codec={source_codec}")
+            if source_ext and source_ext != ".mp4":
+                reason_parts.append(f"container={source_ext}")
+            reason = ", ".join(reason_parts) if reason_parts else "unsupported source"
+            print(
+                "⏩ Source is not Safari/OpenCV-friendly "
+                f"({reason}), but full H.264 working-copy creation is skipped for clip analysis. "
+                "Audio extraction and per-clip previews/renders use FFmpeg directly."
+            )
 
     update_job_manifest(output_dir, {
         "status": "processing",
@@ -2854,6 +4620,8 @@ if __name__ == '__main__':
     used_fallback = False
     analysis_failed = False
     transcript = None
+    force_transcription_reanalysis = str(os.getenv("FORCE_TRANSCRIPTION_REANALYSIS", "")).strip().lower() in {"1", "true", "yes", "on"}
+    transcript_file_rejected = False
 
     if args.skip_analysis:
         print("⏩ Skipping analysis, processing entire video...")
@@ -2872,23 +4640,57 @@ if __name__ == '__main__':
             used_fallback = True
     else:
         if args.resume and os.path.exists(transcript_file):
-            transcript = load_json_file(transcript_file)
-            if transcript:
-                print(f"♻️  Reusing transcript: {transcript_file}")
+            if force_transcription_reanalysis:
+                print("♻️  FORCE_TRANSCRIPTION_REANALYSIS active. Re-transcribing source on resume.")
+            else:
+                transcript = load_json_file(transcript_file)
+                refresh_transcript, refresh_reason = _should_refresh_resume_transcript(
+                    transcript,
+                    os.environ.get("WHISPER_LANGUAGE") or "de",
+                )
+                if refresh_transcript:
+                    print(f"♻️  Existing transcript will be regenerated: {refresh_reason}")
+                    transcript = None
+                    transcript_file_rejected = True
+                elif transcript:
+                    print(f"♻️  Reusing transcript: {transcript_file}")
 
         clips_data = None
+        clip_plan_generated = False
+        metadata_transcript_rejected = False
         if args.resume and os.path.exists(metadata_file):
             clips_data = load_json_file(metadata_file)
             if clips_data:
                 print(f"♻️  Reusing clip plan: {metadata_file}")
                 if not transcript:
-                    transcript = clips_data.get("transcript")
-                if (
+                    candidate_transcript = clips_data.get("transcript")
+                    refresh_transcript, refresh_reason = _should_refresh_resume_transcript(
+                        candidate_transcript,
+                        os.environ.get("WHISPER_LANGUAGE") or "de",
+                    )
+                    if refresh_transcript:
+                        print(f"♻️  Metadata transcript will be regenerated: {refresh_reason}")
+                        metadata_transcript_rejected = True
+                    else:
+                        transcript = candidate_transcript
+                if force_clip_reanalysis:
+                    print("♻️  FORCE_CLIP_REANALYSIS active. Re-running clip analysis on resume.")
+                    clips_data = None
+                elif transcript_file_rejected:
+                    print("♻️  Existing clip plan depends on rejected transcript file. Re-running clip analysis on resume.")
+                    clips_data = None
+                elif metadata_transcript_rejected:
+                    print("♻️  Existing clip plan depends on rejected transcript. Re-running clip analysis on resume.")
+                    clips_data = None
+                elif (
                     args.resume
                     and clips_data.get("generation_mode") == "fallback_full_video"
                     and clips_data.get("fallback_reason") in {"clip_analysis_failed", "all_clip_renders_failed"}
                 ):
                     print("♻️  Existing metadata is fallback-only. Re-running clip analysis on resume.")
+                    clips_data = None
+                elif not isinstance(clips_data.get("shorts"), list) or not clips_data.get("shorts"):
+                    print("♻️  Existing metadata has no viable clips. Re-running clip analysis on resume.")
                     clips_data = None
 
         if not transcript:
@@ -2900,6 +4702,11 @@ if __name__ == '__main__':
                 }
             })
 
+        if args.interview_mode:
+            transcript, diarization_updated = ensure_shortform_speaker_diarization(input_video, transcript)
+            if diarization_updated:
+                save_json_file(transcript_file, transcript)
+
         if not clips_data:
             try:
                 clips_data = get_viral_clips(
@@ -2908,6 +4715,15 @@ if __name__ == '__main__':
                     max_clip_duration=target_max_clip_duration,
                     max_clips=args.max_clips,
                 )
+                if args.interview_mode and clips_data:
+                    transcript_language = str(transcript.get("language") or os.environ.get("WHISPER_LANGUAGE") or "de").strip().lower()
+                    clips_data = review_interview_clip_attribution(
+                        clips_data,
+                        transcript,
+                        output_language_code=transcript_language,
+                        output_language_name=LANGUAGE_LABELS.get(transcript_language, transcript_language or "German (Deutsch)"),
+                    )
+                clip_plan_generated = bool(clips_data and clips_data.get("shorts"))
             except ClipSelectionConfigurationError as exc:
                 print(f"❌ {exc}")
                 update_job_manifest(output_dir, {
@@ -2918,26 +4734,29 @@ if __name__ == '__main__':
                 sys.exit(1)
 
         if not clips_data or 'shorts' not in clips_data or not clips_data['shorts']:
-            print("❌ Failed to identify clips. Converting whole video as fallback.")
+            print("❌ Failed to identify clips. Aborting without whole-video fallback.")
             analysis_failed = True
-            output_file = os.path.join(output_dir, f"{video_title}_vertical.mp4")
-            fallback_success = process_video_to_vertical(input_video, output_file, interview_mode=args.interview_mode)
-            if fallback_success:
-                metadata = build_fallback_metadata(video_title, duration, transcript, output_file, "clip_analysis_failed")
-                save_json_file(metadata_file, metadata)
-                completed_outputs = 1
-                overall_success = True
-                used_fallback = True
-            else:
-                failed_outputs += 1
+            failed_outputs += 1
         else:
             print(f"🔥 Found {len(clips_data['shorts'])} viral clips!")
             clips_data['transcript'] = transcript
             clips_data['generation_mode'] = 'clips'
 
+            analysis_revision = str(clips_data.get('analysis_revision') or '')
+            if clip_plan_generated:
+                analysis_revision = str(int(time.time() * 1000))
+                clips_data['analysis_revision'] = analysis_revision
+
             source_video_filename = os.path.basename(input_video)
             for i, clip in enumerate(clips_data['shorts']):
-                clip_filename = clip.get('video_filename') or f"{video_title}_clip_{i+1}.mp4"
+                if analysis_revision:
+                    clip['analysis_revision'] = analysis_revision
+                default_clip_filename = (
+                    f"{video_title}_plan_{analysis_revision}_clip_{i+1}.mp4"
+                    if clip_plan_generated and analysis_revision
+                    else f"{video_title}_clip_{i+1}.mp4"
+                )
+                clip_filename = clip.get('video_filename') or default_clip_filename
                 clip['video_filename'] = clip_filename
                 clip['source_video_filename'] = clip.get('source_video_filename') or source_video_filename
                 clip['original_video_filename'] = clip.get('original_video_filename') or os.path.basename(source_input_video)
@@ -3041,18 +4860,8 @@ if __name__ == '__main__':
                 if completed_outputs > 0:
                     overall_success = True
                 else:
-                    print("⚠️  No clip outputs succeeded. Generating whole-video fallback.")
-                    output_file = os.path.join(output_dir, f"{video_title}_vertical.mp4")
-                    fallback_success = process_video_to_vertical(input_video, output_file, interview_mode=args.interview_mode)
-                    if fallback_success:
-                        clips_data["fallback_output"] = os.path.basename(output_file)
-                        clips_data["fallback_reason"] = "all_clip_renders_failed"
-                        save_json_file(metadata_file, clips_data)
-                        completed_outputs = 1
-                        overall_success = True
-                        used_fallback = True
-                    else:
-                        failed_outputs += 1
+                    print("❌ No clip outputs succeeded. Aborting without whole-video fallback.")
+                    failed_outputs += 1
 
     manifest_status = "completed"
     if overall_success and (failed_outputs > 0 or (used_fallback and not args.skip_analysis and analysis_failed)):

@@ -1,12 +1,26 @@
 import glob
 import json
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
 
 
 MANIFEST_FILENAME = "job_manifest.json"
 LOG_FILENAME = "job.log"
+_LEGACY_VARIANT_PREFIX_PATTERN = re.compile(r"^(?:hook|subtitled|edited|translated|trimmed)_\d+_(.+)$")
+_CLIP_NUMBER_PATTERN = re.compile(r"(?:^|_)(?:clip|short)_(\d+)$", re.IGNORECASE)
+_TIMESTAMP_PATTERN = re.compile(r"_(\d{10,})_")
+_VERSION_OPERATION_PRIORITY = {
+    "original": 0,
+    "viral_render": 1,
+    "render": 1,
+    "edit": 1,
+    "trim": 1,
+    "translate": 2,
+    "subtitle": 3,
+    "hook": 4,
+}
 
 
 def _atomic_write_json(path: str, data: Dict[str, Any]) -> None:
@@ -116,6 +130,179 @@ def _expand_preview_filename_candidates(filename: str) -> List[str]:
         seen.add(normalized)
         deduped.append(normalized)
     return deduped
+
+
+def _strip_overlay_prefixes(filename: Optional[str]) -> Optional[str]:
+    current = os.path.basename(filename or "")
+    seen = set()
+
+    while current and current not in seen:
+        seen.add(current)
+        match = _LEGACY_VARIANT_PREFIX_PATTERN.match(current)
+        if not match:
+            break
+        current = match.group(1)
+
+    return current or None
+
+
+def _infer_version_operation(filename: Optional[str]) -> str:
+    name = os.path.basename(filename or "").lower()
+    if name.startswith("viral_rendered_"):
+        return "viral_render"
+    if name.startswith("rendered_"):
+        return "render"
+    if name.startswith("subtitled_"):
+        return "subtitle"
+    if name.startswith("hook_"):
+        return "hook"
+    if name.startswith("edited_"):
+        return "edit"
+    if name.startswith("translated_"):
+        return "translate"
+    if name.startswith("trimmed_"):
+        return "trim"
+    return "original"
+
+
+def _operation_label(operation: str) -> str:
+    return {
+        "original": "Original",
+        "viral_render": "Viral Render",
+        "render": "Rendered",
+        "subtitle": "Subtitles",
+        "hook": "Hook",
+        "edit": "Auto Edit",
+        "translate": "Dub",
+        "trim": "Trim",
+    }.get(operation, operation.replace("_", " ").title())
+
+
+def _extract_clip_number(filename: Optional[str]) -> Optional[int]:
+    candidates = [
+        os.path.splitext(os.path.basename(filename or ""))[0],
+        os.path.splitext(os.path.basename(_strip_overlay_prefixes(filename) or ""))[0],
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        match = _CLIP_NUMBER_PATTERN.search(candidate)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+    return None
+
+
+def _filename_timestamp_score(output_dir: str, filename: str) -> float:
+    timestamps = [int(item) for item in _TIMESTAMP_PATTERN.findall(filename or "")]
+    if timestamps:
+        return float(max(timestamps))
+    path = os.path.join(output_dir, os.path.basename(filename or ""))
+    try:
+        return float(os.path.getmtime(path))
+    except OSError:
+        return 0.0
+
+
+def _version_sort_key(output_dir: str, filename: str) -> tuple:
+    operation = _infer_version_operation(filename)
+    return (
+        _VERSION_OPERATION_PRIORITY.get(operation, 99),
+        _filename_timestamp_score(output_dir, filename),
+        os.path.basename(filename or ""),
+    )
+
+
+def _active_version_sort_key(output_dir: str, filename: str) -> tuple:
+    operation = _infer_version_operation(filename)
+    return (
+        _filename_timestamp_score(output_dir, filename),
+        _VERSION_OPERATION_PRIORITY.get(operation, 99),
+        os.path.basename(filename or ""),
+    )
+
+
+def _fallback_clip_title(filename: str, clip_number: Optional[int]) -> str:
+    if clip_number is not None:
+        return f"Clip {clip_number}"
+
+    stem = os.path.splitext(os.path.basename(_strip_overlay_prefixes(filename) or filename))[0]
+    stem = re.sub(r"^(?:viral_rendered|rendered)_\d+_", "", stem, flags=re.IGNORECASE)
+    stem = re.sub(r"[_-]+", " ", stem).strip()
+    return stem or "Viraler Clip"
+
+
+def _build_legacy_grouped_clips(output_dir: str, job_id: str, video_files: List[str]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+
+    for filename in video_files:
+        clip_number = _extract_clip_number(filename)
+        stripped = _strip_overlay_prefixes(filename) or os.path.basename(filename)
+        group_key = f"clip_{clip_number}" if clip_number is not None else stripped
+        group = grouped.setdefault(group_key, {
+            "clip_number": clip_number,
+            "group_key": group_key,
+            "files": [],
+        })
+        group["files"].append(os.path.basename(filename))
+
+    clips: List[Dict[str, Any]] = []
+
+    def group_sort_key(item: Dict[str, Any]) -> tuple:
+        clip_number = item.get("clip_number")
+        return (clip_number is None, clip_number if clip_number is not None else item.get("group_key") or "")
+
+    for fallback_index, group in enumerate(sorted(grouped.values(), key=group_sort_key)):
+        unique_files = sorted(set(group["files"]), key=lambda name: _version_sort_key(output_dir, name))
+        if not unique_files:
+            continue
+
+        versions: List[Dict[str, Any]] = []
+        for version_index, filename in enumerate(unique_files):
+            operation = _infer_version_operation(filename)
+            versions.append({
+                "id": f"v{version_index}",
+                "version": version_index,
+                "filename": filename,
+                "video_filename": filename,
+                "video_url": f"/videos/{job_id}/{filename}",
+                "operation": operation,
+                "label": _operation_label(operation),
+                "created_at": _filename_timestamp_score(output_dir, filename),
+            })
+
+        active_filename = max(unique_files, key=lambda name: _active_version_sort_key(output_dir, name))
+        source_candidates = [
+            name for name in unique_files
+            if _infer_version_operation(name) not in {"hook", "subtitle"}
+        ]
+        original_filename = source_candidates[0] if source_candidates else unique_files[0]
+        active_version = next((item for item in versions if item["filename"] == active_filename), versions[-1])
+        original_version = next((item for item in versions if item["filename"] == original_filename), versions[0])
+        title = _fallback_clip_title(active_filename, group.get("clip_number"))
+
+        clips.append({
+            "clip_index": (group.get("clip_number") - 1) if group.get("clip_number") is not None else fallback_index,
+            "start": 0,
+            "end": 0,
+            "video_title_for_youtube_short": title,
+            "video_description_for_tiktok": "Generated video",
+            "video_description_for_instagram": "Generated video",
+            "video_filename": active_version["filename"],
+            "video_url": active_version["video_url"],
+            "base_video_filename": original_version["filename"],
+            "base_video_url": original_version["video_url"],
+            "original_video_filename": original_version["filename"],
+            "original_video_url": original_version["video_url"],
+            "active_version_id": active_version["id"],
+            "original_version_id": original_version["id"],
+            "versions": versions,
+            "status": "completed",
+        })
+
+    return clips
 
 
 def _enrich_clip_versions(output_dir: str, job_id: str, clip: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -241,6 +428,7 @@ def build_job_result(output_dir: str, job_id: str) -> Optional[Dict[str, Any]]:
                 "generation_mode": data.get("generation_mode", "clips"),
                 "job_overlay_defaults": data.get("job_overlay_defaults"),
                 "job_social_defaults": data.get("job_social_defaults"),
+                "bulk_operation": manifest.get("bulk_operation"),
                 "resume_available": resume_available,
             }
 
@@ -248,20 +436,7 @@ def build_job_result(output_dir: str, job_id: str) -> Optional[Dict[str, Any]]:
     if not video_files:
         return None
 
-    clips = []
-    for i, filename in enumerate(video_files):
-        label = os.path.splitext(filename)[0].replace("_", " ")
-        clips.append({
-            "clip_index": i,
-            "start": 0,
-            "end": 0,
-            "video_title_for_youtube_short": label,
-            "video_description_for_tiktok": "Generated video",
-            "video_description_for_instagram": "Generated video",
-            "video_filename": filename,
-            "video_url": f"/videos/{job_id}/{filename}",
-            "status": "completed",
-        })
+    clips = _build_legacy_grouped_clips(output_dir, job_id, video_files)
 
     return {
         "clips": clips,
@@ -269,6 +444,7 @@ def build_job_result(output_dir: str, job_id: str) -> Optional[Dict[str, Any]]:
         "generation_mode": "legacy",
         "job_overlay_defaults": None,
         "job_social_defaults": None,
+        "bulk_operation": manifest.get("bulk_operation"),
         "resume_available": False,
     }
 
@@ -285,7 +461,7 @@ def _estimate_clip_count(output_dir: str) -> int:
         except Exception:
             pass
     # Fallback: count discoverable output videos without loading full clip metadata.
-    return len(_discover_video_files(output_dir))
+    return len(_build_legacy_grouped_clips(output_dir, "legacy", _discover_video_files(output_dir)))
 
 
 def _build_job_summary(
@@ -338,6 +514,7 @@ def _build_job_summary(
         "error": manifest.get("error"),
         "can_resume": can_resume,
         "generation_mode": (result or {}).get("generation_mode"),
+        "bulk_operation": manifest.get("bulk_operation"),
         "result": result if include_result else None,
         "logs": read_job_logs(output_dir, limit=log_limit) if include_logs else [],
     }

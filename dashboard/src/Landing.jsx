@@ -113,7 +113,7 @@ export default function Landing({ onLaunchApp }) {
 
   const steps = [
     { title: "Paste a YouTube URL or Upload a Video", description: "Drop any YouTube link or upload a local video file. OpenShorts supports all common formats and resolutions." },
-    { title: "AI Detects the Best Viral Moments", description: "Google Gemini 3.0 Flash transcribes, analyzes scene boundaries, and identifies 3-15 high-potential clips of 15-60 seconds each." },
+    { title: "AI Detects the Best Viral Moments", description: "AI transcribes, analyzes scene boundaries, and identifies coherent high-value clips of 1-3 minutes each instead of forcing weak micro-snippets." },
     { title: "Smart Cropping to Vertical 9:16", description: "AI reframes each clip to vertical format with face tracking. Subjects stay centered with stabilized camera movement — no manual positioning." },
     { title: "Add Subtitles, Hooks & Effects", description: "Auto-generate styled subtitles, add hook text overlays, and apply AI video effects. Optionally dub into 30+ languages." },
     { title: "Download or Post to Social Media", description: "Export your viral-ready clips or post directly to TikTok, Instagram Reels, and YouTube Shorts from the dashboard." }

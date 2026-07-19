@@ -1,22 +1,41 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Youtube, Upload, FileVideo, X } from 'lucide-react';
 
-export default function MediaInput({ onProcess, isProcessing }) {
+export default function MediaInput({
+    onProcess,
+    isProcessing,
+    resetToken = 0,
+    submitLabel,
+    submittingLabel = 'Job wird eingereiht...',
+    helperText,
+    activeProfileName = '',
+    profileContext = '',
+}) {
     const [mode, setMode] = useState('url'); // 'url' | 'file'
     const [url, setUrl] = useState('');
     const [file, setFile] = useState(null);
     const [interviewMode, setInterviewMode] = useState(false);
-    const [allowLongClips, setAllowLongClips] = useState(false);
     const [maxClips, setMaxClips] = useState(10);
     const [analysisOnly, setAnalysisOnly] = useState(true);
+    const [jobInstructions, setJobInstructions] = useState('');
+    const [destinationUrl, setDestinationUrl] = useState('');
+    const [destinationKeyword, setDestinationKeyword] = useState('Video');
+
+    useEffect(() => {
+        if (!resetToken) return;
+        setUrl('');
+        setFile(null);
+        setJobInstructions('');
+        setDestinationUrl('');
+    }, [resetToken]);
 
     const handleSubmit = (e) => {
         e.preventDefault();
         const normalizedMaxClips = Math.max(1, Number(maxClips) || 10);
         if (mode === 'url' && url) {
-            onProcess({ type: 'url', payload: url, options: { interviewMode, allowLongClips, maxClips: normalizedMaxClips, analysisOnly } });
+            onProcess({ type: 'url', payload: url, options: { interviewMode, allowLongClips: true, maxClips: normalizedMaxClips, analysisOnly, jobInstructions, destinationUrl, destinationKeyword } });
         } else if (mode === 'file' && file) {
-            onProcess({ type: 'file', payload: file, options: { interviewMode, allowLongClips, maxClips: normalizedMaxClips, analysisOnly } });
+            onProcess({ type: 'file', payload: file, options: { interviewMode, allowLongClips: true, maxClips: normalizedMaxClips, analysisOnly, jobInstructions, destinationUrl, destinationKeyword } });
         }
     };
 
@@ -115,20 +134,14 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     </span>
                 </label>
 
-                <label className="mt-3 flex items-start gap-3 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-left">
-                    <input
-                        type="checkbox"
-                        checked={allowLongClips}
-                        onChange={(e) => setAllowLongClips(e.target.checked)}
-                        className="mt-1 h-4 w-4 rounded border-white/20 bg-transparent text-primary focus:ring-primary"
-                    />
+                <div className="mt-3 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-left">
                     <span>
-                        <span className="block text-sm font-medium text-white">Clips ueber 1 Minute erlauben</span>
+                        <span className="block text-sm font-medium text-white">Long-Shorts 1-3 Minuten</span>
                         <span className="block text-xs text-zinc-500">
-                            Laesst bei starken Momenten auch laengere Clips zu. Ueber 60 Sekunden werden sie auf 1:01 bis maximal 1:20 begrenzt.
+                            Die KI sucht standardmaessig zusammenhaengende Mehrwert-Clips zwischen 60 und 180 Sekunden.
                         </span>
                     </span>
-                </label>
+                </div>
 
                 <div className="mt-3 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-left">
                     <label className="block text-sm font-medium text-white mb-2">Maximale Clip-Anzahl</label>
@@ -160,6 +173,45 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     </span>
                 </label>
 
+                <div className="mt-3 space-y-3 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-left">
+                    <div>
+                        <span className="block text-sm font-medium text-white">Redaktioneller Kontext</span>
+                        <span className="block text-xs text-zinc-500">
+                            Profil: {activeProfileName || 'nicht zugeordnet'}{profileContext ? ' · Kanalbeschreibung wird automatisch mitgesendet.' : ''}
+                        </span>
+                    </div>
+                    <textarea
+                        value={jobInstructions}
+                        onChange={(event) => setJobInstructions(event.target.value)}
+                        rows={3}
+                        className="input-field resize-y"
+                        placeholder="Optionale Job-Anweisung, z. B. jedem Titel ein bestimmtes Wort voranstellen oder einen besonderen Schwerpunkt setzen."
+                    />
+                </div>
+
+                <div className="mt-3 space-y-3 rounded-xl border border-emerald-500/15 bg-emerald-500/5 px-4 py-3 text-left">
+                    <div>
+                        <span className="block text-sm font-medium text-white">Kommentar-DM-Link (optional)</span>
+                        <span className="block text-xs text-zinc-500">Beliebige HTTP(S)-URL: Podcast, Tutorial, Website oder Landingpage.</span>
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_140px]">
+                        <input
+                            type="url"
+                            value={destinationUrl}
+                            onChange={(event) => setDestinationUrl(event.target.value)}
+                            className="input-field"
+                            placeholder="https://example.com/inhalt"
+                        />
+                        <input
+                            type="text"
+                            value={destinationKeyword}
+                            onChange={(event) => setDestinationKeyword(event.target.value)}
+                            className="input-field"
+                            placeholder="Video"
+                        />
+                    </div>
+                </div>
+
                 <button
                     type="submit"
                     disabled={isProcessing || (mode === 'url' && !url) || (mode === 'file' && !file)}
@@ -168,14 +220,17 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     {isProcessing ? (
                         <>
                             <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                            Video wird verarbeitet...
+                            {submittingLabel}
                         </>
                     ) : (
                         <>
-                            {analysisOnly ? 'Analysieren & Entwürfe erstellen' : 'Clips erzeugen'}
+                            {submitLabel || (analysisOnly ? 'Analysieren & Entwürfe einreihen' : 'Clips erzeugen & einreihen')}
                         </>
                     )}
                 </button>
+                {helperText && (
+                    <p className="mt-3 text-center text-xs text-zinc-500">{helperText}</p>
+                )}
             </form>
         </div>
     );

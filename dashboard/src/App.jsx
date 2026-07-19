@@ -1,6 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Upload, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield, LayoutGrid, Image, Globe, Loader2, CalendarDays, Clock3, ListFilter, GripVertical } from 'lucide-react';
-import KeyInput from './components/KeyInput';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { Upload, Download, FileVideo, Sparkles, Youtube, Instagram, Share2, LogOut, ChevronDown, Check, Activity, LayoutDashboard, Settings, PlusCircle, History, Menu, X, Terminal, Shield, LayoutGrid, Image, Globe, Loader2, CalendarDays, Clock3, ListFilter, GripVertical, SkipForward, AudioLines, RefreshCcw, RotateCcw } from 'lucide-react';
 import MediaInput from './components/MediaInput';
 import ResultCard from './components/ResultCard';
 import ProcessingAnimation from './components/ProcessingAnimation';
@@ -8,14 +7,20 @@ import ProcessingAnimation from './components/ProcessingAnimation';
 import ThumbnailStudio from './components/ThumbnailStudio';
 import JobHistory from './components/JobHistory';
 import SocialUploadStudio from './components/SocialUploadStudio';
+import LongformVideoEditor from './components/LongformVideoEditor';
+import TranscriptionStudio from './components/TranscriptionStudio';
+import UploadPostCalendarModal from './components/UploadPostCalendarModal';
 import { getApiUrl } from './config';
-import { BACKGROUND_OPTIONS, DEFAULT_HOOK_STYLE, DEFAULT_SUBTITLE_STYLE, FONT_OPTIONS, GRID_OPTIONS, HOOK_WIDTH_OPTIONS } from './overlayOptions';
+import { BACKGROUND_OPTIONS, DEFAULT_HOOK_STYLE, DEFAULT_SUBTITLE_STYLE, FONT_OPTIONS, GRID_OPTIONS, HOOK_WIDTH_OPTIONS, PATTERN_FLASH_MODE_OPTIONS } from './overlayOptions';
 import { DEFAULT_SOCIAL_POST_SETTINGS, INSTAGRAM_SHARE_MODES, SOCIAL_PLATFORM_OPTIONS, TIKTOK_POST_MODES } from './socialOptions';
 
 // Enhanced "Encryption" using XOR + Base64 with a Salt
 // This is better than plain Base64 but still client-side.
 const SECRET_KEY = import.meta.env.VITE_ENCRYPTION_KEY || "OpenShorts-Static-Salt-Change-Me";
 const ENCRYPTION_PREFIX = "ENC:";
+const SETTINGS_EXPORT_FORMAT = 'openshorts-settings';
+const SETTINGS_EXPORT_VERSION = 1;
+const SETTINGS_EXPORT_MAX_BYTES = 2 * 1024 * 1024;
 
 const encrypt = (text) => {
   if (!text) return '';
@@ -57,6 +62,321 @@ const TikTokIcon = ({ size = 16, className = "" }) => (
     <path d="M19.589 6.686a4.793 4.793 0 0 1-3.77-4.245V2h-3.445v13.672a2.896 2.896 0 0 1-5.201 1.743l-.002-.001.002.001a2.895 2.895 0 0 1 3.183-4.51v-3.5a6.329 6.329 0 0 0-5.394 10.692 6.33 6.33 0 0 0 10.857-4.424V8.687a8.182 8.182 0 0 0 4.773 1.526V6.79a4.831 4.831 0 0 1-1.003-.104z" />
   </svg>
 );
+
+const BULK_OPERATION_MODES = {
+  RENDER_AND_POST: 'render+post',
+  RENDER_ONLY: 'render-only',
+  POST_ONLY: 'post-only',
+};
+
+const BULK_OPERATION_CONFIG = {
+  [BULK_OPERATION_MODES.RENDER_AND_POST]: {
+    requiresRender: true,
+    requiresPost: true,
+    label: 'Rendern & planen',
+    successLabel: 'gerendert und fuer die naechsten Slots eingeplant',
+    progressButtonLabel: 'Bearbeite Auswahl...',
+  },
+  [BULK_OPERATION_MODES.RENDER_ONLY]: {
+    requiresRender: true,
+    requiresPost: false,
+    label: 'Nur rendern',
+    successLabel: 'gerendert',
+    progressButtonLabel: 'Rendere Auswahl...',
+  },
+  [BULK_OPERATION_MODES.POST_ONLY]: {
+    requiresRender: false,
+    requiresPost: true,
+    label: 'Nur planen',
+    successLabel: 'fuer die naechsten Slots eingeplant',
+    progressButtonLabel: 'Plane Auswahl...',
+  },
+};
+
+const DEFAULT_NANO_BANANA_THUMBNAIL_PROMPT = `{
+  "task": {
+    "objective": "photo-based composite thumbnail generation",
+    "aspect_ratio": "16:9",
+    "style": "high-end professional real-photo YouTube thumbnail"
+  },
+  "content_preservation": {
+    "source_references": [
+      "Image 1 (Left Person)",
+      "Image 2 (Right Person)"
+    ],
+    "constraints": {
+      "faces": {
+        "priority": "highest",
+        "action": "maintain 1:1 near-identical fidelity to original images",
+        "prohibitions": [
+          "do not change facial structure",
+          "do not change proportions",
+          "do not change skin texture",
+          "do not change hairline",
+          "do not change eyes, nose, mouth, jawline",
+          "do not change identity",
+          "do not change facial expressions",
+          "do not mimic or reinterpret",
+          "do not beautify",
+          "do not stylize",
+          "do not reconstruct",
+          "maintain natural imperfections and asymmetry"
+        ]
+      },
+      "geometry": {
+        "prohibitions": [
+          "do not regenerate faces",
+          "do not change facial geometry",
+          "do not change expression",
+          "do not change head angle",
+          "do not change pose",
+          "do not smooth skin",
+          "do not apply beauty retouching",
+          "do not relight faces in a way that changes structure"
+        ]
+      }
+    }
+  },
+  "technical_enhancements": {
+    "allowed_actions": [
+      "precise background removal with high-detail hair masking",
+      "refined cut-out edges",
+      "cinematic contrast and color grading",
+      "global brightness and contrast correction optimized for facial clarity",
+      "white balance correction",
+      "targeted enhancement of existing mood while preserving realistic depth",
+      "advanced facial sharpening for extreme detail",
+      "color correction for cinematic consistency on faces",
+      "enhance existing mood while preserving realistic depth"
+      "subtle glare reduction on the forehead if applicable",
+      "enhance eye details and catchlights with natural clarity",
+      "color balancing"
+    ]
+  },
+  "lighting": {
+    "style": "high-contrast cinematic and perfectly illuminated faces",
+    "characteristics": [
+      "strong facial clarity as the top visual priority",
+      "soft, sophisticated micro-shadows for depth",
+      "precise, clear catchlights in the eyes",
+      "optimized facial visibility, ensuring no facial details are lost in shadow or look flat"
+    ]
+  },
+  "composition": {
+    "layout": "split-host portrait",
+    "focal_point": "strong visual focus on faces",
+    "framing": {
+      "type": "face close-up portrait"
+    },
+    "positioning": {
+      "person_1": {
+        "source": "Image 1",
+        "placement": "left"
+      },
+      "person_2": {
+        "source": "Image 2",
+        "placement": "right"
+      }
+    },
+    "background": {
+      "type": "smooth #2d92f7 gradient",
+      "style": "clean, minimalist, modern premium podcast/interview aesthetic",
+      "vignette": "subtle, toward the edges",
+      "prohibitions": [
+        "no visible studio elements",
+        "no distracting textures"
+      ]
+    }
+  },
+  "typography": {
+    "headline": {
+      "content": "<text_overlay>",
+      "placement": "center, between the two subjects",
+      "layout": "compact rectangular text block",
+      "lines": "2 to 4 balanced lines based on length",
+      "line_breaks": "avoid awkward or single-word lines",
+      "hierarchy": {
+        "dominant_line": {
+          "criteria": "most important keyword/phrase",
+          "size": "100%"
+        },
+        "supporting_lines": {
+          "size": "60-85%"
+        }
+      },
+      "font": {
+        "style": "bold condensed sans-serif (similar to Impact/Anton/Bebas Neue)",
+        "color": "white",
+        "readability": "subtle dark shadow or soft outline",
+        "spacing": "tight line spacing, slightly condensed letter spacing",
+        "prohibitions": [
+          "no gradients",
+          "no glossy effects",
+          "no flashy colors"
+        ]
+      },
+      "underline": {
+        "type": "minimal, organic, subtle hand-drawn/brush-style",
+        "color": "white or off-white",
+        "placement": "under the dominant final line or key emphasis line ONLY"
+      }
+    }
+  },
+  "lighting": {
+    "style": "high-contrast cinematic",
+    "characteristics": [
+      "strong facial clarity",
+      "soft shadows for depth"
+    ]
+  },
+  "negative_prompt": {
+    "exclusions": [
+      "different person",
+      "altered identity",
+      "changed face",
+      "changed expression",
+      "face reconstruction",
+      "stylized face",
+      "cartoon",
+      "painting",
+      "unrealistic skin",
+      "over-smoothed skin",
+      "beauty retouching",
+      "face swap",
+      "AI-generated face look",
+      "changed head angle",
+      "altered proportions",
+      "synthetic portrait",
+      "face symmetry and pose change not naturally supported by input"
+    ]
+  }
+}`;
+
+const DEFAULT_LONGFORM_THUMBNAIL_PROMPTS = [
+  {
+    id: 'nano_banana_split_host',
+    name: 'Nano Banana Split Host',
+    prompt: DEFAULT_NANO_BANANA_THUMBNAIL_PROMPT,
+  },
+  {
+    id: 'clean_editorial',
+    name: 'Clean Editorial',
+    prompt: 'Erzeuge ein professionelles, modernes YouTube-Thumbnails fuer ein Gespraechsformat. Nutze die Referenzbilder als inhaltliche Basis, aber halte das Layout sauber, glaubwuerdig und hochwertig. Wenig Text, starke Blickrichtung, klare Motivtrennung, praegnante Lichtsetzung und journalistischer Look.',
+  },
+];
+
+const DEFAULT_LONGFORM_THUMBNAIL_MODEL_DEFAULTS = {
+  gemini: 'gemini-3.1-flash-image',
+  openai: 'gpt-image-1',
+  midjourney: 'auto',
+};
+
+const MINIMAX_AUTH_MODE_OPTIONS = [
+  {
+    value: 'token_plan',
+    label: 'Token Plan',
+    description: 'Verwendet den separaten Token-Plan-Key aus deinem MiniMax-Token-Plan. Nicht mit Pay-as-you-go austauschbar.',
+  },
+  {
+    value: 'payg',
+    label: 'Pay-as-you-go',
+    description: 'Verwendet den normalen Open-Platform-API-Key fuer verbrauchsbasierte Abrechnung.',
+  },
+];
+
+const DEFAULT_LONGFORM_AI_DEFAULTS = {
+  provider: 'ollama',
+  ollama_base_url: 'http://127.0.0.1:11434',
+  ollama_model: 'gemma3:12b',
+};
+
+const normalizeLongformAiDefaults = (value) => {
+  const source = value && typeof value === 'object' ? value : {};
+  const provider = String(source.provider || DEFAULT_LONGFORM_AI_DEFAULTS.provider).trim().toLowerCase();
+  return {
+    provider: ['off', 'ollama', 'gemini', 'openai', 'claude', 'minimax'].includes(provider)
+      ? provider
+      : DEFAULT_LONGFORM_AI_DEFAULTS.provider,
+    ollama_base_url: String(source.ollama_base_url || DEFAULT_LONGFORM_AI_DEFAULTS.ollama_base_url).trim() || DEFAULT_LONGFORM_AI_DEFAULTS.ollama_base_url,
+    ollama_model: String(source.ollama_model || DEFAULT_LONGFORM_AI_DEFAULTS.ollama_model).trim() || DEFAULT_LONGFORM_AI_DEFAULTS.ollama_model,
+  };
+};
+
+const THUMBNAIL_MODEL_SUGGESTIONS = {
+  gemini: ['gemini-3.1-flash-image', 'gemini-3.1-flash-image-preview', 'gemini-3-pro-image-preview', 'gemini-2.5-flash-image', 'auto'],
+  openai: ['gpt-image-1'],
+  midjourney: ['auto', 'v7', 'v6.1', 'niji 6'],
+};
+
+const normalizeLongformThumbnailPromptPresets = (value) => {
+  const source = Array.isArray(value) ? value : [];
+  const normalized = source
+    .map((item, index) => ({
+      id: String(item?.id || item?.name || `preset_${index + 1}`).trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '_'),
+      name: String(item?.name || `Preset ${index + 1}`).trim(),
+      prompt: String(item?.prompt || '').trim(),
+    }))
+    .filter((item) => item.name && item.prompt);
+  return normalized.length ? normalized : DEFAULT_LONGFORM_THUMBNAIL_PROMPTS;
+};
+
+const normalizeLongformThumbnailModelDefaults = (value) => {
+  const source = value && typeof value === 'object' ? value : {};
+  const normalizeGeminiModel = (model) => {
+    const normalized = String(model || '').trim();
+    if (!normalized) return DEFAULT_LONGFORM_THUMBNAIL_MODEL_DEFAULTS.gemini;
+    if (normalized === 'gemini-2.5-flash') {
+      return 'gemini-2.5-flash-image';
+    }
+    if (normalized === 'gemini-3.1-flash-image') {
+      return 'gemini-3.1-flash-image-preview';
+    }
+    if (['gemini-3.1-flash-image-preview', 'gemini-3-pro-image-preview', 'gemini-2.5-flash-image'].includes(normalized)) {
+      return normalized;
+    }
+    return normalized;
+  };
+  return {
+    gemini: normalizeGeminiModel(source.gemini || DEFAULT_LONGFORM_THUMBNAIL_MODEL_DEFAULTS.gemini),
+    openai: String(source.openai || DEFAULT_LONGFORM_THUMBNAIL_MODEL_DEFAULTS.openai).trim() || DEFAULT_LONGFORM_THUMBNAIL_MODEL_DEFAULTS.openai,
+    midjourney: String(source.midjourney || DEFAULT_LONGFORM_THUMBNAIL_MODEL_DEFAULTS.midjourney).trim() || DEFAULT_LONGFORM_THUMBNAIL_MODEL_DEFAULTS.midjourney,
+  };
+};
+
+const inferClipVersionOperation = (filename) => {
+  const normalized = String(filename || '').trim().toLowerCase();
+  if (!normalized) return 'original';
+  if (normalized.startsWith('viral_rendered_')) return 'viral_render';
+  if (normalized.startsWith('rendered_')) return 'render';
+  if (normalized.startsWith('subtitled_')) return 'subtitle';
+  if (normalized.startsWith('hook_')) return 'hook';
+  if (normalized.startsWith('edited_')) return 'edit';
+  if (normalized.startsWith('translated_')) return 'translate';
+  if (normalized.startsWith('trimmed_')) return 'trim';
+  return 'original';
+};
+
+const resolveActiveClipVersion = (clip) => {
+  const versions = Array.isArray(clip?.versions) ? clip.versions : [];
+  if (versions.length) {
+    return versions.find((item) => item.id === clip?.active_version_id) || versions[versions.length - 1];
+  }
+  const filename = clip?.video_filename || clip?.video_url?.split('/').pop() || '';
+  if (!filename) return null;
+  return {
+    filename,
+    operation: inferClipVersionOperation(filename),
+  };
+};
+
+const isClipReadyForBulkScheduling = (clip) => {
+  const activeVersion = resolveActiveClipVersion(clip);
+  return !!activeVersion && activeVersion.operation !== 'original';
+};
+
+const isClipRendered = (clip) => {
+  return Boolean(clip?.video_url) || String(clip?.status || '').trim().toLowerCase() === 'completed';
+};
 
 const UserProfileSelector = ({ profiles, selectedUserId, onSelect }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -178,6 +498,27 @@ const readStoredSocialPostSettings = () => {
   }
 };
 
+const DEFAULT_PODCAST_DM_SETTINGS = {
+  relayUrl: '',
+  relayPassword: '',
+  defaultKeyword: 'Video',
+};
+
+const readStoredPodcastDmSettings = () => {
+  try {
+    const raw = localStorage.getItem('podcast_dm_settings_v1');
+    if (!raw) return DEFAULT_PODCAST_DM_SETTINGS;
+    const parsed = JSON.parse(raw);
+    return {
+      ...DEFAULT_PODCAST_DM_SETTINGS,
+      ...parsed,
+      relayPassword: decrypt(parsed.relayPassword || ''),
+    };
+  } catch (e) {
+    return DEFAULT_PODCAST_DM_SETTINGS;
+  }
+};
+
 const JOB_SHORTS_UI_STATE_PREFIX = 'job_shorts_ui_v1:';
 
 const buildJobUiStorageKey = (jobId) => `${JOB_SHORTS_UI_STATE_PREFIX}${jobId}`;
@@ -201,6 +542,31 @@ const writeStoredJobUiState = (jobId, state) => {
   }
 };
 
+const BULK_RUNNING_STATUSES = new Set(['running', 'pause_requested', 'stop_requested']);
+const BULK_RESUMABLE_STATUSES = new Set(['paused', 'partial', 'failed']);
+const GLOBAL_SCHEDULE_BATCH_STORAGE_KEY = 'global_schedule_batch_v1';
+const DEFAULT_PODCAST_COMMENT_TEMPLATE = 'Kommentiere "<keyword>" und wir senden dir den Link zum Podcast zu';
+
+const renderPodcastCommentTemplate = (template, keyword) => String(template || DEFAULT_PODCAST_COMMENT_TEMPLATE)
+  .replace(/<keyword>/gi, String(keyword || 'Video').trim() || 'Video');
+
+const isBulkOperationRunning = (operation) => BULK_RUNNING_STATUSES.has(String(operation?.status || '').toLowerCase());
+const isBulkOperationResumable = (operation) => BULK_RESUMABLE_STATUSES.has(String(operation?.status || '').toLowerCase());
+
+const formatBulkOperationSummary = (operation) => {
+  if (!operation) return '';
+  const completed = Number(operation.completed_count || 0);
+  const rendered = Number(operation.render_completed_count || 0);
+  const posted = Number(operation.post_completed_count || 0);
+  const total = Number(operation.total_count || 0);
+  const phase = String(operation.current_phase || '').toLowerCase();
+  const base = operation.message || '';
+  if (phase === 'render') return `${rendered}/${total} gerendert · Rendering`;
+  if (phase === 'post') return `${posted}/${total} gepostet/eingeplant · Posting`;
+  if (base) return `${completed}/${total} fertig · ${base}`;
+  return `${completed}/${total} fertig`;
+};
+
 const formatDateInputValue = (date = new Date()) => {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -218,7 +584,10 @@ const resolveClipHookDraftText = (clip) => (
   String(clip?.hook_settings?.text || clip?.viral_hook_text || '').trim()
 );
 
-const buildClipSelectionKey = (activeJobId, clip, fallbackIndex) => `${activeJobId}:${clip?.clip_index ?? fallbackIndex}`;
+const buildClipSelectionKey = (activeJobId, clip, fallbackIndex) => {
+  const revision = String(clip?.analysis_revision || 'legacy');
+  return `${activeJobId}:${revision}:${clip?.clip_index ?? fallbackIndex}`;
+};
 
 const isClipPostedOrQueued = (clip) => {
   const status = clip?.social_post_status;
@@ -231,8 +600,17 @@ const isClipPostedOrQueued = (clip) => {
   return (
     pendingCount > 0
     || successCount > 0
-    || ['pending', 'in_progress', 'scheduled', 'completed', 'partial'].includes(normalizedStatus)
+    || ['pending', 'in_progress', 'scheduled', 'upcoming', 'completed', 'partial'].includes(normalizedStatus)
   );
+};
+
+const isClipPostFailed = (clip) => {
+  const status = clip?.social_post_status;
+  if (!status || typeof status !== 'object') return false;
+  const normalizedStatus = String(status.status || '').toLowerCase();
+  const failureCount = Number(status.failure_count || 0);
+  if (normalizedStatus === 'upcoming') return false;
+  return failureCount > 0 || ['failed', 'partial', 'error'].includes(normalizedStatus);
 };
 
 const moveArrayItem = (items, fromIndex, toIndex) => {
@@ -285,16 +663,49 @@ const parseDailyScheduleSlots = (value, { preserveOrder = false } = {}) => {
   });
 };
 
-const buildScheduledPostDates = ({ slotText, count, startDate, dayInterval = 1, staggerSlotsByDay = false }) => {
+const buildScheduledPostDates = ({
+  slotText,
+  count,
+  startDate,
+  dayInterval = 1,
+  staggerSlotsByDay = false,
+  slotOffset = 0,
+}) => {
   const slots = parseDailyScheduleSlots(slotText, { preserveOrder: staggerSlotsByDay });
   const baseDate = new Date(`${startDate || formatDateInputValue()}T00:00:00`);
   if (Number.isNaN(baseDate.getTime())) {
     throw new Error('Ungueltiges Startdatum.');
   }
   const normalizedDayInterval = Math.max(1, Number(dayInterval) || 1);
+  const normalizedSlotOffset = Math.max(0, Number(slotOffset) || 0);
 
   const now = new Date();
   const scheduledDates = [];
+
+  if (normalizedSlotOffset > 0) {
+    for (let scheduleIndex = normalizedSlotOffset; scheduleIndex < normalizedSlotOffset + count; scheduleIndex += 1) {
+      let candidate;
+      if (staggerSlotsByDay) {
+        const slot = slots[scheduleIndex % slots.length];
+        candidate = new Date(baseDate);
+        candidate.setDate(baseDate.getDate() + (scheduleIndex * normalizedDayInterval));
+        candidate.setHours(slot.hours, slot.minutes, 0, 0);
+      } else {
+        const slot = slots[scheduleIndex % slots.length];
+        const dayOffset = Math.floor(scheduleIndex / slots.length) * normalizedDayInterval;
+        candidate = new Date(baseDate);
+        candidate.setDate(baseDate.getDate() + dayOffset);
+        candidate.setHours(slot.hours, slot.minutes, 0, 0);
+      }
+      scheduledDates.push(candidate);
+    }
+
+    if (scheduledDates.some((candidate) => candidate <= now)) {
+      throw new Error('Skip + Startdatum verweisen auf vergangene Slots. Bitte Startdatum anpassen oder Skip verringern.');
+    }
+
+    return scheduledDates;
+  }
 
   if (staggerSlotsByDay) {
     const firstSlot = slots[0];
@@ -382,6 +793,9 @@ const buildHookSettingsPayload = (style, hookText) => {
     width_preset: normalized.widthPreset,
     font_family: normalized.fontFamily,
     background_style: normalized.backgroundStyle,
+    start_zoom_factor: normalized.startZoomFactor,
+    zoom_factor: normalized.zoomFactor,
+    flash_mode: normalized.flashMode,
   };
 };
 
@@ -395,6 +809,60 @@ const normalizeOllamaModelName = (value) => {
     'gemma3-12b:latest': 'gemma3:12b',
   };
   return aliasMap[trimmed.toLowerCase()] || trimmed;
+};
+
+const SHORTFORM_PROVIDER_OPTIONS = [
+  { value: 'gemini', label: 'Gemini' },
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'minimax', label: 'MiniMax' },
+  { value: 'claude', label: 'Claude' },
+  { value: 'ollama', label: 'Ollama' },
+];
+
+const DEFAULT_SHORTFORM_MODELS = {
+  gemini: 'gemini-2.5-flash',
+  openai: 'gpt-4.1-mini',
+  minimax: 'MiniMax-M3',
+  claude: 'claude-3-5-sonnet-latest',
+  ollama: 'llama3.1:8b',
+};
+
+const SHORTFORM_MODEL_SUGGESTIONS = {
+  gemini: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-1.5-pro'],
+  openai: ['gpt-4.1-mini', 'gpt-4.1', 'gpt-4o-mini'],
+  minimax: ['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed', 'MiniMax-M2.5-highspeed', 'MiniMax-M2.5', 'MiniMax-M2.1-highspeed', 'MiniMax-M2.1', 'MiniMax-M2'],
+  claude: ['claude-3-5-sonnet-latest', 'claude-3-7-sonnet-latest'],
+  ollama: ['llama3.1:8b', 'gemma3:12b', 'qwen2.5:14b'],
+};
+
+const normalizeShortformProvider = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return SHORTFORM_PROVIDER_OPTIONS.some((option) => option.value === normalized) ? normalized : 'gemini';
+};
+
+const normalizeShortformModel = (provider, value) => {
+  const normalizedProvider = normalizeShortformProvider(provider);
+  const trimmed = String(value || '').trim();
+  if (!trimmed) {
+    return DEFAULT_SHORTFORM_MODELS[normalizedProvider] || DEFAULT_SHORTFORM_MODELS.gemini;
+  }
+  if (normalizedProvider === 'minimax') {
+    const aliasMap = {
+      'minimax-text-01': 'MiniMax-M3',
+      'minimax-m1': 'MiniMax-M3',
+      'minimax-m2': 'MiniMax-M3',
+      'minimax-m2.1': 'MiniMax-M3',
+      'minimax-m2.1-highspeed': 'MiniMax-M3',
+      'minimax-m2.5': 'MiniMax-M3',
+      'minimax-m2.5-highspeed': 'MiniMax-M3',
+      'minimax-m3': 'MiniMax-M3',
+    };
+    return aliasMap[trimmed.toLowerCase()] || trimmed;
+  }
+  if (normalizedProvider === 'ollama') {
+    return normalizeOllamaModelName(trimmed);
+  }
+  return trimmed;
 };
 
 const TIGHT_EDIT_PRESET_OPTIONS = [
@@ -538,6 +1006,58 @@ const clampFontSize = (value, fallback = DEFAULT_SUBTITLE_STYLE.fontSize) => {
   return Math.max(18, Math.min(44, Math.round(numeric)));
 };
 
+const clampZoomFactor = (value, fallback = DEFAULT_HOOK_STYLE.zoomFactor) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(0, Math.min(2, Math.round(numeric * 100) / 100));
+};
+
+const normalizePatternFlashMode = (value, fallback = DEFAULT_HOOK_STYLE.flashMode || 'every_10s') => {
+  const normalized = String(value || '').trim().toLowerCase().replace(/-/g, '_');
+  const aliases = {
+    off: 'none',
+    false: 'none',
+    disabled: 'none',
+    no: 'none',
+    never: 'none',
+    initial: 'start',
+    beginning: 'start',
+    start_only: 'start',
+    only_start: 'start',
+    '30': 'every_30s',
+    '30s': 'every_30s',
+    every30: 'every_30s',
+    every_30: 'every_30s',
+    very_rare: 'every_30s',
+    sehr_selten: 'every_30s',
+    '20': 'every_20s',
+    '20s': 'every_20s',
+    every20: 'every_20s',
+    every_20: 'every_20s',
+    '10': 'every_10s',
+    '10s': 'every_10s',
+    every10: 'every_10s',
+    every_10: 'every_10s',
+    rare: 'every_10s',
+    selten: 'every_10s',
+    '8': 'every_8s',
+    '8s': 'every_8s',
+    every8: 'every_8s',
+    every_8: 'every_8s',
+    normal: 'every_8s',
+    medium: 'every_8s',
+    '5': 'every_5s',
+    '5s': 'every_5s',
+    every5: 'every_5s',
+    every_5: 'every_5s',
+    frequent: 'every_5s',
+    haeufig: 'every_5s',
+    häufig: 'every_5s',
+  };
+  const candidate = aliases[normalized] || normalized;
+  return PATTERN_FLASH_MODE_OPTIONS.some((option) => option.value === candidate) ? candidate : fallback;
+};
+
 const normalizeSubtitleStyleConfig = (rawStyle = {}) => {
   const normalizedPositionInput = String(rawStyle.position || '').toLowerCase();
   const normalizedPosition = normalizedPositionInput === 'center' ? 'middle' : normalizedPositionInput;
@@ -588,6 +1108,12 @@ const normalizeHookStyleConfig = (rawStyle = {}) => {
   const textAlign = ['left', 'center', 'right'].includes(textAlignInput)
     ? textAlignInput
     : horizontalPosition;
+  const startZoomFactor = clampZoomFactor(rawStyle.startZoomFactor ?? rawStyle.start_zoom_factor, DEFAULT_HOOK_STYLE.startZoomFactor);
+  const zoomFactor = Math.max(
+    clampZoomFactor(rawStyle.zoomFactor ?? rawStyle.zoom_factor, DEFAULT_HOOK_STYLE.zoomFactor),
+    startZoomFactor,
+  );
+  const flashMode = normalizePatternFlashMode(rawStyle.flashMode ?? rawStyle.flash_mode, DEFAULT_HOOK_STYLE.flashMode);
   return {
     ...DEFAULT_HOOK_STYLE,
     ...rawStyle,
@@ -600,6 +1126,9 @@ const normalizeHookStyleConfig = (rawStyle = {}) => {
     widthPreset: widthValues.has(rawWidthPreset) ? rawWidthPreset : DEFAULT_HOOK_STYLE.widthPreset,
     fontFamily: rawFontFamily || DEFAULT_HOOK_STYLE.fontFamily,
     backgroundStyle: rawBackgroundStyle || DEFAULT_HOOK_STYLE.backgroundStyle,
+    startZoomFactor,
+    zoomFactor,
+    flashMode,
   };
 };
 
@@ -842,7 +1371,21 @@ const estimateMobileProcessingProgress = (logs, status, jobState, elapsedSeconds
 
 function App() {
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
-  const [llmProvider, setLlmProvider] = useState(localStorage.getItem('llm_provider') || 'gemini');
+  const [huggingFaceKey, setHuggingFaceKey] = useState(() => localStorage.getItem('huggingface_key') || '');
+  const [openaiKey, setOpenaiKey] = useState(() => localStorage.getItem('openai_key') || '');
+  const [claudeKey, setClaudeKey] = useState(() => localStorage.getItem('claude_key') || '');
+  const [minimaxKey, setMinimaxKey] = useState(() => localStorage.getItem('minimax_key') || '');
+  const [minimaxAuthMode, setMinimaxAuthMode] = useState(() => {
+    const stored = localStorage.getItem('minimax_auth_mode');
+    return stored === 'payg' ? 'payg' : 'token_plan';
+  });
+  const [midjourneyKey, setMidjourneyKey] = useState(() => localStorage.getItem('midjourney_key') || '');
+  const [midjourneyBaseUrl, setMidjourneyBaseUrl] = useState(() => localStorage.getItem('midjourney_base_url') || '');
+  const [llmProvider, setLlmProvider] = useState(() => normalizeShortformProvider(localStorage.getItem('llm_provider') || 'gemini'));
+  const [geminiModel, setGeminiModel] = useState(() => normalizeShortformModel('gemini', localStorage.getItem('gemini_model')));
+  const [openaiModel, setOpenaiModel] = useState(() => normalizeShortformModel('openai', localStorage.getItem('openai_model')));
+  const [claudeModel, setClaudeModel] = useState(() => normalizeShortformModel('claude', localStorage.getItem('claude_model')));
+  const [minimaxModel, setMinimaxModel] = useState(() => normalizeShortformModel('minimax', localStorage.getItem('minimax_model')));
   const [ollamaBaseUrl, setOllamaBaseUrl] = useState(() => {
     const stored = localStorage.getItem('ollama_base_url');
     if (!stored || stored === 'http://host.docker.internal:11434') {
@@ -851,7 +1394,7 @@ function App() {
     return stored;
   });
   const [ollamaModel, setOllamaModelState] = useState(
-    normalizeOllamaModelName(localStorage.getItem('ollama_model') || 'llama3.1:8b')
+    normalizeShortformModel('ollama', localStorage.getItem('ollama_model'))
   );
   // Social API State - Load encrypted or plain
   const [uploadPostKey, setUploadPostKey] = useState(() => {
@@ -870,8 +1413,18 @@ function App() {
     if (stored) return decrypt(stored);
     return '';
   });
+  const [longformThumbnailPromptPresets, setLongformThumbnailPromptPresets] = useState(() =>
+    normalizeLongformThumbnailPromptPresets(readStoredJson('longform_thumbnail_prompt_presets_v1', DEFAULT_LONGFORM_THUMBNAIL_PROMPTS))
+  );
+  const [longformThumbnailModelDefaults, setLongformThumbnailModelDefaults] = useState(() =>
+    normalizeLongformThumbnailModelDefaults(readStoredJson('longform_thumbnail_model_defaults_v1', DEFAULT_LONGFORM_THUMBNAIL_MODEL_DEFAULTS))
+  );
+  const [longformAiDefaults, setLongformAiDefaults] = useState(() =>
+    normalizeLongformAiDefaults(readStoredJson('longform_ai_defaults_v1', DEFAULT_LONGFORM_AI_DEFAULTS))
+  );
 
   const [uploadUserId, setUploadUserId] = useState(() => localStorage.getItem('uploadUserId') || '');
+  const [uploadProfileContexts, setUploadProfileContexts] = useState(() => readStoredJson('upload_profile_contexts_v1', {}));
   const [userProfiles, setUserProfiles] = useState([]); // List of {username, connected: []}
   const [uploadProfileStatus, setUploadProfileStatus] = useState(null); // { type: 'success' | 'error' | 'info', message: string }
   const [jobId, setJobId] = useState(null);
@@ -881,12 +1434,14 @@ function App() {
   const [logs, setLogs] = useState([]);
   const [logsVisible, setLogsVisible] = useState(true);
   const [processingMedia, setProcessingMedia] = useState(null);
-  const [activeTab, setActiveTab] = useState('dashboard'); // dashboard, thumbnails, social-upload, history, settings
+  const [activeTab, setActiveTab] = useState('dashboard'); // dashboard, transcription, thumbnails, social-upload, history, settings
   const [historyJobs, setHistoryJobs] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
+  const [showUnassignedHistoryJobs, setShowUnassignedHistoryJobs] = useState(false);
   const [cancelingJobId, setCancelingJobId] = useState(null);
   const [deletingJobId, setDeletingJobId] = useState(null);
+  const [reanalyzingJobId, setReanalyzingJobId] = useState(null);
   const [overlayProfiles, setOverlayProfiles] = useState(() => readStoredOverlayProfiles());
   const [activeOverlayProfileId, setActiveOverlayProfileId] = useState(() => {
     const stored = sanitizeOverlayProfileId(localStorage.getItem('overlay_active_profile_v1') || '');
@@ -898,6 +1453,8 @@ function App() {
   const [hookStyle, setHookStyle] = useState(() => normalizeHookStyleConfig(readStoredJson('hook_style_v1', DEFAULT_HOOK_STYLE)));
   const [tightEditSettings, setTightEditSettings] = useState(() => readStoredJson('tight_edit_settings_v1', DEFAULT_TIGHT_EDIT_SETTINGS));
   const [socialPostSettings, setSocialPostSettings] = useState(() => readStoredSocialPostSettings());
+  const [podcastDmSettings, setPodcastDmSettings] = useState(() => readStoredPodcastDmSettings());
+  const [isPodcastDmPanelOpen, setIsPodcastDmPanelOpen] = useState(false);
   const [youtubeAuthSettings, setYoutubeAuthSettings] = useState(() => {
     const stored = readStoredJson('youtube_auth_settings_v1', DEFAULT_YOUTUBE_AUTH_SETTINGS);
     const browser = stored.browser && stored.browser !== 'auto' ? stored.browser : detectLikelyBrowser();
@@ -914,9 +1471,12 @@ function App() {
   const [settingsSyncBusy, setSettingsSyncBusy] = useState(false);
   const [settingsSyncStatus, setSettingsSyncStatus] = useState(null);
   const [settingsSyncIncludeYoutubeCookies, setSettingsSyncIncludeYoutubeCookies] = useState(true);
+  const settingsImportInputRef = useRef(null);
+  const [deferPreviewLoading, setDeferPreviewLoading] = useState(() => localStorage.getItem('defer_preview_loading_v1') !== '0');
   const [clipVideoOverrides, setClipVideoOverrides] = useState({});
   const [jobOverlayDefaults, setJobOverlayDefaults] = useState({});
   const [jobSocialDefaults, setJobSocialDefaults] = useState({});
+  const [isPodcastCommentTemplateEditing, setIsPodcastCommentTemplateEditing] = useState(false);
 
   // Sync state for original video playback
   const [syncedTime, setSyncedTime] = useState(0);
@@ -924,16 +1484,24 @@ function App() {
   const [syncTrigger, setSyncTrigger] = useState(0);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isMobileLiveAnalysisOpen, setIsMobileLiveAnalysisOpen] = useState(false);
+  const [isDesktopLiveAnalysisOpen, setIsDesktopLiveAnalysisOpen] = useState(true);
+  const [activeJobAnalysisContext, setActiveJobAnalysisContext] = useState({ profileName: '', profileContext: '', jobInstructions: '' });
+  const [analysisContextSaving, setAnalysisContextSaving] = useState(false);
+  const [isAnalysisContextOpen, setIsAnalysisContextOpen] = useState(false);
   const [processingStartedAt, setProcessingStartedAt] = useState(null);
   const [clipDurationFilter, setClipDurationFilter] = useState('all');
+  const [clipRenderFilter, setClipRenderFilter] = useState('all');
   const [showSelectedOnly, setShowSelectedOnly] = useState(false);
   const [showUnpostedOnly, setShowUnpostedOnly] = useState(false);
+  const [showFailedPostsOnly, setShowFailedPostsOnly] = useState(false);
+  const [hideFillerStarts, setHideFillerStarts] = useState(false);
   const [selectedClipKeys, setSelectedClipKeys] = useState([]);
   const [clipHookDrafts, setClipHookDrafts] = useState({});
   const [bulkScheduleDate, setBulkScheduleDate] = useState(() => formatDateInputValue());
   const [bulkScheduleSlots, setBulkScheduleSlots] = useState('12:00, 15:00, 18:00');
   const [bulkScheduleDayInterval, setBulkScheduleDayInterval] = useState(1);
   const [bulkScheduleStaggerSlotsByDay, setBulkScheduleStaggerSlotsByDay] = useState(false);
+  const [bulkSkipCount, setBulkSkipCount] = useState(0);
   const [bulkFirstComment, setBulkFirstComment] = useState('');
   const [isBulkSettingsOpen, setIsBulkSettingsOpen] = useState(false);
   const [isBulkBarCollapsed, setIsBulkBarCollapsed] = useState(false);
@@ -941,8 +1509,33 @@ function App() {
   const [isBulkScheduling, setIsBulkScheduling] = useState(false);
   const [bulkProgress, setBulkProgress] = useState(null);
   const [bulkStatus, setBulkStatus] = useState(null);
+  const [bulkOperationMode, setBulkOperationMode] = useState(BULK_OPERATION_MODES.RENDER_AND_POST);
+  const [bulkControlBusy, setBulkControlBusy] = useState('');
   const [draggedSelectedClipKey, setDraggedSelectedClipKey] = useState('');
   const [dragOverSelectedClipKey, setDragOverSelectedClipKey] = useState('');
+  const [socialSyncBusy, setSocialSyncBusy] = useState(false);
+  const [socialSyncStatus, setSocialSyncStatus] = useState(null);
+  const [jobRescheduleAllBusy, setJobRescheduleAllBusy] = useState(false);
+  const [isJobCalendarOpen, setIsJobCalendarOpen] = useState(false);
+  const [jobCalendarLoading, setJobCalendarLoading] = useState(false);
+  const [jobCalendarError, setJobCalendarError] = useState('');
+  const [jobCalendarEvents, setJobCalendarEvents] = useState([]);
+  const [isGlobalCalendarOpen, setIsGlobalCalendarOpen] = useState(false);
+  const [globalCalendarLoading, setGlobalCalendarLoading] = useState(false);
+  const [globalCalendarError, setGlobalCalendarError] = useState('');
+  const [globalCalendarEvents, setGlobalCalendarEvents] = useState([]);
+  const [globalCalendarPendingItems, setGlobalCalendarPendingItems] = useState([]);
+  const [globalCalendarVendorComplete, setGlobalCalendarVendorComplete] = useState(false);
+  const [podcastCampaignRepairBusy, setPodcastCampaignRepairBusy] = useState(false);
+  const [podcastCampaignRepairStatus, setPodcastCampaignRepairStatus] = useState(null);
+  const [globalScheduleBatch, setGlobalScheduleBatch] = useState(() => (
+    readStoredJson(GLOBAL_SCHEDULE_BATCH_STORAGE_KEY, null)
+  ));
+  const [queueOverview, setQueueOverview] = useState(null);
+  const [queueSubmitStatus, setQueueSubmitStatus] = useState(null);
+  const [isQueueSubmitting, setIsQueueSubmitting] = useState(false);
+  const [mediaInputResetToken, setMediaInputResetToken] = useState(0);
+  const [isQueuePanelOpen, setIsQueuePanelOpen] = useState(true);
 
   const handleClipPlay = (startTime) => {
     setSyncedTime(startTime);
@@ -994,8 +1587,16 @@ function App() {
 
   useEffect(() => {
     if (!jobId) {
+      setJobCalendarEvents([]);
+      setJobCalendarError('');
+      setIsJobCalendarOpen(false);
+      setSocialSyncStatus(null);
+      setClipDurationFilter('all');
+      setClipRenderFilter('all');
       setShowSelectedOnly(false);
       setShowUnpostedOnly(false);
+      setShowFailedPostsOnly(false);
+      setHideFillerStarts(false);
       setSelectedClipKeys([]);
       setClipHookDrafts({});
       setBulkProgress(null);
@@ -1007,16 +1608,24 @@ function App() {
       setBulkScheduleSlots('12:00, 15:00, 18:00');
       setBulkScheduleDayInterval(1);
       setBulkScheduleStaggerSlotsByDay(false);
+      setBulkSkipCount(0);
       setBulkFirstComment('');
+      setBulkOperationMode(BULK_OPERATION_MODES.RENDER_AND_POST);
       setDragOverSelectedClipKey('');
       setDraggedSelectedClipKey('');
       return;
     }
 
     const stored = readStoredJobUiState(jobId);
+    setSocialSyncStatus(null);
+    setJobCalendarEvents([]);
+    setJobCalendarError('');
     setClipDurationFilter(stored?.clipDurationFilter || 'all');
+    setClipRenderFilter(stored?.clipRenderFilter || 'all');
     setShowSelectedOnly(!!stored?.showSelectedOnly);
     setShowUnpostedOnly(!!stored?.showUnpostedOnly);
+    setShowFailedPostsOnly(!!stored?.showFailedPostsOnly);
+    setHideFillerStarts(!!stored?.hideFillerStarts);
     setSelectedClipKeys(Array.isArray(stored?.selectedClipKeys) ? stored.selectedClipKeys : []);
     setClipHookDrafts(stored?.clipHookDrafts && typeof stored.clipHookDrafts === 'object' ? stored.clipHookDrafts : {});
     setBulkProgress(null);
@@ -1028,13 +1637,28 @@ function App() {
     setBulkScheduleSlots(stored?.bulkScheduleSlots || '12:00, 15:00, 18:00');
     setBulkScheduleDayInterval(Math.max(1, Number(stored?.bulkScheduleDayInterval) || 1));
     setBulkScheduleStaggerSlotsByDay(!!stored?.bulkScheduleStaggerSlotsByDay);
+    setBulkSkipCount(Math.max(0, Number(stored?.bulkSkipCount) || 0));
     setBulkFirstComment(stored?.bulkFirstComment || '');
+    setBulkOperationMode(
+      Object.values(BULK_OPERATION_MODES).includes(stored?.bulkOperationMode)
+        ? stored.bulkOperationMode
+        : BULK_OPERATION_MODES.RENDER_AND_POST
+    );
     setDraggedSelectedClipKey('');
     setDragOverSelectedClipKey('');
   }, [jobId]);
 
   const setOllamaModel = (value) => {
     setOllamaModelState(normalizeOllamaModelName(value));
+  };
+
+  const resolveCurrentProviderStatus = () => {
+    if (llmProvider === 'gemini') return { ready: !!apiKey, label: 'Gemini-Key fehlt' };
+    if (llmProvider === 'openai') return { ready: !!openaiKey, label: 'OpenAI-Key fehlt' };
+    if (llmProvider === 'claude') return { ready: !!claudeKey, label: 'Claude-Key fehlt' };
+    if (llmProvider === 'minimax') return { ready: !!minimaxKey, label: 'MiniMax-Key fehlt' };
+    if (llmProvider === 'ollama') return { ready: !!ollamaBaseUrl && !!ollamaModel, label: 'Ollama-Konfiguration fehlt' };
+    return { ready: true, label: '' };
   };
 
   const getOverlayProfileForId = (profileId) => {
@@ -1223,6 +1847,7 @@ function App() {
     setJobSocialDefaults((prev) => ({
       ...prev,
       [targetJobId]: {
+        ...(prev[targetJobId] || {}),
         instagramCollaborators: normalizedValue,
       },
     }));
@@ -1242,6 +1867,7 @@ function App() {
     setJobSocialDefaults((prev) => ({
       ...prev,
       [targetJobId]: {
+        ...(prev[targetJobId] || {}),
         instagramCollaborators: normalizedValue,
       },
     }));
@@ -1268,6 +1894,7 @@ function App() {
       setJobSocialDefaults((prev) => ({
         ...prev,
         [targetJobId]: {
+          ...(prev[targetJobId] || {}),
           instagramCollaborators: persistedDefaults.instagram_collaborators || '',
         },
       }));
@@ -1287,12 +1914,111 @@ function App() {
     }
   };
 
+  const updatePodcastLinkDraftForJob = (targetJobId, patch = {}) => {
+    if (!targetJobId) return;
+    setJobSocialDefaults((prev) => {
+      const existing = prev[targetJobId] || {};
+      const next = {
+        ...existing,
+        podcastYoutubeUrl: patch.podcastYoutubeUrl !== undefined ? patch.podcastYoutubeUrl : existing.podcastYoutubeUrl || '',
+        podcastKeyword: patch.podcastKeyword !== undefined ? patch.podcastKeyword : existing.podcastKeyword || podcastDmSettings.defaultKeyword || 'Video',
+        podcastCommentTemplate: patch.podcastCommentTemplate !== undefined ? patch.podcastCommentTemplate : existing.podcastCommentTemplate || DEFAULT_PODCAST_COMMENT_TEMPLATE,
+        podcastDmEnabled: patch.podcastDmEnabled !== undefined ? !!patch.podcastDmEnabled : existing.podcastDmEnabled === true,
+      };
+      return {
+        ...prev,
+        [targetJobId]: next,
+      };
+    });
+    setResults((prev) => {
+      if (!prev) return prev;
+      const existingCampaign = prev.job_social_defaults?.podcast_link_campaign || {};
+      return {
+        ...prev,
+        job_social_defaults: {
+          ...(prev.job_social_defaults || {}),
+          podcast_link_campaign: {
+            ...existingCampaign,
+            enabled: patch.podcastDmEnabled !== undefined ? !!patch.podcastDmEnabled : existingCampaign.enabled === true,
+            link_url: patch.podcastYoutubeUrl !== undefined ? patch.podcastYoutubeUrl : existingCampaign.link_url || existingCampaign.youtube_url || '',
+            youtube_url: patch.podcastYoutubeUrl !== undefined ? patch.podcastYoutubeUrl : existingCampaign.youtube_url || '',
+            keyword: patch.podcastKeyword !== undefined ? patch.podcastKeyword : existingCampaign.keyword || podcastDmSettings.defaultKeyword || 'Video',
+            comment_template: patch.podcastCommentTemplate !== undefined ? patch.podcastCommentTemplate : existingCampaign.comment_template || DEFAULT_PODCAST_COMMENT_TEMPLATE,
+          },
+        },
+      };
+    });
+  };
+
+  const applyPodcastLinkToJob = async (targetJobId, values = {}) => {
+    if (!targetJobId) return { success: false, error: new Error('Kein Job aktiv.') };
+    const youtubeUrl = String(values.podcastYoutubeUrl || '').trim();
+    const keyword = String(values.podcastKeyword || podcastDmSettings.defaultKeyword || 'Video').trim() || 'Video';
+    const commentTemplate = String(values.podcastCommentTemplate || DEFAULT_PODCAST_COMMENT_TEMPLATE).trim() || DEFAULT_PODCAST_COMMENT_TEMPLATE;
+    const enabled = values.podcastDmEnabled === true;
+    updatePodcastLinkDraftForJob(targetJobId, {
+      podcastYoutubeUrl: youtubeUrl,
+      podcastKeyword: keyword,
+      podcastCommentTemplate: commentTemplate,
+      podcastDmEnabled: enabled,
+    });
+
+    try {
+      const res = await fetch(getApiUrl('/api/job/social-defaults'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_id: targetJobId,
+          podcast_link_url: youtubeUrl,
+          podcast_keyword: keyword,
+          podcast_comment_template: commentTemplate,
+          podcast_dm_enabled: enabled,
+        }),
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      const campaign = data.job_social_defaults?.podcast_link_campaign || {};
+      setJobSocialDefaults((prev) => ({
+        ...prev,
+        [targetJobId]: {
+          ...(prev[targetJobId] || {}),
+          podcastYoutubeUrl: campaign.link_url || campaign.youtube_url || '',
+          podcastKeyword: campaign.keyword || keyword,
+          podcastCommentTemplate: campaign.comment_template || commentTemplate,
+          podcastDmEnabled: campaign.enabled === true,
+        },
+      }));
+      setResults((prev) => prev ? ({
+        ...prev,
+        job_social_defaults: data.job_social_defaults || prev.job_social_defaults || {},
+      }) : prev);
+      setBulkStatus({
+        type: 'success',
+        message: campaign.link_url
+          ? 'Kommentar-DM-Link fuer diesen Job gespeichert.'
+          : 'Kommentar-DM-Link fuer diesen Job entfernt.',
+      });
+      return { success: true, campaign };
+    } catch (error) {
+      setBulkStatus({ type: 'error', message: `Podcast-Link konnte nicht gespeichert werden: ${error.message}` });
+      return { success: false, error };
+    }
+  };
+
   const activeJobOverlayDefaults = jobId
     ? (jobOverlayDefaults[jobId] || buildOverlayDefaultsForProfile(activeOverlayProfileId))
     : buildOverlayDefaultsForProfile(activeOverlayProfileId);
+  const defaultJobSocialDefaults = {
+    instagramCollaborators: '',
+    podcastYoutubeUrl: '',
+    podcastKeyword: podcastDmSettings.defaultKeyword || 'Video',
+    podcastCommentTemplate: DEFAULT_PODCAST_COMMENT_TEMPLATE,
+    podcastDmEnabled: false,
+  };
   const activeJobSocialDefaults = jobId
-    ? (jobSocialDefaults[jobId] || { instagramCollaborators: '' })
-    : { instagramCollaborators: '' };
+    ? { ...defaultJobSocialDefaults, ...(jobSocialDefaults[jobId] || {}) }
+    : defaultJobSocialDefaults;
+  const activeJobUploadProfile = activeJobAnalysisContext.profileName || uploadUserId;
 
   useEffect(() => {
     if (!jobId || !results?.job_overlay_defaults) return;
@@ -1317,20 +2043,31 @@ function App() {
       setJobSocialDefaults((prev) => ({
         ...prev,
         [jobId]: {
+          ...(prev[jobId] || {}),
           instagramCollaborators: prev[jobId]?.instagramCollaborators || '',
+          podcastYoutubeUrl: prev[jobId]?.podcastYoutubeUrl || '',
+          podcastKeyword: prev[jobId]?.podcastKeyword || podcastDmSettings.defaultKeyword || 'Video',
+          podcastCommentTemplate: prev[jobId]?.podcastCommentTemplate || DEFAULT_PODCAST_COMMENT_TEMPLATE,
+          podcastDmEnabled: prev[jobId]?.podcastDmEnabled === true,
         },
       }));
       return;
     }
+    const campaign = persistedDefaults.podcast_link_campaign || {};
     setJobSocialDefaults((prev) => ({
       ...prev,
       [jobId]: {
+        ...(prev[jobId] || {}),
         instagramCollaborators: persistedDefaults.instagram_collaborators || '',
+        podcastYoutubeUrl: campaign.link_url || campaign.youtube_url || '',
+        podcastKeyword: campaign.keyword || podcastDmSettings.defaultKeyword || 'Video',
+        podcastCommentTemplate: campaign.comment_template || DEFAULT_PODCAST_COMMENT_TEMPLATE,
+        podcastDmEnabled: campaign.enabled === true,
       },
     }));
-  }, [jobId, results?.job_social_defaults]);
+  }, [jobId, results?.job_social_defaults, podcastDmSettings.defaultKeyword]);
 
-  const getClipVariantKey = (activeJobId, clip, fallbackIndex) => `${activeJobId}:${clip.clip_index ?? fallbackIndex}`;
+  const getClipVariantKey = (activeJobId, clip, fallbackIndex) => buildClipSelectionKey(activeJobId, clip, fallbackIndex);
 
   const updateClipVideoOverride = (activeJobId, clip, fallbackIndex, videoUrl) => {
     const key = getClipVariantKey(activeJobId, clip, fallbackIndex);
@@ -1424,8 +2161,12 @@ function App() {
   const filteredClipEntries = clipEntries.filter((entry) => {
     if (clipDurationFilter === 'over_1m' && entry.durationSeconds <= 60) return false;
     if (clipDurationFilter === 'under_1m' && entry.durationSeconds > 60) return false;
+    if (clipRenderFilter === 'rendered' && !isClipRendered(entry.clip)) return false;
+    if (clipRenderFilter === 'unrendered' && isClipRendered(entry.clip)) return false;
     if (showSelectedOnly && !selectedClipKeys.includes(entry.key)) return false;
     if (showUnpostedOnly && isClipPostedOrQueued(entry.clip)) return false;
+    if (showFailedPostsOnly && !isClipPostFailed(entry.clip)) return false;
+    if (hideFillerStarts && Array.isArray(entry.clip?.quality_flags) && entry.clip.quality_flags.some((flag) => flag?.type === 'starts_with_filler')) return false;
     return true;
   });
 
@@ -1501,226 +2242,332 @@ function App() {
   };
 
   const selectedPlatformsForBulk = Object.keys(socialPostSettings.platforms || {}).filter((platform) => socialPostSettings.platforms[platform]);
+  const normalizedBulkSkipCount = Math.max(0, Math.min(selectedClipEntries.length, Number(bulkSkipCount) || 0));
+  const bulkProcessEntries = selectedClipEntries.slice(normalizedBulkSkipCount);
+  const currentBulkOperation = results?.bulk_operation || null;
+  const bulkOperationIsRunning = isBulkOperationRunning(currentBulkOperation);
+  const bulkOperationCanResume = isBulkOperationResumable(currentBulkOperation) && (
+    Number(currentBulkOperation?.completed_count || 0) < Number(currentBulkOperation?.total_count || 0)
+    || Number(currentBulkOperation?.failed_count || 0) > 0
+  );
 
   useEffect(() => {
     if (!jobId) return;
     writeStoredJobUiState(jobId, {
       clipDurationFilter,
+      clipRenderFilter,
       showSelectedOnly,
       showUnpostedOnly,
+      showFailedPostsOnly,
+      hideFillerStarts,
       selectedClipKeys,
       clipHookDrafts,
       bulkScheduleDate,
       bulkScheduleSlots,
       bulkScheduleDayInterval,
       bulkScheduleStaggerSlotsByDay,
+      bulkSkipCount,
       bulkFirstComment,
       isBulkSettingsOpen,
       isBulkBarCollapsed,
       isBulkOrderOpen,
+      bulkOperationMode,
     });
   }, [
     jobId,
     clipDurationFilter,
+    clipRenderFilter,
     showSelectedOnly,
     showUnpostedOnly,
+    showFailedPostsOnly,
+    hideFillerStarts,
     selectedClipKeys,
     clipHookDrafts,
     bulkScheduleDate,
     bulkScheduleSlots,
     bulkScheduleDayInterval,
     bulkScheduleStaggerSlotsByDay,
+    bulkSkipCount,
     bulkFirstComment,
     isBulkSettingsOpen,
     isBulkBarCollapsed,
     isBulkOrderOpen,
+    bulkOperationMode,
   ]);
 
   let bulkSchedulePreview = [];
   let bulkSchedulePreviewError = '';
   try {
-    if (selectedClipKeys.length >= 2) {
+    if (selectedClipKeys.length >= 2 && bulkProcessEntries.length > 0) {
       bulkSchedulePreview = buildScheduledPostDates({
         slotText: bulkScheduleSlots,
-        count: Math.min(selectedClipKeys.length, 4),
+        count: Math.min(20, bulkProcessEntries.length),
         startDate: bulkScheduleDate,
         dayInterval: bulkScheduleDayInterval,
         staggerSlotsByDay: bulkScheduleStaggerSlotsByDay,
+        slotOffset: normalizedBulkSkipCount,
       });
     }
   } catch (error) {
     bulkSchedulePreviewError = error.message;
   }
 
-  const showBulkActionsBar = activeTab === 'dashboard' && status === 'complete' && selectedClipKeys.length >= 2;
+  const showBulkActionsBar = activeTab === 'dashboard' && status === 'complete' && (
+    selectedClipKeys.length >= 2
+    || (currentBulkOperation && (bulkOperationIsRunning || bulkOperationCanResume))
+  );
 
-  const handleBulkRenderAndSchedule = async () => {
+  const mergeBulkOperationIntoResults = (bulkOperation) => {
+    if (!bulkOperation) return;
+    setResults((prev) => prev ? ({
+      ...prev,
+      bulk_operation: bulkOperation,
+    }) : prev);
+  };
+
+  const buildBulkRuntimePayload = () => ({
+    provider: llmProvider,
+    gemini_api_key: apiKey || undefined,
+    openai_api_key: openaiKey || undefined,
+    openai_model: openaiModel || undefined,
+    claude_api_key: claudeKey || undefined,
+    claude_model: claudeModel || undefined,
+    minimax_api_key: minimaxKey || undefined,
+    minimax_auth_mode: minimaxAuthMode || undefined,
+    minimax_model: minimaxModel || undefined,
+    gemini_model: geminiModel || undefined,
+    ollama_base_url: ollamaBaseUrl || undefined,
+    ollama_model: ollamaModel || undefined,
+    pexels_api_key: pexelsKey || undefined,
+    upload_post_api_key: uploadPostKey || undefined,
+    upload_post_user_id: uploadUserId || undefined,
+    podcast_dm_relay_url: podcastDmSettings.relayUrl || undefined,
+    podcast_dm_relay_password: podcastDmSettings.relayPassword || undefined,
+  });
+
+  const handleBulkAction = async (operationMode = BULK_OPERATION_MODES.RENDER_AND_POST) => {
+    const operationConfig = BULK_OPERATION_CONFIG[operationMode] || BULK_OPERATION_CONFIG[BULK_OPERATION_MODES.RENDER_AND_POST];
+    const { requiresRender, requiresPost, label } = operationConfig;
+
+    setBulkOperationMode(operationMode);
+
     if (!jobId) {
       setBulkStatus({ type: 'error', message: 'Kein aktiver Job geladen.' });
+      return;
+    }
+    if (bulkOperationIsRunning) {
+      setBulkStatus({ type: 'error', message: 'Es laeuft bereits ein Multi-Post-Task. Bitte zuerst pausieren oder stoppen.' });
+      return;
+    }
+    if (bulkOperationCanResume) {
+      setBulkStatus({ type: 'warning', message: 'Dieser Job hat noch einen pausierten oder unvollstaendigen Multi-Post. Bitte zuerst fortsetzen oder stoppen.' });
       return;
     }
     if (selectedClipEntries.length < 2) {
       setBulkStatus({ type: 'error', message: 'Bitte mindestens zwei Shorts auswaehlen.' });
       return;
     }
-    if (!uploadPostKey || !uploadUserId) {
+    if (!bulkProcessEntries.length) {
+      setBulkStatus({ type: 'error', message: 'Der Skip-Wert ueberspringt bereits alle ausgewaehlten Shorts.' });
+      return;
+    }
+    if (requiresPost && (!uploadPostKey || !uploadUserId)) {
       setBulkStatus({ type: 'error', message: 'Upload-Post API-Key oder Profil fehlt.' });
       return;
     }
-    if (!selectedPlatformsForBulk.length) {
+    if (requiresPost && !selectedPlatformsForBulk.length) {
       setBulkStatus({ type: 'error', message: 'Bitte mindestens eine Plattform auswaehlen.' });
       return;
     }
-    if (selectedPlatformsForBulk.includes('pinterest') && !(socialPostSettings.pinterestBoardId || '').trim()) {
+    if (requiresPost && selectedPlatformsForBulk.includes('pinterest') && !(socialPostSettings.pinterestBoardId || '').trim()) {
       setBulkStatus({ type: 'error', message: 'Pinterest benoetigt eine Board-ID.' });
       return;
     }
 
-    let scheduledDates;
-    try {
-      scheduledDates = buildScheduledPostDates({
-        slotText: bulkScheduleSlots,
-        count: selectedClipEntries.length,
-        startDate: bulkScheduleDate,
-        dayInterval: bulkScheduleDayInterval,
-        staggerSlotsByDay: bulkScheduleStaggerSlotsByDay,
-      });
-    } catch (error) {
-      setBulkStatus({ type: 'error', message: error.message });
-      return;
+    let scheduledDates = [];
+    if (requiresPost) {
+      try {
+        scheduledDates = buildScheduledPostDates({
+          slotText: bulkScheduleSlots,
+          count: bulkProcessEntries.length,
+          startDate: bulkScheduleDate,
+          dayInterval: bulkScheduleDayInterval,
+          staggerSlotsByDay: bulkScheduleStaggerSlotsByDay,
+          slotOffset: normalizedBulkSkipCount,
+        });
+      } catch (error) {
+        setBulkStatus({ type: 'error', message: error.message });
+        return;
+      }
     }
 
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-    const failedSelections = [];
-    const succeededSelections = [];
+    const invalidHookEntry = requiresRender
+      ? bulkProcessEntries.find((entry) => !String(entry.hookDraftText || '').trim())
+      : null;
+    if (invalidHookEntry) {
+      setBulkStatus({
+        type: 'error',
+        message: `Hook-Text fehlt bei Clip ${(invalidHookEntry.index || 0) + 1}.`,
+      });
+      return;
+    }
 
     setIsBulkScheduling(true);
     setBulkStatus(null);
     setIsBulkSettingsOpen(false);
 
-    for (let position = 0; position < selectedClipEntries.length; position += 1) {
-      const entry = selectedClipEntries[position];
-      const hookText = String(entry.hookDraftText || '').trim();
-      const clipLabel = `Clip ${entry.index + 1}`;
-
-      if (!hookText) {
-        failedSelections.push({ key: entry.key, label: clipLabel, error: 'Hook-Text ist leer.' });
-        continue;
-      }
-
-      try {
-        setBulkProgress({
-          current: position + 1,
-          total: selectedClipEntries.length,
-          label: clipLabel,
-          phase: 'render',
-        });
-        setClipHookDrafts((prev) => ({ ...prev, [entry.key]: hookText }));
-
-        const renderRes = await fetch(getApiUrl('/api/clip/render'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            job_id: jobId,
+    try {
+      const res = await fetch(getApiUrl('/api/bulk-operation/start'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_id: jobId,
+          mode: operationMode,
+          items: bulkProcessEntries.map((entry, position) => ({
             clip_index: entry.clip.clip_index ?? entry.index,
+            clip_label: entry.clip.video_title_for_youtube_short || `Clip ${entry.index + 1}`,
+            hook_text: String(entry.hookDraftText || '').trim(),
+            scheduled_date: requiresPost ? scheduledDates[position].toISOString() : undefined,
+          })),
+          render: {
             apply_tight_edit: true,
             tight_edit_preset: tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset,
             apply_subtitles: true,
             subtitle_settings: buildSubtitleSettingsPayload(activeJobOverlayDefaults.subtitleStyle),
             apply_hook: true,
-            hook_settings: buildHookSettingsPayload(activeJobOverlayDefaults.hookStyle, hookText),
-          }),
-        });
-
-        if (!renderRes.ok) {
-          throw new Error(await readErrorMessage(renderRes));
-        }
-
-        const renderData = await renderRes.json();
-        const renderedClip = renderData.clip || entry.clip;
-        updateClipResult(jobId, renderedClip);
-
-        setBulkProgress({
-          current: position + 1,
-          total: selectedClipEntries.length,
-          label: clipLabel,
-          phase: 'schedule',
-        });
-
-        const postRes = await fetch(getApiUrl('/api/social/post'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            job_id: jobId,
-            clip_index: renderedClip.clip_index ?? entry.index,
-            api_key: uploadPostKey,
-            user_id: uploadUserId,
+            hook_style: activeJobOverlayDefaults.hookStyle,
+            pattern_flash_mode: activeJobOverlayDefaults.hookStyle?.flashMode || DEFAULT_HOOK_STYLE.flashMode,
+            apply_stock_overlay: false,
+          },
+          post: {
             platforms: selectedPlatformsForBulk,
             first_comment: bulkFirstComment,
-            scheduled_date: scheduledDates[position].toISOString(),
             timezone,
             instagram_share_mode: socialPostSettings.instagramShareMode,
-            instagram_collaborators: String(
-              renderedClip.instagram_collaborators || activeJobSocialDefaults.instagramCollaborators || ''
-            ).trim() || undefined,
             tiktok_post_mode: socialPostSettings.tiktokPostMode,
             tiktok_is_aigc: socialPostSettings.tiktokIsAigc,
             facebook_page_id: socialPostSettings.facebookPageId,
             pinterest_board_id: socialPostSettings.pinterestBoardId,
-          }),
-        });
-
-        if (!postRes.ok) {
-          throw new Error(await readErrorMessage(postRes));
-        }
-
-        const postData = await postRes.json();
-        if (postData.clip) {
-          updateClipResult(jobId, postData.clip);
-        }
-        succeededSelections.push(entry.key);
-      } catch (error) {
-        failedSelections.push({
-          key: entry.key,
-          label: clipLabel,
-          error: error.message || 'Unbekannter Fehler',
-        });
-      }
-    }
-
-    setIsBulkScheduling(false);
-    setBulkProgress(null);
-
-    if (failedSelections.length) {
-      setSelectedClipKeys(failedSelections.map((entry) => entry.key));
-      setBulkStatus({
-        type: succeededSelections.length ? 'warning' : 'error',
-        message: succeededSelections.length
-          ? `${succeededSelections.length} Shorts geplant, ${failedSelections.length} fehlgeschlagen. ${failedSelections.slice(0, 2).map((entry) => `${entry.label}: ${entry.error}`).join(' | ')}`
-          : failedSelections.slice(0, 3).map((entry) => `${entry.label}: ${entry.error}`).join(' | '),
+          },
+          runtime: buildBulkRuntimePayload(),
+        }),
       });
-      return;
-    }
 
-    setSelectedClipKeys([]);
-    setBulkStatus({
-      type: 'success',
-      message: `${succeededSelections.length} Shorts gerendert und fuer die naechsten Slots eingeplant.`,
-    });
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res));
+      }
+
+      const data = await res.json();
+      mergeBulkOperationIntoResults(data.bulk_operation);
+      setBulkProgress(null);
+      setBulkStatus({
+        type: 'success',
+        message: `${label} wurde als fortsetzbarer Backend-Task gestartet.${normalizedBulkSkipCount ? ` ${normalizedBulkSkipCount} zuvor uebersprungen.` : ''}`,
+      });
+    } catch (error) {
+      setBulkStatus({ type: 'error', message: error.message || `${label} konnte nicht gestartet werden.` });
+    } finally {
+      setIsBulkScheduling(false);
+    }
   };
 
-  const buildProviderHeaders = (includeJson = false) => {
+  const handlePauseBulkOperation = async () => {
+    if (!jobId || !currentBulkOperation) return;
+    setBulkControlBusy('pause');
+    try {
+      const res = await fetch(getApiUrl(`/api/bulk-operation/${jobId}/pause`), {
+        method: 'POST',
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      mergeBulkOperationIntoResults(data.bulk_operation);
+      setBulkStatus({ type: 'success', message: 'Multi-Post wird nach dem aktuellen Schritt pausiert.' });
+    } catch (error) {
+      setBulkStatus({ type: 'error', message: error.message || 'Multi-Post konnte nicht pausiert werden.' });
+    } finally {
+      setBulkControlBusy('');
+    }
+  };
+
+  const handleResumeBulkOperation = async () => {
+    if (!jobId || !currentBulkOperation) return;
+    setBulkControlBusy('resume');
+    try {
+      const res = await fetch(getApiUrl(`/api/bulk-operation/${jobId}/resume`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          runtime: buildBulkRuntimePayload(),
+        }),
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      mergeBulkOperationIntoResults(data.bulk_operation);
+      setBulkStatus({ type: 'success', message: 'Multi-Post wird fortgesetzt.' });
+    } catch (error) {
+      setBulkStatus({ type: 'error', message: error.message || 'Multi-Post konnte nicht fortgesetzt werden.' });
+    } finally {
+      setBulkControlBusy('');
+    }
+  };
+
+  const handleStopBulkOperation = async () => {
+    if (!jobId || !currentBulkOperation) return;
+    setBulkControlBusy('stop');
+    try {
+      const res = await fetch(getApiUrl(`/api/bulk-operation/${jobId}/stop`), {
+        method: 'POST',
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      mergeBulkOperationIntoResults(data.bulk_operation);
+      setBulkStatus({ type: 'warning', message: 'Multi-Post wurde gestoppt. Du kannst jetzt eine neue Multi-Post-Serie starten.' });
+    } catch (error) {
+      setBulkStatus({ type: 'error', message: error.message || 'Multi-Post konnte nicht gestoppt werden.' });
+    } finally {
+      setBulkControlBusy('');
+    }
+  };
+
+  const buildProviderHeaders = (includeJson = false, providerOverride = null) => {
+    const resolvedProvider = normalizeShortformProvider(providerOverride || llmProvider);
     const headers = {
-      'X-LLM-Provider': llmProvider
+      'X-LLM-Provider': resolvedProvider
     };
 
-    if (llmProvider === 'gemini' && apiKey) {
+    if (resolvedProvider === 'gemini' && apiKey) {
       headers['X-Gemini-Key'] = apiKey;
+      if (geminiModel) headers['X-Gemini-Model'] = geminiModel;
     }
 
-    if (llmProvider === 'ollama') {
+    if (resolvedProvider === 'openai' && openaiKey) {
+      headers['X-OpenAI-Key'] = openaiKey;
+      if (openaiModel) headers['X-OpenAI-Model'] = openaiModel;
+    }
+
+    if (resolvedProvider === 'claude' && claudeKey) {
+      headers['X-Claude-Key'] = claudeKey;
+      if (claudeModel) headers['X-Claude-Model'] = claudeModel;
+    }
+
+    if (resolvedProvider === 'minimax' && minimaxKey) {
+      headers['X-Minimax-Key'] = minimaxKey;
+      headers['X-Minimax-Auth-Mode'] = minimaxAuthMode;
+      if (minimaxModel) headers['X-Minimax-Model'] = minimaxModel;
+    }
+
+    if (resolvedProvider === 'ollama') {
       headers['X-Ollama-Base-Url'] = ollamaBaseUrl;
       headers['X-Ollama-Model'] = ollamaModel;
+    }
+
+    if (pexelsKey) {
+      headers['X-Pexels-Key'] = pexelsKey;
+    }
+
+    if (huggingFaceKey) {
+      headers['X-HuggingFace-Key'] = huggingFaceKey;
     }
 
     if (includeJson) {
@@ -1827,7 +2674,18 @@ function App() {
 
   const collectSyncSettings = () => ({
     apiKey,
+    huggingFaceKey,
+    openaiKey,
+    claudeKey,
+    minimaxKey,
+    minimaxAuthMode,
+    midjourneyKey,
+    midjourneyBaseUrl,
     llmProvider,
+    geminiModel,
+    openaiModel,
+    claudeModel,
+    minimaxModel,
     ollamaBaseUrl,
     ollamaModel,
     uploadPostKey,
@@ -1840,14 +2698,31 @@ function App() {
     activeOverlayProfileId,
     tightEditSettings,
     socialPostSettings,
+    podcastDmSettings,
     youtubeAuthSettings,
+    uploadProfileContexts,
+    deferPreviewLoading,
+    longformThumbnailPromptPresets,
+    longformThumbnailModelDefaults,
+    longformAiDefaults,
   });
 
   const applySyncedSettings = (payload) => {
     if (!payload || typeof payload !== 'object') return;
 
     if (typeof payload.apiKey === 'string') setApiKey(payload.apiKey);
-    if (payload.llmProvider === 'gemini' || payload.llmProvider === 'ollama') setLlmProvider(payload.llmProvider);
+    if (typeof payload.huggingFaceKey === 'string') setHuggingFaceKey(payload.huggingFaceKey);
+    if (typeof payload.openaiKey === 'string') setOpenaiKey(payload.openaiKey);
+    if (typeof payload.claudeKey === 'string') setClaudeKey(payload.claudeKey);
+    if (typeof payload.minimaxKey === 'string') setMinimaxKey(payload.minimaxKey);
+    if (payload.minimaxAuthMode === 'token_plan' || payload.minimaxAuthMode === 'payg') setMinimaxAuthMode(payload.minimaxAuthMode);
+    if (typeof payload.midjourneyKey === 'string') setMidjourneyKey(payload.midjourneyKey);
+    if (typeof payload.midjourneyBaseUrl === 'string') setMidjourneyBaseUrl(payload.midjourneyBaseUrl);
+    if (payload.llmProvider) setLlmProvider(normalizeShortformProvider(payload.llmProvider));
+    if (typeof payload.geminiModel === 'string') setGeminiModel(normalizeShortformModel('gemini', payload.geminiModel));
+    if (typeof payload.openaiModel === 'string') setOpenaiModel(normalizeShortformModel('openai', payload.openaiModel));
+    if (typeof payload.claudeModel === 'string') setClaudeModel(normalizeShortformModel('claude', payload.claudeModel));
+    if (typeof payload.minimaxModel === 'string') setMinimaxModel(normalizeShortformModel('minimax', payload.minimaxModel));
     if (typeof payload.ollamaBaseUrl === 'string' && payload.ollamaBaseUrl.trim()) setOllamaBaseUrl(payload.ollamaBaseUrl);
     if (typeof payload.ollamaModel === 'string' && payload.ollamaModel.trim()) setOllamaModel(payload.ollamaModel);
     if (typeof payload.uploadPostKey === 'string') setUploadPostKey(payload.uploadPostKey);
@@ -1881,12 +2756,121 @@ function App() {
         },
       });
     }
+    if (payload.podcastDmSettings && typeof payload.podcastDmSettings === 'object') {
+      setPodcastDmSettings({
+        ...DEFAULT_PODCAST_DM_SETTINGS,
+        ...payload.podcastDmSettings,
+      });
+    }
     if (payload.youtubeAuthSettings && typeof payload.youtubeAuthSettings === 'object') {
       setYoutubeAuthSettings({
         ...DEFAULT_YOUTUBE_AUTH_SETTINGS,
         ...payload.youtubeAuthSettings,
         browser: payload.youtubeAuthSettings.browser || detectLikelyBrowser(),
       });
+    }
+    if (payload.uploadProfileContexts && typeof payload.uploadProfileContexts === 'object' && !Array.isArray(payload.uploadProfileContexts)) {
+      setUploadProfileContexts(payload.uploadProfileContexts);
+    }
+    if (typeof payload.deferPreviewLoading === 'boolean') {
+      setDeferPreviewLoading(payload.deferPreviewLoading);
+    }
+    if (Array.isArray(payload.longformThumbnailPromptPresets)) {
+      setLongformThumbnailPromptPresets(normalizeLongformThumbnailPromptPresets(payload.longformThumbnailPromptPresets));
+    }
+    if (payload.longformThumbnailModelDefaults && typeof payload.longformThumbnailModelDefaults === 'object') {
+      setLongformThumbnailModelDefaults(normalizeLongformThumbnailModelDefaults(payload.longformThumbnailModelDefaults));
+    }
+    if (payload.longformAiDefaults && typeof payload.longformAiDefaults === 'object') {
+      setLongformAiDefaults(normalizeLongformAiDefaults(payload.longformAiDefaults));
+    }
+  };
+
+  const exportSettingsToFile = () => {
+    const confirmed = window.confirm(
+      'Die Exportdatei enthält deine API-Schlüssel und das Relay-Passwort im Klartext. Nur sicher speichern und nicht weitergeben. Fortfahren?'
+    );
+    if (!confirmed) return;
+
+    try {
+      const settings = collectSyncSettings();
+      if (!settingsSyncIncludeYoutubeCookies && settings.youtubeAuthSettings) {
+        settings.youtubeAuthSettings = {
+          ...settings.youtubeAuthSettings,
+          cookiesText: '',
+        };
+      }
+      const payload = {
+        format: SETTINGS_EXPORT_FORMAT,
+        version: SETTINGS_EXPORT_VERSION,
+        exported_at: new Date().toISOString(),
+        contains_secrets: true,
+        includes_projects: false,
+        includes_youtube_cookies: Boolean(
+          settingsSyncIncludeYoutubeCookies && settings.youtubeAuthSettings?.cookiesText
+        ),
+        settings,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const date = new Date().toISOString().slice(0, 10);
+      link.href = url;
+      link.download = `openshorts-settings-${date}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setSettingsSyncStatus({
+        type: 'success',
+        message: 'Einstellungen exportiert. Projekte, Jobs und Medien sind nicht enthalten.',
+      });
+    } catch (error) {
+      setSettingsSyncStatus({
+        type: 'error',
+        message: error.message || 'Einstellungen konnten nicht exportiert werden.',
+      });
+    }
+  };
+
+  const importSettingsFromFile = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (file.size > SETTINGS_EXPORT_MAX_BYTES) {
+      setSettingsSyncStatus({ type: 'error', message: 'Die Einstellungsdatei ist größer als 2 MB.' });
+      return;
+    }
+
+    setSettingsSyncBusy(true);
+    setSettingsSyncStatus({ type: 'info', message: 'Einstellungsdatei wird geprüft...' });
+    try {
+      const payload = JSON.parse(await file.text());
+      if (!payload || payload.format !== SETTINGS_EXPORT_FORMAT) {
+        throw new Error('Keine gültige OpenShorts-Einstellungsdatei.');
+      }
+      if (Number(payload.version) !== SETTINGS_EXPORT_VERSION) {
+        throw new Error(`Nicht unterstützte Einstellungsdatei-Version: ${payload.version ?? 'unbekannt'}.`);
+      }
+      if (!payload.settings || typeof payload.settings !== 'object' || Array.isArray(payload.settings)) {
+        throw new Error('Die Einstellungsdatei enthält keinen gültigen Settings-Block.');
+      }
+      applySyncedSettings(payload.settings);
+      setSettingsSyncStatus({
+        type: 'success',
+        message: payload.includes_youtube_cookies
+          ? 'Einstellungen inklusive YouTube-Cookies importiert. Projekte wurden nicht übernommen.'
+          : 'Einstellungen importiert. Projekte wurden nicht übernommen.',
+      });
+    } catch (error) {
+      setSettingsSyncStatus({
+        type: 'error',
+        message: error instanceof SyntaxError
+          ? 'Die ausgewählte Datei ist kein gültiges JSON.'
+          : (error.message || 'Einstellungen konnten nicht importiert werden.'),
+      });
+    } finally {
+      setSettingsSyncBusy(false);
     }
   };
 
@@ -2004,10 +2988,48 @@ function App() {
   }, [apiKey]);
 
   useEffect(() => {
+    if (huggingFaceKey) localStorage.setItem('huggingface_key', huggingFaceKey);
+    else localStorage.removeItem('huggingface_key');
+  }, [huggingFaceKey]);
+
+  useEffect(() => {
+    if (openaiKey) localStorage.setItem('openai_key', openaiKey);
+    else localStorage.removeItem('openai_key');
+  }, [openaiKey]);
+
+  useEffect(() => {
+    if (claudeKey) localStorage.setItem('claude_key', claudeKey);
+    else localStorage.removeItem('claude_key');
+  }, [claudeKey]);
+
+  useEffect(() => {
+    if (minimaxKey) localStorage.setItem('minimax_key', minimaxKey);
+    else localStorage.removeItem('minimax_key');
+  }, [minimaxKey]);
+
+  useEffect(() => {
+    localStorage.setItem('minimax_auth_mode', minimaxAuthMode);
+  }, [minimaxAuthMode]);
+
+  useEffect(() => {
+    if (midjourneyKey) localStorage.setItem('midjourney_key', midjourneyKey);
+    else localStorage.removeItem('midjourney_key');
+  }, [midjourneyKey]);
+
+  useEffect(() => {
+    if (midjourneyBaseUrl) localStorage.setItem('midjourney_base_url', midjourneyBaseUrl);
+    else localStorage.removeItem('midjourney_base_url');
+  }, [midjourneyBaseUrl]);
+
+  useEffect(() => {
     localStorage.setItem('llm_provider', llmProvider);
+    localStorage.setItem('gemini_model', geminiModel);
+    localStorage.setItem('openai_model', openaiModel);
+    localStorage.setItem('claude_model', claudeModel);
+    localStorage.setItem('minimax_model', minimaxModel);
     localStorage.setItem('ollama_base_url', ollamaBaseUrl);
     localStorage.setItem('ollama_model', ollamaModel);
-  }, [llmProvider, ollamaBaseUrl, ollamaModel]);
+  }, [claudeModel, geminiModel, llmProvider, minimaxModel, ollamaBaseUrl, ollamaModel, openaiModel]);
 
   useEffect(() => {
     localStorage.setItem('subtitle_style_v1', JSON.stringify(subtitleStyle));
@@ -2026,8 +3048,31 @@ function App() {
   }, [socialPostSettings]);
 
   useEffect(() => {
+    localStorage.setItem('podcast_dm_settings_v1', JSON.stringify({
+      ...podcastDmSettings,
+      relayPassword: encrypt(podcastDmSettings.relayPassword || ''),
+    }));
+  }, [podcastDmSettings]);
+
+  useEffect(() => {
+    localStorage.setItem('upload_profile_contexts_v1', JSON.stringify(uploadProfileContexts));
+  }, [uploadProfileContexts]);
+
+  useEffect(() => {
     localStorage.setItem('youtube_auth_settings_v1', JSON.stringify(youtubeAuthSettings));
   }, [youtubeAuthSettings]);
+
+  useEffect(() => {
+    localStorage.setItem('longform_thumbnail_prompt_presets_v1', JSON.stringify(longformThumbnailPromptPresets));
+  }, [longformThumbnailPromptPresets]);
+
+  useEffect(() => {
+    localStorage.setItem('longform_thumbnail_model_defaults_v1', JSON.stringify(longformThumbnailModelDefaults));
+  }, [longformThumbnailModelDefaults]);
+
+  useEffect(() => {
+    localStorage.setItem('longform_ai_defaults_v1', JSON.stringify(longformAiDefaults));
+  }, [longformAiDefaults]);
 
   useEffect(() => {
     if (uploadPostKey) {
@@ -2053,6 +3098,15 @@ function App() {
   }, [pexelsKey]);
 
   useEffect(() => {
+    localStorage.setItem('defer_preview_loading_v1', deferPreviewLoading ? '1' : '0');
+  }, [deferPreviewLoading]);
+
+  useEffect(() => {
+    if (status === 'processing') setIsDesktopLiveAnalysisOpen(true);
+    if (status === 'complete') setIsDesktopLiveAnalysisOpen(false);
+  }, [status]);
+
+  useEffect(() => {
     if (uploadPostKey && userProfiles.length === 0) {
       fetchUserProfiles();
     }
@@ -2066,15 +3120,20 @@ function App() {
 
   useEffect(() => {
     let interval;
-    if (status === 'processing' && jobId) {
+    const shouldPollCurrentJob = !!jobId && (status === 'processing' || bulkOperationIsRunning);
+    if (shouldPollCurrentJob) {
       interval = setInterval(async () => {
         try {
           const data = await pollJob(jobId);
           console.log("Job status:", data);
 
-          // Update results if available (real-time)
           if (data.result) {
             setResults(data.result);
+          } else if (data.bulk_operation) {
+            setResults((prev) => prev ? ({
+              ...prev,
+              bulk_operation: data.bulk_operation,
+            }) : prev);
           }
           if (data.logs) {
             setLogs(data.logs);
@@ -2082,13 +3141,23 @@ function App() {
           if (data.job_state) {
             setJobState(data.job_state);
           }
+          if (data.queue) {
+            setQueueOverview(data.queue);
+          }
+          if (data.analysis_context) {
+            setActiveJobAnalysisContext({
+              profileName: data.analysis_context.profile_name || '',
+              profileContext: data.analysis_context.profile_context || '',
+              jobInstructions: data.analysis_context.job_instructions || '',
+            });
+          }
 
           const normalizedJobState = String(data.job_state || '').toLowerCase();
+          const normalizedBulkStatus = String((data.bulk_operation || data.result?.bulk_operation || {}).status || '').toLowerCase();
 
           if (data.status === 'completed' || normalizedJobState === 'completed' || normalizedJobState === 'partial') {
             setStatus('complete');
             setJobState(data.job_state || 'completed');
-            clearInterval(interval);
           } else if (
             data.status === 'failed' ||
             data.status === 'cancelled' ||
@@ -2099,6 +3168,12 @@ function App() {
             const errorMsg = data.error || (data.logs && data.logs.length > 0 ? data.logs[data.logs.length - 1] : "Process failed");
             setLogs(prev => [...prev, "Fehler: " + errorMsg]);
             setJobState(data.job_state || data.status || normalizedJobState || 'failed');
+          }
+
+          if (
+            status !== 'processing'
+            && !BULK_RUNNING_STATUSES.has(normalizedBulkStatus)
+          ) {
             clearInterval(interval);
           }
         } catch (e) {
@@ -2107,7 +3182,7 @@ function App() {
       }, 2000);
     }
     return () => clearInterval(interval);
-  }, [status, jobId]);
+  }, [status, jobId, bulkOperationIsRunning]);
 
   const fetchJobHistory = async () => {
     setHistoryLoading(true);
@@ -2120,7 +3195,7 @@ function App() {
     }, 16000);
     try {
       const res = await fetchWithTimeout(
-        getApiUrl('/api/jobs/history?limit=100&include_result=false&include_logs=true&log_limit=30'),
+        getApiUrl(`/api/jobs/history?limit=100&include_result=false&include_logs=true&log_limit=30&upload_post_profile=${encodeURIComponent(showUnassignedHistoryJobs ? '__unassigned__' : uploadUserId || '')}`),
         {},
         10000
       );
@@ -2135,6 +3210,7 @@ function App() {
         return;
       }
       setHistoryJobs(data.jobs || []);
+      setQueueOverview(data.queue || null);
     } catch (e) {
       if (timedOutByGuard) {
         return;
@@ -2156,7 +3232,107 @@ function App() {
     if (activeTab === 'history') {
       fetchJobHistory();
     }
-  }, [activeTab]);
+  }, [activeTab, uploadUserId, showUnassignedHistoryJobs]);
+
+  useEffect(() => {
+    if (activeTab !== 'history') return undefined;
+    const interval = window.setInterval(() => {
+      fetchJobHistory();
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [activeTab, uploadUserId, showUnassignedHistoryJobs]);
+
+  useEffect(() => {
+    if (globalScheduleBatch?.operations?.length) {
+      localStorage.setItem(GLOBAL_SCHEDULE_BATCH_STORAGE_KEY, JSON.stringify(globalScheduleBatch));
+    }
+  }, [globalScheduleBatch]);
+
+  useEffect(() => {
+    if (globalScheduleBatch?.operations?.length || !historyJobs.length) return;
+    const runningPostOperations = historyJobs
+      .map((job) => ({ jobId: job.job_id, operation: job.bulk_operation }))
+      .filter(({ operation }) => (
+        String(operation?.mode || '').toLowerCase() === BULK_OPERATION_MODES.POST_ONLY
+        && isBulkOperationRunning(operation)
+        && operation?.operation_id
+      ));
+    if (!runningPostOperations.length) return;
+    const runningStartTimes = runningPostOperations
+      .map(({ operation }) => Number(operation.started_at || 0))
+      .filter((value) => Number.isFinite(value) && value > 0);
+    const earliestStart = runningStartTimes.length ? Math.min(...runningStartTimes) : 0;
+    const latestStart = runningStartTimes.length ? Math.max(...runningStartTimes) : 0;
+    const recoveredBatchOperations = historyJobs
+      .map((job) => ({ jobId: job.job_id, operation: job.bulk_operation }))
+      .filter(({ operation }) => {
+        if (String(operation?.mode || '').toLowerCase() !== BULK_OPERATION_MODES.POST_ONLY || !operation?.operation_id) {
+          return false;
+        }
+        const startedAt = Number(operation.started_at || 0);
+        return earliestStart > 0
+          && startedAt >= earliestStart - 120
+          && startedAt <= latestStart + 120;
+      });
+    const batchOperations = recoveredBatchOperations.length
+      ? recoveredBatchOperations
+      : runningPostOperations;
+    setGlobalScheduleBatch({
+      profile: uploadUserId,
+      startedAt: new Date().toISOString(),
+      operations: batchOperations.map(({ jobId: targetJobId, operation }) => ({
+        jobId: targetJobId,
+        operationId: operation.operation_id,
+        totalCount: Number(operation.total_count || 0),
+      })),
+    });
+  }, [globalScheduleBatch, historyJobs, uploadUserId]);
+
+  const globalScheduleBatchProgress = useMemo(() => {
+    const references = Array.isArray(globalScheduleBatch?.operations)
+      ? globalScheduleBatch.operations
+      : [];
+    if (!references.length) return null;
+    if (globalScheduleBatch?.profile && globalScheduleBatch.profile !== uploadUserId) return null;
+
+    let totalCount = 0;
+    let processedCount = 0;
+    let failedCount = 0;
+    let activeCount = 0;
+    for (const reference of references) {
+      const job = historyJobs.find((entry) => entry.job_id === reference.jobId);
+      const operation = job?.bulk_operation;
+      const matches = operation?.operation_id === reference.operationId;
+      const operationTotal = Number(matches ? operation.total_count : reference.totalCount) || 0;
+      totalCount += operationTotal;
+      if (!matches) {
+        if (operation?.operation_id) {
+          // A newer operation can only replace a terminal one for the same job.
+          processedCount += operationTotal;
+        } else {
+          activeCount += 1;
+        }
+        continue;
+      }
+      const operationFailed = Number(operation.failed_count || 0);
+      const operationPosted = Number(operation.post_completed_count || 0);
+      failedCount += operationFailed;
+      processedCount += Math.min(operationTotal, operationPosted + operationFailed);
+      if (isBulkOperationRunning(operation)) activeCount += 1;
+    }
+
+    const percent = totalCount > 0
+      ? Math.max(0, Math.min(100, Math.round((processedCount / totalCount) * 100)))
+      : 0;
+    return {
+      totalCount,
+      processedCount,
+      failedCount,
+      activeCount,
+      active: activeCount > 0,
+      percent,
+    };
+  }, [globalScheduleBatch, historyJobs, uploadUserId]);
 
 
   const fetchUserProfiles = async () => {
@@ -2192,14 +3368,512 @@ function App() {
     }
   };
 
+  const applyJobSocialCalendarPayload = (targetJobId, data) => {
+    if (targetJobId && targetJobId === jobId && data?.result) {
+      setResults(data.result);
+    }
+    if (targetJobId && targetJobId === jobId && Array.isArray(data?.events)) {
+      setJobCalendarEvents(data.events);
+    }
+  };
+
+  const updateGlobalPendingCalendarItem = (targetJobId, updatedClip) => {
+    if (!updatedClip) return;
+
+    setGlobalCalendarPendingItems((prev) => prev.map((item) => {
+      if (item.job_id !== targetJobId) return item;
+      if ((item.clip_index ?? -1) !== (updatedClip.clip_index ?? -1)) return item;
+      return {
+        ...item,
+        clip_label: updatedClip.video_title_for_youtube_short || item.clip_label,
+        clip_title: updatedClip.video_title_for_youtube_short || item.clip_title,
+        title: updatedClip.video_title_for_youtube_short || item.title,
+        clip_description: updatedClip.video_description_for_instagram || updatedClip.video_description_for_tiktok || item.clip_description,
+        description: updatedClip.video_description_for_instagram || updatedClip.video_description_for_tiktok || item.description,
+        local_video_url: updatedClip.video_url || updatedClip.preview_video_url || item.local_video_url,
+        local_preview_video_url: updatedClip.preview_video_url || updatedClip.video_url || item.local_preview_video_url,
+        request_settings: {
+          ...(item.request_settings || {}),
+          title: updatedClip.video_title_for_youtube_short || item.title,
+          description: updatedClip.video_description_for_instagram || updatedClip.video_description_for_tiktok || item.description,
+          instagram_collaborators: updatedClip.instagram_collaborators || item.request_settings?.instagram_collaborators || '',
+        },
+        updated_at: Date.now() / 1000,
+      };
+    }));
+  };
+
+  const syncCurrentJobSocialPosts = async () => {
+    if (!jobId) return;
+    if (!uploadPostKey) {
+      setSocialSyncStatus({ type: 'error', message: 'Bitte zuerst einen Upload-Post API-Key hinterlegen.' });
+      return;
+    }
+    setSocialSyncBusy(true);
+    setSocialSyncStatus({ type: 'info', message: 'Upload-Post-Status wird synchronisiert...' });
+    try {
+      const res = await fetch(getApiUrl(`/api/jobs/${jobId}/social/sync`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: uploadPostKey }),
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      applyJobSocialCalendarPayload(jobId, data);
+      const failedClips = Number(data?.summary?.failed_clip_count || 0);
+      setSocialSyncStatus({
+        type: failedClips > 0 ? 'warning' : 'success',
+        message: failedClips > 0
+          ? `${failedClips} Clip${failedClips === 1 ? '' : 's'} mit fehlgeschlagenem Posting gefunden.`
+          : 'Upload-Post-Status synchronisiert.',
+      });
+      fetchJobHistory();
+    } catch (error) {
+      setSocialSyncStatus({ type: 'error', message: error.message || 'Upload-Post-Sync fehlgeschlagen.' });
+    } finally {
+      setSocialSyncBusy(false);
+    }
+  };
+
+  const loadJobCalendar = async (targetJobId = jobId) => {
+    if (!targetJobId) return;
+    if (!uploadPostKey) {
+      setJobCalendarError('Bitte zuerst einen Upload-Post API-Key hinterlegen.');
+      setIsJobCalendarOpen(true);
+      return;
+    }
+    setIsJobCalendarOpen(true);
+    setJobCalendarLoading(true);
+    setJobCalendarError('');
+    try {
+      const res = await fetch(getApiUrl(`/api/jobs/${targetJobId}/social/calendar`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: uploadPostKey, sync: true }),
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      applyJobSocialCalendarPayload(targetJobId, data);
+      setJobCalendarEvents(data.events || []);
+      fetchJobHistory();
+    } catch (error) {
+      setJobCalendarError(error.message || 'Kalender konnte nicht geladen werden.');
+    } finally {
+      setJobCalendarLoading(false);
+    }
+  };
+
+  const loadGlobalCalendar = async () => {
+    if (!uploadPostKey) {
+      setGlobalCalendarError('Bitte zuerst einen Upload-Post API-Key hinterlegen.');
+      setIsGlobalCalendarOpen(true);
+      return;
+    }
+    setIsGlobalCalendarOpen(true);
+    setGlobalCalendarLoading(true);
+    setGlobalCalendarError('');
+    setGlobalCalendarVendorComplete(false);
+    try {
+      const res = await fetch(getApiUrl('/api/social/calendar'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: uploadPostKey, user_id: uploadUserId, sync: true, limit_jobs: 0 }),
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      setGlobalCalendarEvents(data.events || []);
+      setGlobalCalendarPendingItems(data.pending_items || []);
+      setGlobalCalendarVendorComplete(data.vendor_calendar_complete === true);
+      fetchJobHistory();
+    } catch (error) {
+      setGlobalCalendarVendorComplete(false);
+      setGlobalCalendarError(error.message || 'Globaler Kalender konnte nicht geladen werden.');
+    } finally {
+      setGlobalCalendarLoading(false);
+    }
+  };
+
+  const repairPodcastCampaignSchedules = async (options = {}) => {
+    const targetProfile = String(options?.profileUsername || uploadUserId || '').trim();
+    const targetJobIds = Array.isArray(options?.jobIds) ? options.jobIds.filter(Boolean) : [];
+    if (!uploadPostKey || !targetProfile) {
+      throw new Error('Upload-Post API-Key oder Profil fehlt.');
+    }
+    setPodcastCampaignRepairBusy(true);
+    setPodcastCampaignRepairStatus({ type: 'info', message: 'Pruefe plattformspezifische Instagram-Texte und Relay-Registrierungen ...' });
+    const requestRepair = async (execute) => {
+      const res = await fetch(getApiUrl('/api/social/calendar/podcast-campaign/repair'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          api_key: uploadPostKey,
+          user_id: targetProfile,
+          execute,
+          job_ids: targetJobIds.length ? targetJobIds : undefined,
+          podcast_dm_relay_url: podcastDmSettings.relayUrl || undefined,
+          podcast_dm_relay_password: podcastDmSettings.relayPassword || undefined,
+        }),
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      return await res.json();
+    };
+
+    try {
+      const preview = await requestRepair(false);
+      if (!preview.eligible_count) {
+        const scan = preview.scan || {};
+        setPodcastCampaignRepairStatus({
+          type: 'warning',
+          message: `Keine reparierbaren Kampagnen-Posts gefunden. Scan: ${scan.events_scanned || 0} Events, ${scan.not_future || 0} nicht zukuenftig, ${scan.missing_campaign || 0} ohne Kampagne, ${scan.cannot_recreate || 0} ohne lokale Videodatei.`,
+        });
+        return;
+      }
+      if (preview.relay_repair_count > 0 && !preview.relay_configured) {
+        throw new Error(
+          `${preview.relay_repair_count} Relay-Registrierungen werden benoetigt. Bitte zuerst Relay-URL und Passwort in den Einstellungen hinterlegen.`,
+        );
+      }
+      const scopeLabel = targetJobIds.length === 1 ? 'diesem Job' : `Profil "${targetProfile}"`;
+      const confirmed = window.confirm(
+        `${preview.caption_patch_count} zukuenftige Schedules bei ${scopeLabel} plattformspezifisch neu anlegen?\n\n`
+        + 'Instagram erhaelt CTA + Leerzeile + KI-Text sowie die CTA im First Comment. Andere Plattformen behalten ihren normalen KI-Text.\n'
+        + `${preview.relay_repair_count} neue oder fehlende Schedule-IDs werden im PHP-Relay registriert; ersetzte IDs werden entfernt.\n\n`
+        + 'Hinweis: Die Neuanlage laedt die Videos erneut zu Upload-Post hoch und kann Upload-Kontingent verbrauchen. Alte Schedules werden erst nach erfolgreicher Neuanlage entfernt.',
+      );
+      if (!confirmed) {
+        setPodcastCampaignRepairStatus(null);
+        return;
+      }
+      setPodcastCampaignRepairStatus({ type: 'info', message: `${preview.eligible_count} Kampagnen-Posts werden plattformspezifisch repariert ...` });
+      const result = await requestRepair(true);
+      const summary = result.summary || {};
+      const failed = Number(summary.caption_failed || 0) + Number(summary.relay_failed || 0);
+      const firstFailure = (result.results || []).find((item) => (
+        item?.caption_patch?.success === false || item?.relay_registration?.success === false
+      ));
+      const firstFailureMessage = firstFailure?.caption_patch?.error
+        || firstFailure?.relay_registration?.message
+        || firstFailure?.relay_registration?.error
+        || '';
+      const message = `${summary.caption_patched || 0} Schedules plattformspezifisch repariert, ${summary.relay_registered || 0} Relay-IDs registriert${failed ? `, ${failed} Fehler` : ''}.`
+        + (firstFailureMessage ? ` Erster Fehler: ${firstFailureMessage}` : '');
+      setPodcastCampaignRepairStatus({ type: failed ? 'warning' : 'success', message });
+      if (targetJobIds.length) {
+        fetchJobHistory();
+      } else {
+        await loadGlobalCalendar();
+      }
+      window.alert(message);
+    } catch (error) {
+      setPodcastCampaignRepairStatus({ type: 'error', message: error.message || 'Kampagnen-Reparatur fehlgeschlagen.' });
+      if (targetJobIds.length) {
+        window.alert(error.message || 'Kampagnen-Reparatur fehlgeschlagen.');
+      }
+      throw error;
+    } finally {
+      setPodcastCampaignRepairBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isGlobalCalendarOpen && uploadUserId) {
+      loadGlobalCalendar();
+    }
+  }, [uploadUserId]);
+
+  const saveCalendarEvent = async ({ event, payload, scope = 'job' }) => {
+    if (!event) return;
+    if (!uploadPostKey) throw new Error('Upload-Post API-Key fehlt.');
+    const requiresLocalRecreate = (payload?.mode || '').toLowerCase() === 'recreate' && event?.can_recreate !== false;
+    if (requiresLocalRecreate && !uploadUserId) throw new Error('Upload-Post Profil fehlt.');
+
+    const res = await fetch(getApiUrl('/api/social/calendar/event/update'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: uploadPostKey,
+        user_id: uploadUserId,
+        job_id: event.job_id,
+        clip_index: event.clip_index,
+        vendor_job_id: event.vendor_job_id,
+        event_source: event.event_source,
+        history_entry_id: event.history_entry_id,
+        podcast_dm_relay_url: podcastDmSettings.relayUrl || undefined,
+        podcast_dm_relay_password: podcastDmSettings.relayPassword || undefined,
+        ...payload,
+      }),
+    });
+    if (!res.ok) throw new Error(await readErrorMessage(res));
+    const data = await res.json();
+    applyJobSocialCalendarPayload(event.job_id, data);
+    if (Array.isArray(data?.events) && event.job_id === jobId) {
+      setJobCalendarEvents(data.events);
+    }
+    if (scope === 'global') {
+      await loadGlobalCalendar();
+    } else if (event.job_id === jobId) {
+      setJobCalendarEvents(data.events || []);
+    }
+    fetchJobHistory();
+  };
+
+  const deleteCalendarEvent = async (event, scope = 'job') => {
+    if (!event) return;
+    if (!uploadPostKey) throw new Error('Upload-Post API-Key fehlt.');
+    const res = await fetch(getApiUrl('/api/social/calendar/event/delete'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: uploadPostKey,
+        job_id: event.job_id,
+        clip_index: event.clip_index,
+        vendor_job_id: event.vendor_job_id,
+        event_source: event.event_source,
+        history_entry_id: event.history_entry_id,
+      }),
+    });
+    if (!res.ok) throw new Error(await readErrorMessage(res));
+    const data = await res.json();
+    applyJobSocialCalendarPayload(event.job_id, data);
+    if (scope === 'global') {
+      await loadGlobalCalendar();
+    } else if (event.job_id === jobId) {
+      setJobCalendarEvents(data.events || []);
+    }
+    fetchJobHistory();
+  };
+
+  const resolveCalendarRemotePreview = async (event) => {
+    if (!event?.vendor_job_id) return { preview_url: '' };
+    if (!uploadPostKey) throw new Error('Upload-Post API-Key fehlt.');
+    const res = await fetch(getApiUrl('/api/social/calendar/event/resolve-preview'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        api_key: uploadPostKey,
+        user_id: uploadUserId || undefined,
+        vendor_job_id: event.vendor_job_id,
+      }),
+    });
+    if (!res.ok) throw new Error(await readErrorMessage(res));
+    return await res.json();
+  };
+
+  const saveGlobalPendingCalendarItem = async ({ item, payload }) => {
+    if (!item) return;
+    const normalizedTitle = String(payload?.title ?? item.title ?? '').trim();
+    const normalizedDescription = String(payload?.description ?? item.description ?? '').trim();
+    const res = await fetch(getApiUrl('/api/clip/text-metadata'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        job_id: item.job_id,
+        clip_index: item.clip_index,
+        video_title_for_youtube_short: normalizedTitle,
+        video_description_for_tiktok: normalizedDescription,
+        video_description_for_instagram: normalizedDescription,
+      }),
+    });
+    if (!res.ok) throw new Error(await readErrorMessage(res));
+    const data = await res.json();
+    if (data?.clip) {
+      if (item.job_id === jobId) {
+        updateClipResult(item.job_id, data.clip);
+      }
+      updateGlobalPendingCalendarItem(item.job_id, data.clip);
+    }
+  };
+
+  const scheduleGlobalPendingCalendarItems = async ({ items, settings }) => {
+    const selectedItems = Array.isArray(items) ? items.filter(Boolean) : [];
+    if (!selectedItems.length) {
+      throw new Error('Bitte zuerst mindestens einen gelben Draft-Slot zuordnen.');
+    }
+    if (!uploadPostKey || !uploadUserId) {
+      throw new Error('Upload-Post API-Key oder Profil fehlt.');
+    }
+
+    const selectedPlatforms = SOCIAL_PLATFORM_OPTIONS
+      .filter((platform) => settings?.platforms?.[platform.key])
+      .map((platform) => platform.key);
+
+    if (!selectedPlatforms.length) {
+      throw new Error('Bitte mindestens eine Plattform fuer den Sammel-Schedule auswaehlen.');
+    }
+    if (selectedPlatforms.includes('pinterest') && !(settings?.pinterestBoardId || '').trim()) {
+      throw new Error('Pinterest benoetigt eine Board-ID.');
+    }
+
+    const minimumScheduleTime = Date.now() + (15 * 60 * 1000);
+    const tooSoonItems = selectedItems.filter((item) => {
+      const scheduledTime = new Date(item.assigned_scheduled_date || '').getTime();
+      return !Number.isFinite(scheduledTime) || scheduledTime <= minimumScheduleTime;
+    });
+    if (tooSoonItems.length) {
+      throw new Error(
+        `${tooSoonItems.length} zugewiesene Slots beginnen in weniger als 15 Minuten. `
+        + 'Bitte diese Drafts erneut automatisch verteilen oder spaeter einplanen.',
+      );
+    }
+
+    const grouped = selectedItems.reduce((acc, item) => {
+      const jobItems = acc.get(item.job_id) || [];
+      jobItems.push(item);
+      acc.set(item.job_id, jobItems);
+      return acc;
+    }, new Map());
+
+    const runtime = buildBulkRuntimePayload();
+    const timezone = settings?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+
+    const groupEntries = Array.from(grouped.entries());
+    const responses = await Promise.all(groupEntries.map(async ([targetJobId, jobItems]) => {
+      const chronologicalItems = [...jobItems].sort((left, right) => (
+        new Date(left.assigned_scheduled_date || 0).getTime()
+        - new Date(right.assigned_scheduled_date || 0).getTime()
+      ));
+      const res = await fetch(getApiUrl('/api/bulk-operation/start'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_id: targetJobId,
+          mode: BULK_OPERATION_MODES.POST_ONLY,
+          items: chronologicalItems.map((item) => ({
+            clip_index: item.clip_index,
+            clip_label: item.title || item.clip_label || `Clip ${Number(item.clip_index || 0) + 1}`,
+            scheduled_date: item.assigned_scheduled_date,
+          })),
+          post: {
+            platforms: selectedPlatforms,
+            first_comment: settings?.firstComment || '',
+            timezone,
+            instagram_share_mode: settings?.instagramShareMode || socialPostSettings.instagramShareMode,
+            tiktok_post_mode: settings?.tiktokPostMode || socialPostSettings.tiktokPostMode,
+            tiktok_is_aigc: !!(settings?.tiktokIsAigc ?? socialPostSettings.tiktokIsAigc),
+            facebook_page_id: settings?.facebookPageId || socialPostSettings.facebookPageId,
+            pinterest_board_id: settings?.pinterestBoardId || socialPostSettings.pinterestBoardId,
+          },
+          runtime,
+        }),
+      });
+
+      if (!res.ok) {
+        return {
+          ok: false,
+          jobId: targetJobId,
+          itemIds: chronologicalItems.map((item) => item.id),
+          error: await readErrorMessage(res),
+        };
+      }
+
+      const data = await res.json();
+      updateHistoryJobBulkOperation(targetJobId, data.bulk_operation);
+      return {
+        ok: true,
+        jobId: targetJobId,
+        itemIds: chronologicalItems.map((item) => item.id),
+        operation: data.bulk_operation,
+      };
+    }));
+
+    const startedIds = responses.filter((entry) => entry.ok).flatMap((entry) => entry.itemIds);
+    const startedOperations = responses
+      .filter((entry) => entry.ok && entry.operation?.operation_id)
+      .map((entry) => ({
+        jobId: entry.jobId,
+        operationId: entry.operation.operation_id,
+        totalCount: Number(entry.operation.total_count || entry.itemIds.length || 0),
+      }));
+    const failedGroups = responses.filter((entry) => !entry.ok);
+
+    if (startedIds.length) {
+      setGlobalCalendarPendingItems((prev) => prev.filter((item) => !startedIds.includes(item.id)));
+    }
+    if (startedOperations.length) {
+      setGlobalScheduleBatch({
+        profile: uploadUserId,
+        startedAt: new Date().toISOString(),
+        operations: startedOperations,
+      });
+    }
+
+    // Job history is cheap and carries live bulk progress. A complete vendor calendar
+    // refresh can take minutes for a 12-month range and must not hold the start dialog open.
+    void fetchJobHistory();
+
+    return {
+      startedIds,
+      failedGroups,
+    };
+  };
+
+  const rescheduleAllCurrentJobSocialPosts = async () => {
+    if (!jobId) return;
+    if (!uploadPostKey) {
+      setSocialSyncStatus({ type: 'error', message: 'Bitte zuerst einen Upload-Post API-Key hinterlegen.' });
+      return;
+    }
+    if (!uploadUserId) {
+      setSocialSyncStatus({ type: 'error', message: 'Bitte zuerst ein Upload-Post Profil auswaehlen.' });
+      return;
+    }
+
+    const confirmed = window.confirm(
+      'Alle zukuenftigen Slots dieses Jobs wirklich neu hochladen und neu schedulen?\n\nDabei werden bestehende Upload-Post-Schedules ersetzt.',
+    );
+    if (!confirmed) return;
+
+    setJobRescheduleAllBusy(true);
+    setSocialSyncStatus({ type: 'info', message: 'Zukuenftige Slots werden neu hochgeladen und rescheduled...' });
+    try {
+      const res = await fetch(getApiUrl(`/api/jobs/${jobId}/social/reschedule-all`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          api_key: uploadPostKey,
+          user_id: uploadUserId,
+          sync: false,
+          future_only: true,
+          podcast_dm_relay_url: podcastDmSettings.relayUrl || undefined,
+          podcast_dm_relay_password: podcastDmSettings.relayPassword || undefined,
+        }),
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      applyJobSocialCalendarPayload(jobId, data);
+      setJobCalendarEvents(data.events || []);
+      const processedCount = Number(data?.rescheduled_count || 0);
+      const failedCount = Number(data?.failed_count || 0);
+      setSocialSyncStatus({
+        type: failedCount > 0 ? 'warning' : 'success',
+        message: failedCount > 0
+          ? `${processedCount} Slots neu hochgeladen, ${failedCount} fehlgeschlagen.`
+          : `${processedCount} zukuenftige Slots neu hochgeladen und rescheduled.`,
+      });
+      fetchJobHistory();
+    } catch (error) {
+      setSocialSyncStatus({ type: 'error', message: error.message || 'Reschedule all fehlgeschlagen.' });
+    } finally {
+      setJobRescheduleAllBusy(false);
+    }
+  };
+
   const handleProcess = async (data) => {
+    if (isQueueSubmitting) return;
     const requestedProfileId = resolveProfileIdForJobRequest(!!data.options?.interviewMode);
-    setStatus('processing');
-    setJobState('queued');
-    setLogs(["Starting process..."]);
-    setResults(null);
-    setClipVideoOverrides({});
-    setProcessingMedia({ ...data, overlayProfileId: requestedProfileId });
+    const activeUploadProfile = String(uploadUserId || '').trim();
+    const activeProfileContext = String(uploadProfileContexts[activeUploadProfile] || '').trim();
+    const shouldOpenQueuedJob = !jobId || status === 'idle';
+    setIsQueueSubmitting(true);
+    setQueueSubmitStatus({ type: 'info', message: 'Job wird vorbereitet und in die Warteschlange gestellt...' });
+    if (shouldOpenQueuedJob) {
+      setStatus('processing');
+      setJobState('queued');
+      setLogs(["Starting process..."]);
+      setResults(null);
+      setClipVideoOverrides({});
+      setProcessingMedia({ ...data, overlayProfileId: requestedProfileId });
+    }
 
     try {
       let body;
@@ -2213,6 +3887,11 @@ function App() {
           max_clips: Number(data.options?.maxClips) || 10,
           tight_edit_preset: tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset,
           analysis_only: !!data.options?.analysisOnly,
+          upload_post_profile: activeUploadProfile,
+          profile_context: activeProfileContext,
+          job_instructions: data.options?.jobInstructions || '',
+          destination_url: data.options?.destinationUrl || '',
+          destination_keyword: data.options?.destinationKeyword || 'Video',
           ...buildYoutubeAuthPayload(),
         });
       } else {
@@ -2223,6 +3902,11 @@ function App() {
         formData.append('max_clips', String(Number(data.options?.maxClips) || 10));
         formData.append('tight_edit_preset', tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset);
         formData.append('analysis_only', data.options?.analysisOnly ? 'true' : 'false');
+        formData.append('upload_post_profile', activeUploadProfile);
+        formData.append('profile_context', activeProfileContext);
+        formData.append('job_instructions', data.options?.jobInstructions || '');
+        formData.append('destination_url', data.options?.destinationUrl || '');
+        formData.append('destination_keyword', data.options?.destinationKeyword || 'Video');
         const youtubePayload = buildYoutubeAuthPayload();
         formData.append('youtube_auth_mode', youtubePayload.youtube_auth_mode || 'auto');
         formData.append('youtube_cookies_from_browser', youtubePayload.youtube_cookies_from_browser || 'auto');
@@ -2240,15 +3924,97 @@ function App() {
 
       if (!res.ok) throw new Error(await readErrorMessage(res));
       const resData = await res.json();
-      setJobId(resData.job_id);
+      if (shouldOpenQueuedJob) {
+        setJobId(resData.job_id);
+        setLogs([`Job ${resData.job_id} wurde eingereiht.`]);
+      }
       ensureJobOverlayDefaults(resData.job_id, requestedProfileId, true);
+      setMediaInputResetToken((value) => value + 1);
+      const position = Number(resData.queue_position || 0);
+      const positionText = position > 0 ? ` Position ${position} in der Queue.` : ' Startet sobald ein Worker-Slot frei ist.';
+      setQueueSubmitStatus({
+        type: 'success',
+        message: `Job ${resData.job_id.slice(0, 8)} wurde eingereiht.${positionText}`,
+      });
+      if (resData.queue) {
+        setQueueOverview(resData.queue);
+      }
       fetchJobHistory();
 
     } catch (e) {
-      setStatus('error');
-      setJobState('failed');
-      setLogs(l => [...l, `Fehler beim Starten des Jobs: ${e.message}`]);
+      if (shouldOpenQueuedJob) {
+        setStatus('error');
+        setJobState('failed');
+        setLogs(l => [...l, `Fehler beim Starten des Jobs: ${e.message}`]);
+      }
+      setQueueSubmitStatus({ type: 'error', message: `Fehler beim Einreihen: ${e.message}` });
+    } finally {
+      setIsQueueSubmitting(false);
     }
+  };
+
+  const assignUploadProfileToJob = async (targetJob, profileName) => {
+    const normalizedProfile = String(profileName || '').trim();
+    const res = await fetch(getApiUrl(`/api/jobs/${targetJob.job_id}/analysis-context`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        upload_post_profile: normalizedProfile,
+        profile_context: uploadProfileContexts[normalizedProfile] || '',
+        job_instructions: targetJob.job_instructions || '',
+      }),
+    });
+    if (!res.ok) throw new Error(await readErrorMessage(res));
+    await fetchJobHistory();
+  };
+
+  const saveActiveJobAnalysisContext = async () => {
+    if (!jobId) return;
+    setAnalysisContextSaving(true);
+    try {
+      const profileName = activeJobAnalysisContext.profileName || uploadUserId || '';
+      const res = await fetch(getApiUrl(`/api/jobs/${jobId}/analysis-context`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          upload_post_profile: profileName,
+          profile_context: activeJobAnalysisContext.profileContext || uploadProfileContexts[profileName] || '',
+          job_instructions: activeJobAnalysisContext.jobInstructions || '',
+        }),
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      setQueueSubmitStatus({ type: 'success', message: 'Analysekontext gespeichert. Er gilt fuer den naechsten KI-Schritt oder eine Neuanalyse.' });
+    } catch (error) {
+      setQueueSubmitStatus({ type: 'error', message: error.message || 'Analysekontext konnte nicht gespeichert werden.' });
+    } finally {
+      setAnalysisContextSaving(false);
+    }
+  };
+
+  const openActiveJobAnalysisContext = () => {
+    const profileName = activeJobAnalysisContext.profileName || uploadUserId || '';
+    setActiveJobAnalysisContext((previous) => ({
+      ...previous,
+      profileName,
+      profileContext: previous.profileContext || uploadProfileContexts[profileName] || '',
+    }));
+    setIsAnalysisContextOpen(true);
+  };
+
+  const saveActiveProfileContext = () => {
+    const profileName = String(activeJobAnalysisContext.profileName || uploadUserId || '').trim();
+    if (!profileName) {
+      setQueueSubmitStatus({ type: 'error', message: 'Bitte zuerst ein Upload-Post-Profil auswaehlen.' });
+      return;
+    }
+    setUploadProfileContexts((previous) => ({
+      ...previous,
+      [profileName]: activeJobAnalysisContext.profileContext || '',
+    }));
+    setQueueSubmitStatus({
+      type: 'success',
+      message: `Kanalbeschreibung fuer Profil ${profileName} profiluebergreifend gespeichert. Sie wird bei neuen Jobs automatisch verwendet.`,
+    });
   };
 
   const handleReset = () => {
@@ -2259,17 +4025,29 @@ function App() {
     setClipVideoOverrides({});
     setLogs([]);
     setProcessingMedia(null);
+    setQueueSubmitStatus(null);
   };
 
-  const handleOpenJob = async (job) => {
+  const handleOpenJob = async (job, options = {}) => {
+    const openWithoutPreviews = !!options.openWithoutPreviews;
     try {
       const data = await pollJob(job.job_id);
       const requestMeta = job?.request || {};
       const profileIdForJob = resolveProfileIdForJobRequest(!!requestMeta.interview_mode);
+      if (openWithoutPreviews) {
+        setDeferPreviewLoading(true);
+      }
       setJobId(job.job_id);
       setResults(data.result || job.result || null);
       setLogs(data.logs || job.logs || []);
       setProcessingMedia(deriveProcessingMedia(job));
+      if (data.analysis_context) {
+        setActiveJobAnalysisContext({
+          profileName: data.analysis_context.profile_name || '',
+          profileContext: data.analysis_context.profile_context || '',
+          jobInstructions: data.analysis_context.job_instructions || '',
+        });
+      }
       ensureJobOverlayDefaults(job.job_id, profileIdForJob);
       setJobState(data.job_state || job.status || 'completed');
       setStatus(mapApiStatusToUi(data.status));
@@ -2277,6 +4055,10 @@ function App() {
     } catch (e) {
       alert(`Job konnte nicht geöffnet werden: ${e.message}`);
     }
+  };
+
+  const handleOpenJobWithoutPreviews = async (job) => {
+    await handleOpenJob(job, { openWithoutPreviews: true });
   };
 
   const handleResumeJob = async (job) => {
@@ -2289,6 +4071,9 @@ function App() {
           ollama_base_url: ollamaBaseUrl,
           ollama_model: ollamaModel,
           tight_edit_preset: tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset,
+          upload_post_profile: job.job_id === jobId ? (activeJobAnalysisContext.profileName || uploadUserId) : (job.upload_post_profile || uploadUserId),
+          profile_context: job.job_id === jobId ? activeJobAnalysisContext.profileContext : (job.profile_context || uploadProfileContexts[job.upload_post_profile || uploadUserId] || ''),
+          job_instructions: job.job_id === jobId ? activeJobAnalysisContext.jobInstructions : (job.job_instructions || ''),
           ...buildYoutubeAuthPayload(),
         })
       });
@@ -2311,6 +4096,64 @@ function App() {
       fetchJobHistory();
     } catch (e) {
       alert(`Job konnte nicht fortgesetzt werden: ${e.message}`);
+    }
+  };
+
+  const handleReanalyzeJobWithMinimax = async (job) => {
+    if (!job?.job_id) return;
+    if (!minimaxKey) {
+      alert('MiniMax Token-Plan-Key fehlt in den Einstellungen.');
+      return;
+    }
+    setReanalyzingJobId(job.job_id);
+    try {
+      const res = await fetch(getApiUrl(`/api/jobs/${job.job_id}/resume`), {
+        method: 'POST',
+        headers: buildProviderHeaders(true, 'minimax'),
+        body: JSON.stringify({
+          provider: 'minimax',
+          minimax_model: minimaxModel,
+          analysis_only: true,
+          force_reanalysis: true,
+          tight_edit_preset: tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset,
+          upload_post_profile: job.job_id === jobId ? (activeJobAnalysisContext.profileName || uploadUserId) : (job.upload_post_profile || uploadUserId),
+          profile_context: job.job_id === jobId ? activeJobAnalysisContext.profileContext : (job.profile_context || uploadProfileContexts[job.upload_post_profile || uploadUserId] || ''),
+          job_instructions: job.job_id === jobId ? activeJobAnalysisContext.jobInstructions : (job.job_instructions || ''),
+          ...buildYoutubeAuthPayload(),
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res));
+      }
+
+      const data = await res.json();
+      const requestMeta = job?.request || {};
+      const profileIdForJob = resolveProfileIdForJobRequest(!!requestMeta.interview_mode);
+      const storedUiState = readStoredJobUiState(job.job_id) || {};
+      writeStoredJobUiState(job.job_id, {
+        ...storedUiState,
+        selectedClipKeys: [],
+        clipHookDrafts: {},
+      });
+      setJobId(data.job_id);
+      setStatus('processing');
+      setJobState('queued');
+      setResults(null);
+      setSelectedClipKeys([]);
+      setClipHookDrafts({});
+      setClipVideoOverrides((previous) => Object.fromEntries(
+        Object.entries(previous).filter(([key]) => !key.startsWith(`${job.job_id}:`))
+      ));
+      setLogs((job.logs || []).concat([`Job ${job.job_id} wird mit MiniMax neu analysiert.`]));
+      setProcessingMedia(deriveProcessingMedia(job));
+      ensureJobOverlayDefaults(data.job_id, profileIdForJob);
+      setActiveTab('dashboard');
+      fetchJobHistory();
+    } catch (e) {
+      alert(`MiniMax-Reanalyse konnte nicht gestartet werden: ${e.message}`);
+    } finally {
+      setReanalyzingJobId(null);
     }
   };
 
@@ -2370,6 +4213,101 @@ function App() {
     }
   };
 
+  const updateHistoryJobBulkOperation = (targetJobId, bulkOperation) => {
+    setHistoryJobs((prev) => prev.map((entry) => (
+      entry.job_id === targetJobId
+        ? { ...entry, bulk_operation: bulkOperation }
+        : entry
+    )));
+    if (jobId === targetJobId) {
+      mergeBulkOperationIntoResults(bulkOperation);
+    }
+  };
+
+  const handlePauseBulkOperationFromHistory = async (job) => {
+    if (!job?.job_id) return;
+    setBulkControlBusy(`history-pause:${job.job_id}`);
+    try {
+      const res = await fetch(getApiUrl(`/api/bulk-operation/${job.job_id}/pause`), {
+        method: 'POST',
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      updateHistoryJobBulkOperation(job.job_id, data.bulk_operation);
+      fetchJobHistory();
+    } catch (e) {
+      alert(`Multi-Post konnte nicht pausiert werden: ${e.message}`);
+    } finally {
+      setBulkControlBusy('');
+    }
+  };
+
+  const handleResumeBulkOperationFromHistory = async (job) => {
+    if (!job?.job_id) return;
+    const operation = job.bulk_operation || {};
+    const operationStatus = String(operation.status || '').toLowerCase();
+    const failedItems = (operation.items || []).filter((item) => item.post_status === 'failed');
+    if (['partial', 'failed'].includes(operationStatus) && failedItems.length > 0) {
+      const ambiguousFailures = failedItems.filter((item) => /gateway timeout|client closed request/i.test(item.last_error || ''));
+      const pastSchedules = failedItems.filter((item) => {
+        const scheduledTime = new Date(item.scheduled_date || '').getTime();
+        return Number.isFinite(scheduledTime) && scheduledTime <= Date.now();
+      });
+      const warningLines = [
+        `${failedItems.length} fehlgeschlagene Posts dieses Jobs erneut versuchen?`,
+        '',
+        'Bereits erfolgreiche Posts werden übersprungen.',
+      ];
+      if (ambiguousFailures.length > 0) {
+        warningLines.push(
+          '',
+          `${ambiguousFailures.length} Fehler sind Timeouts/abgebrochene Client-Anfragen. `
+          + 'Bei älteren Operationen könnte Upload-Post sie trotzdem angenommen haben. Bitte vorher den Kalender synchronisieren, um Doppelposts auszuschließen.',
+        );
+      }
+      if (pastSchedules.length > 0) {
+        warningLines.push('', 'Vergangene Retry-Termine werden automatisch gemeinsam in die Zukunft verschoben.');
+      }
+      if (!window.confirm(warningLines.join('\n'))) return;
+    }
+    setBulkControlBusy(`history-resume:${job.job_id}`);
+    try {
+      const res = await fetch(getApiUrl(`/api/bulk-operation/${job.job_id}/resume`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          runtime: buildBulkRuntimePayload(),
+        }),
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      updateHistoryJobBulkOperation(job.job_id, data.bulk_operation);
+      fetchJobHistory();
+    } catch (e) {
+      alert(`Multi-Post konnte nicht fortgesetzt werden: ${e.message}`);
+    } finally {
+      setBulkControlBusy('');
+    }
+  };
+
+  const handleStopBulkOperationFromHistory = async (job) => {
+    if (!job?.job_id) return;
+    setBulkControlBusy(`history-stop:${job.job_id}`);
+    try {
+      const res = await fetch(getApiUrl(`/api/bulk-operation/${job.job_id}/stop`), {
+        method: 'POST',
+      });
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const data = await res.json();
+      updateHistoryJobBulkOperation(job.job_id, data.bulk_operation);
+      fetchJobHistory();
+    } catch (e) {
+      alert(`Multi-Post konnte nicht gestoppt werden: ${e.message}`);
+    } finally {
+      setBulkControlBusy('');
+    }
+  };
+
   // --- UI Components ---
 
   const Sidebar = ({ mobile = false }) => (
@@ -2404,6 +4342,22 @@ function App() {
         >
           <Image size={20} />
           <span className={`font-medium ${mobile ? 'block' : 'hidden lg:block'}`}>YouTube Studio</span>
+        </button>
+
+        <button
+          onClick={() => handleTabSelect('transcription')}
+          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'transcription' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
+        >
+          <AudioLines size={20} />
+          <span className={`font-medium ${mobile ? 'block' : 'hidden lg:block'}`}>Transkription</span>
+        </button>
+
+        <button
+          onClick={() => handleTabSelect('longform')}
+          className={`w-full flex items-center gap-3 px-3 py-3 rounded-xl transition-colors ${activeTab === 'longform' ? 'bg-primary/10 text-primary' : 'text-zinc-400 hover:text-white hover:bg-white/5'}`}
+        >
+          <FileVideo size={20} />
+          <span className={`font-medium ${mobile ? 'block' : 'hidden lg:block'}`}>Longform Video Editor</span>
         </button>
 
         <button
@@ -2527,9 +4481,9 @@ function App() {
               />
             )}
 
-            {llmProvider === 'gemini' && !apiKey && (
+            {!resolveCurrentProviderStatus().ready && (
               <span className="text-xs text-amber-500 bg-amber-500/10 px-3 py-1 rounded-full border border-amber-500/20">
-                API-Key fehlt
+                {resolveCurrentProviderStatus().label}
               </span>
             )}
           </div>
@@ -2541,6 +4495,7 @@ function App() {
           {activeTab === 'history' && (
             <JobHistory
               jobs={historyJobs}
+              queueOverview={queueOverview}
               loading={historyLoading}
               error={historyError}
               currentJobId={jobId}
@@ -2548,9 +4503,52 @@ function App() {
               deletingJobId={deletingJobId}
               onRefresh={fetchJobHistory}
               onOpenJob={handleOpenJob}
+              onOpenJobWithoutPreviews={handleOpenJobWithoutPreviews}
               onResumeJob={handleResumeJob}
+              onReanalyzeJobWithMinimax={handleReanalyzeJobWithMinimax}
+              reanalyzingJobId={reanalyzingJobId}
               onCancelJob={handleCancelJob}
+              onPauseBulkOperation={handlePauseBulkOperationFromHistory}
+              onResumeBulkOperation={handleResumeBulkOperationFromHistory}
+              onStopBulkOperation={handleStopBulkOperationFromHistory}
+              bulkControlBusy={bulkControlBusy}
               onDeleteJob={handleDeleteJob}
+              onOpenGlobalCalendar={loadGlobalCalendar}
+              globalCalendarLoading={globalCalendarLoading}
+              uploadProfiles={userProfiles}
+              activeUploadProfile={uploadUserId}
+              onAssignUploadProfile={assignUploadProfileToJob}
+              showUnassignedJobs={showUnassignedHistoryJobs}
+              onToggleUnassignedJobs={() => setShowUnassignedHistoryJobs((value) => !value)}
+            />
+          )}
+
+          {activeTab === 'transcription' && (
+            <TranscriptionStudio />
+          )}
+
+          {activeTab === 'longform' && (
+            <LongformVideoEditor
+              globalAiDefaults={{
+                provider: longformAiDefaults.provider,
+                gemini_api_key: apiKey,
+                gemini_model: geminiModel,
+                huggingface_token: huggingFaceKey,
+                openai_api_key: openaiKey,
+                openai_model: openaiModel,
+                claude_api_key: claudeKey,
+                claude_model: claudeModel,
+                minimax_api_key: minimaxKey,
+                minimax_auth_mode: minimaxAuthMode,
+                minimax_model: minimaxModel,
+                midjourney_api_key: midjourneyKey,
+                midjourney_base_url: midjourneyBaseUrl,
+                ollama_base_url: longformAiDefaults.ollama_base_url,
+                ollama_model: longformAiDefaults.ollama_model,
+              }}
+              thumbnailPromptPresets={longformThumbnailPromptPresets}
+              thumbnailModelDefaults={longformThumbnailModelDefaults}
+              onSaveAiDefaults={(nextDefaults) => setLongformAiDefaults(normalizeLongformAiDefaults(nextDefaults))}
             />
           )}
 
@@ -2564,31 +4562,359 @@ function App() {
                 </div>
               </div>
               <div className="glass-panel p-6 mb-8">
-                <label className="block text-sm text-zinc-400 mb-3">AI Provider</label>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="p-2 bg-white/5 rounded-lg text-zinc-200">
+                    <Sparkles size={18} />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-semibold">AI Zugriff & Provider</h2>
+                    <p className="text-xs text-zinc-500 mt-1">Hier verwalten wir die globalen Shortform-/Longform-Zugänge. Der aktive Shortform-Provider steuert die Clip-Auswahl und hook-getriebene Generierung.</p>
+                  </div>
+                </div>
+
+                <div className="mb-5">
+                  <label className="block text-sm text-zinc-400 mb-3">Shortform-Provider</label>
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                    {SHORTFORM_PROVIDER_OPTIONS.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => setLlmProvider(option.value)}
+                        className={`rounded-xl border px-4 py-3 text-sm text-left transition-colors ${llmProvider === option.value ? 'border-primary bg-primary/10 text-white' : 'border-white/10 text-zinc-400 hover:bg-white/5'}`}
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/10 bg-black/20 p-4 mb-5 space-y-4">
+                  <div>
+                    <div className="text-sm font-semibold text-white">
+                      Aktiver Shortform-Provider: {SHORTFORM_PROVIDER_OPTIONS.find((option) => option.value === llmProvider)?.label || llmProvider}
+                    </div>
+                    <div className="mt-1 text-xs text-zinc-500">
+                      Dieses Setup wird für Shorts-Analyse, Hook-Generierung und rendernahe AI-Schritte als Default verwendet.
+                    </div>
+                  </div>
+
+                  {llmProvider === 'gemini' && (
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div>
+                        <label className="block text-sm text-zinc-400 mb-2">Gemini API-Key</label>
+                        <input
+                          type="password"
+                          value={apiKey}
+                          onChange={(e) => setApiKey(e.target.value)}
+                          placeholder="AIzaSy..."
+                          className="input-field w-full font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm text-zinc-400 mb-2">Gemini Modell</label>
+                        <input
+                          type="text"
+                          list="shortform-gemini-models"
+                          value={geminiModel}
+                          onChange={(e) => setGeminiModel(normalizeShortformModel('gemini', e.target.value))}
+                          className="input-field w-full font-mono"
+                        />
+                        <datalist id="shortform-gemini-models">
+                          {SHORTFORM_MODEL_SUGGESTIONS.gemini.map((model) => <option key={model} value={model} />)}
+                        </datalist>
+                      </div>
+                    </div>
+                  )}
+
+                  {llmProvider === 'openai' && (
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div>
+                        <label className="block text-sm text-zinc-400 mb-2">OpenAI API-Key</label>
+                        <input
+                          type="password"
+                          value={openaiKey}
+                          onChange={(e) => setOpenaiKey(e.target.value)}
+                          placeholder="sk-..."
+                          className="input-field w-full font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm text-zinc-400 mb-2">OpenAI Modell</label>
+                        <input
+                          type="text"
+                          list="shortform-openai-models"
+                          value={openaiModel}
+                          onChange={(e) => setOpenaiModel(normalizeShortformModel('openai', e.target.value))}
+                          className="input-field w-full font-mono"
+                        />
+                        <datalist id="shortform-openai-models">
+                          {SHORTFORM_MODEL_SUGGESTIONS.openai.map((model) => <option key={model} value={model} />)}
+                        </datalist>
+                      </div>
+                    </div>
+                  )}
+
+                  {llmProvider === 'claude' && (
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div>
+                        <label className="block text-sm text-zinc-400 mb-2">Claude API-Key</label>
+                        <input
+                          type="password"
+                          value={claudeKey}
+                          onChange={(e) => setClaudeKey(e.target.value)}
+                          placeholder="sk-ant-..."
+                          className="input-field w-full font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm text-zinc-400 mb-2">Claude Modell</label>
+                        <input
+                          type="text"
+                          list="shortform-claude-models"
+                          value={claudeModel}
+                          onChange={(e) => setClaudeModel(normalizeShortformModel('claude', e.target.value))}
+                          className="input-field w-full font-mono"
+                        />
+                        <datalist id="shortform-claude-models">
+                          {SHORTFORM_MODEL_SUGGESTIONS.claude.map((model) => <option key={model} value={model} />)}
+                        </datalist>
+                      </div>
+                    </div>
+                  )}
+
+                  {llmProvider === 'minimax' && (
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div>
+                        <label className="block text-sm text-zinc-400 mb-2">MiniMax-Zugangsmodus</label>
+                        <select
+                          value={minimaxAuthMode}
+                          onChange={(e) => setMinimaxAuthMode(e.target.value)}
+                          className="input-field w-full"
+                        >
+                          {MINIMAX_AUTH_MODE_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                          ))}
+                        </select>
+                        <p className="mt-2 text-xs text-zinc-500">
+                          {MINIMAX_AUTH_MODE_OPTIONS.find((option) => option.value === minimaxAuthMode)?.description}
+                        </p>
+                      </div>
+                      <div>
+                        <label className="block text-sm text-zinc-400 mb-2">MiniMax Modell</label>
+                        <input
+                          type="text"
+                          list="shortform-minimax-models"
+                          value={minimaxModel}
+                          onChange={(e) => setMinimaxModel(normalizeShortformModel('minimax', e.target.value))}
+                          className="input-field w-full font-mono"
+                        />
+                        <datalist id="shortform-minimax-models">
+                          {SHORTFORM_MODEL_SUGGESTIONS.minimax.map((model) => <option key={model} value={model} />)}
+                        </datalist>
+                      </div>
+                      <div className="md:col-span-2">
+                        <label className="block text-sm text-zinc-400 mb-2">
+                          {minimaxAuthMode === 'token_plan' ? 'MiniMax Token Plan Key' : 'MiniMax Pay-as-you-go API-Key'}
+                        </label>
+                        <input
+                          type="password"
+                          value={minimaxKey}
+                          onChange={(e) => setMinimaxKey(e.target.value)}
+                          placeholder={minimaxAuthMode === 'token_plan' ? 'Token Plan Key' : 'Open Platform API Key'}
+                          className="input-field w-full font-mono"
+                        />
+                        <p className="mt-2 text-xs text-zinc-500">
+                          {minimaxAuthMode === 'token_plan'
+                            ? 'Nutze hier den separaten Token-Plan-Key aus deinem MiniMax-Token-Plan. Dieser Key ist laut MiniMax nicht identisch mit dem normalen API-Key.'
+                            : 'Nutze hier den normalen Open-Platform-API-Key fuer verbrauchsbasierte Abrechnung.'}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {llmProvider === 'ollama' && (
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div>
+                        <label className="block text-sm text-zinc-400 mb-2">Ollama Base-URL</label>
+                        <input
+                          type="text"
+                          value={ollamaBaseUrl}
+                          onChange={(e) => setOllamaBaseUrl(e.target.value)}
+                          placeholder="http://127.0.0.1:11434"
+                          className="input-field w-full font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm text-zinc-400 mb-2">Ollama Modell</label>
+                        <input
+                          type="text"
+                          list="shortform-ollama-models"
+                          value={ollamaModel}
+                          onChange={(e) => setOllamaModel(e.target.value)}
+                          className="input-field w-full font-mono"
+                        />
+                        <datalist id="shortform-ollama-models">
+                          {SHORTFORM_MODEL_SUGGESTIONS.ollama.map((model) => <option key={model} value={model} />)}
+                        </datalist>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-sm text-zinc-400 mb-2">Hugging Face / pyannote Token</label>
+                    <input
+                      type="password"
+                      value={huggingFaceKey}
+                      onChange={(e) => setHuggingFaceKey(e.target.value)}
+                      placeholder="hf_..."
+                      className="input-field w-full font-mono"
+                    />
+                    <p className="mt-2 text-xs text-zinc-500">Wird fuer pyannote Speaker Diarization in Longform verwendet, wenn der Toggle aktiviert ist.</p>
+                  </div>
+                  <div>
+                    <label className="block text-sm text-zinc-400 mb-2">Midjourney Bridge API-Key</label>
+                    <input
+                      type="password"
+                      value={midjourneyKey}
+                      onChange={(e) => setMidjourneyKey(e.target.value)}
+                      placeholder="Optionaler Bearer-Key"
+                      className="input-field w-full font-mono"
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="block text-sm text-zinc-400 mb-2">Midjourney Bridge URL</label>
+                    <input
+                      type="text"
+                      value={midjourneyBaseUrl}
+                      onChange={(e) => setMidjourneyBaseUrl(e.target.value)}
+                      placeholder="z.B. https://dein-bridge-service.example.com/v1/generate"
+                      className="input-field w-full font-mono"
+                    />
+                    <p className="mt-2 text-xs text-zinc-500">
+                      Midjourney ist hier als Bridge-Provider angebunden. OpenShorts sendet Prompt, Modell, Variantenanzahl und Referenzbilder an diese URL und erwartet Bilddaten oder URLs zurueck.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="glass-panel p-6 mt-8">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="p-2 bg-white/5 rounded-lg text-zinc-200">
+                    <Image size={18} />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-semibold">Thumbnail-Modell-Defaults</h2>
+                    <p className="text-xs text-zinc-500 mt-1">Diese Default-Modelle werden im Longform-Thumbnail-Flow vorbefuellt. Im Job selbst kannst du sie pro Provider noch ueberschreiben.</p>
+                  </div>
+                </div>
+                <div className="space-y-4">
+                  {Object.entries(THUMBNAIL_MODEL_SUGGESTIONS).map(([provider, suggestions]) => (
+                    <div key={provider} className="rounded-2xl border border-white/10 bg-black/20 p-4">
+                      <div className="flex items-center justify-between gap-3 mb-3">
+                        <div>
+                          <div className="font-medium text-white capitalize">{provider}</div>
+                          <div className="text-xs text-zinc-500">
+                            {provider === 'gemini' && 'Gemini-Bildmodelle laut aktueller Google-Doku.'}
+                            {provider === 'openai' && 'OpenAI-Bildmodell fuer Generations-/Edit-Flow.'}
+                            {provider === 'midjourney' && 'Bridge-spezifischer Modellname oder Alias. Freitext ist erlaubt.'}
+                          </div>
+                        </div>
+                        <input
+                          type="text"
+                          value={longformThumbnailModelDefaults[provider] || ''}
+                          onChange={(e) => setLongformThumbnailModelDefaults((prev) => ({ ...prev, [provider]: e.target.value }))}
+                          placeholder="Eigenes Modell eingeben"
+                          className="input-field w-full max-w-md font-mono"
+                        />
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {suggestions.map((modelName) => (
+                          <button
+                            key={modelName}
+                            type="button"
+                            onClick={() => setLongformThumbnailModelDefaults((prev) => ({ ...prev, [provider]: modelName }))}
+                            className={`rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
+                              (longformThumbnailModelDefaults[provider] || '') === modelName
+                                ? 'border-primary/50 bg-primary/20 text-white'
+                                : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10'
+                            }`}
+                          >
+                            {modelName}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="glass-panel p-6 mt-8">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="p-2 bg-white/5 rounded-lg text-zinc-200">
+                    <Image size={18} />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-semibold">Longform Thumbnail-Prompts</h2>
+                    <p className="text-xs text-zinc-500 mt-1">Benannte Presets fuer den Longform-Thumbnail-Flow. Sie stehen in jedem Longform-Job zur Auswahl und koennen dort noch frei angepasst werden.</p>
+                  </div>
+                </div>
+                <div className="space-y-4">
+                  {longformThumbnailPromptPresets.map((preset, index) => (
+                    <div key={preset.id || index} className="rounded-2xl border border-white/10 bg-black/20 p-4 space-y-3">
+                      <div className="grid gap-3 sm:grid-cols-[220px_1fr_auto]">
+                        <input
+                          value={preset.name}
+                          onChange={(e) => setLongformThumbnailPromptPresets((prev) => prev.map((item, itemIndex) => (
+                            itemIndex === index ? { ...item, name: e.target.value } : item
+                          )))}
+                          className="input-field"
+                          placeholder="Preset-Name"
+                        />
+                        <input
+                          value={preset.id}
+                          onChange={(e) => setLongformThumbnailPromptPresets((prev) => prev.map((item, itemIndex) => (
+                            itemIndex === index ? { ...item, id: e.target.value } : item
+                          )))}
+                          className="input-field font-mono"
+                          placeholder="preset_id"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setLongformThumbnailPromptPresets((prev) => prev.filter((_, itemIndex) => itemIndex !== index))}
+                          className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-200 hover:bg-red-500/20"
+                        >
+                          Entfernen
+                        </button>
+                      </div>
+                      <textarea
+                        value={preset.prompt}
+                        onChange={(e) => setLongformThumbnailPromptPresets((prev) => prev.map((item, itemIndex) => (
+                          itemIndex === index ? { ...item, prompt: e.target.value } : item
+                        )))}
+                        rows={4}
+                        className="w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-white focus:outline-none focus:border-primary/50"
+                        placeholder="Beschreibe hier den gewuenschten Thumbnail-Stil..."
+                      />
+                    </div>
+                  ))}
                   <button
-                    onClick={() => setLlmProvider('gemini')}
-                    className={`rounded-xl border px-4 py-3 text-sm text-left transition-colors ${llmProvider === 'gemini' ? 'border-primary bg-primary/10 text-white' : 'border-white/10 text-zinc-400 hover:bg-white/5'}`}
+                    type="button"
+                    onClick={() => setLongformThumbnailPromptPresets((prev) => [
+                      ...prev,
+                      {
+                        id: `preset_${prev.length + 1}`,
+                        name: `Preset ${prev.length + 1}`,
+                        prompt: '',
+                      },
+                    ])}
+                    className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-white hover:bg-white/10"
                   >
-                    Gemini
-                  </button>
-                  <button
-                    onClick={() => setLlmProvider('ollama')}
-                    className={`rounded-xl border px-4 py-3 text-sm text-left transition-colors ${llmProvider === 'ollama' ? 'border-primary bg-primary/10 text-white' : 'border-white/10 text-zinc-400 hover:bg-white/5'}`}
-                  >
-                    Ollama
+                    Neues Preset
                   </button>
                 </div>
               </div>
-              <KeyInput
-                provider={llmProvider}
-                onKeySet={setApiKey}
-                savedKey={apiKey}
-                ollamaBaseUrl={ollamaBaseUrl}
-                onOllamaBaseUrlSet={setOllamaBaseUrl}
-                ollamaModel={ollamaModel}
-                onOllamaModelSet={setOllamaModel}
-              />
 
               <div className="glass-panel p-6 mt-8">
                 <div className="flex items-center gap-3 mb-4">
@@ -2711,7 +5037,7 @@ function App() {
               <div className="glass-panel p-6 mt-8">
                 <div className="flex items-center justify-between mb-4">
                   <h2 className="text-lg font-semibold">Geräte-Sync</h2>
-                  <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Verschlüsselt</span>
+                  <span className="text-[10px] bg-white/5 border border-white/5 px-2 py-0.5 rounded text-zinc-500 uppercase tracking-wider">Cloud + Datei</span>
                 </div>
                 <div className="space-y-4">
                   <label className="flex items-start gap-3 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-left">
@@ -2728,6 +5054,45 @@ function App() {
                       </span>
                     </span>
                   </label>
+
+                  <div className="rounded-xl border border-amber-400/20 bg-amber-400/5 px-4 py-4">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <p className="text-sm font-medium text-white">Einstellungen auf einen anderen Rechner umziehen</p>
+                        <p className="mt-1 text-xs leading-relaxed text-zinc-400">
+                          Exportiert API-Schlüssel, Anbieter-, Upload-, Relay- und Design-Einstellungen. Projekte, Jobs, Videos und Renderdaten werden nie mit exportiert.
+                        </p>
+                        <p className="mt-2 text-[11px] leading-relaxed text-amber-200/80">
+                          Sicherheitswarnung: Die JSON-Datei enthält Geheimnisse im Klartext. Nach dem Import sicher löschen und nicht in Git ablegen.
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={exportSettingsToFile}
+                          disabled={settingsSyncBusy}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300/30 bg-amber-300/10 px-3 py-1.5 text-xs text-amber-100 hover:bg-amber-300/20 disabled:opacity-50"
+                        >
+                          <Download size={14} /> Einstellungen exportieren
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => settingsImportInputRef.current?.click()}
+                          disabled={settingsSyncBusy}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-zinc-200 hover:bg-white/10 disabled:opacity-50"
+                        >
+                          <Upload size={14} /> Einstellungen importieren
+                        </button>
+                        <input
+                          ref={settingsImportInputRef}
+                          type="file"
+                          accept="application/json,.json"
+                          onChange={importSettingsFromFile}
+                          className="hidden"
+                        />
+                      </div>
+                    </div>
+                  </div>
 
                   <div className="flex flex-wrap gap-2">
                     <button
@@ -3113,6 +5478,81 @@ function App() {
                       ))}
                     </select>
                   </div>
+
+                  <div>
+                    <label className="block text-sm text-zinc-400 mb-2">Start-Zoom</label>
+                    <input
+                      type="range"
+                      min="0"
+                      max="2"
+                      step="0.05"
+                      value={hookStyle.startZoomFactor ?? DEFAULT_HOOK_STYLE.startZoomFactor}
+                      onChange={(e) => setHookStyle((prev) => {
+                        const nextStart = clampZoomFactor(e.target.value, DEFAULT_HOOK_STYLE.startZoomFactor);
+                        const currentMax = clampZoomFactor(prev.zoomFactor ?? DEFAULT_HOOK_STYLE.zoomFactor, DEFAULT_HOOK_STYLE.zoomFactor);
+                        return {
+                          ...prev,
+                          startZoomFactor: Math.min(nextStart, currentMax),
+                        };
+                      })}
+                      className="w-full accent-cyan-500"
+                    />
+                    <div className="mt-2 flex justify-between text-xs text-zinc-500">
+                      <span>0.00x</span>
+                      <span>{(hookStyle.startZoomFactor ?? DEFAULT_HOOK_STYLE.startZoomFactor).toFixed(2)}x</span>
+                      <span>2.00x</span>
+                    </div>
+                    <p className="mt-2 text-xs text-zinc-500">
+                      Legt fest, auf welchem Gesichts-Zoom-Level der Clip grundsätzlich startet.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-zinc-400 mb-2">Ziel-Zoom</label>
+                    <input
+                      type="range"
+                      min="0"
+                      max="2"
+                      step="0.05"
+                      value={hookStyle.zoomFactor ?? DEFAULT_HOOK_STYLE.zoomFactor}
+                      onChange={(e) => setHookStyle((prev) => {
+                        const nextMax = clampZoomFactor(e.target.value, DEFAULT_HOOK_STYLE.zoomFactor);
+                        const currentStart = clampZoomFactor(prev.startZoomFactor ?? DEFAULT_HOOK_STYLE.startZoomFactor, DEFAULT_HOOK_STYLE.startZoomFactor);
+                        return {
+                          ...prev,
+                          zoomFactor: Math.max(nextMax, currentStart),
+                        };
+                      })}
+                      className="w-full accent-yellow-500"
+                    />
+                    <div className="mt-2 flex justify-between text-xs text-zinc-500">
+                      <span>0.00x</span>
+                      <span>{(hookStyle.zoomFactor ?? DEFAULT_HOOK_STYLE.zoomFactor).toFixed(2)}x</span>
+                      <span>2.00x</span>
+                    </div>
+                    <p className="mt-2 text-xs text-zinc-500">
+                      Definiert den echten Peak der Viral-Zooms. Jeder Clip startet mit einem schnellen smoothen Einstiegs-Zoom und bekommt danach wiederholte In/Out-Pulse.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm text-zinc-400 mb-2">Flash-Pattern-Interrupts</label>
+                    <select
+                      value={hookStyle.flashMode || DEFAULT_HOOK_STYLE.flashMode}
+                      onChange={(e) => setHookStyle((prev) => ({
+                        ...prev,
+                        flashMode: normalizePatternFlashMode(e.target.value, DEFAULT_HOOK_STYLE.flashMode),
+                      }))}
+                      className="input-field"
+                    >
+                      {PATTERN_FLASH_MODE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                    <p className="mt-2 text-xs text-zinc-500">
+                      Steuert nur die hellen Flash-Blitze beim Final-Render. Zoom-Pulse bleiben separat ueber Start-/Ziel-Zoom geregelt.
+                    </p>
+                  </div>
                 </div>
                 <p className="text-xs text-zinc-500 mt-4">
                   Diese Vorgaben befüllen den Hook-Dialog pro Short vor und können pro Clip überschrieben werden.
@@ -3195,6 +5635,61 @@ function App() {
                     <p className="text-xs text-zinc-500 mt-2">
                       Das ist das globale Upload-Post-Profil für Veröffentlichungen. In einzelnen Clip-Dialogen wird nur das aktive Profil angezeigt.
                     </p>
+                    <label className="mt-4 mb-2 block text-sm text-zinc-400">Kanalbeschreibung fuer dieses Profil</label>
+                    <textarea
+                      value={uploadProfileContexts[uploadUserId] || ''}
+                      onChange={(event) => setUploadProfileContexts((previous) => ({
+                        ...previous,
+                        [uploadUserId]: event.target.value,
+                      }))}
+                      disabled={!uploadUserId}
+                      rows={5}
+                      className="input-field resize-y disabled:opacity-50"
+                      placeholder="Zielgruppe, Themen, Tonalitaet, Kanalziele und redaktionelle Schwerpunkte. Diese Angaben fliessen in Zusammenfassung, Clipauswahl, Titel, Beschreibung und Hooks ein."
+                    />
+                  </div>
+                  <div className="border border-cyan-500/15 rounded-xl p-4 space-y-4 bg-cyan-500/5">
+                    <div>
+                      <h3 className="text-sm font-semibold text-cyan-100">Podcast-Link per Kommentar-DM</h3>
+                      <p className="mt-1 text-xs text-cyan-100/70">
+                        Optionales PHP-Relay auf deinem Netcup-Server. OpenShorts registriert neue Upload-Post-Slots dort; dein Cronjob beantwortet passende Kommentare.
+                      </p>
+                    </div>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div>
+                        <label className="block text-sm text-zinc-400 mb-2">PHP-Script-URL</label>
+                        <input
+                          type="url"
+                          value={podcastDmSettings.relayUrl}
+                          onChange={(e) => setPodcastDmSettings((prev) => ({ ...prev, relayUrl: e.target.value }))}
+                          className="input-field"
+                          placeholder="https://deinserver.de/uploadpost_podcast_dm_relay.php"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm text-zinc-400 mb-2">Relay-Passwort</label>
+                        <input
+                          type="password"
+                          value={podcastDmSettings.relayPassword}
+                          onChange={(e) => setPodcastDmSettings((prev) => ({ ...prev, relayPassword: e.target.value }))}
+                          className="input-field"
+                          placeholder="Simple Secret"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-sm text-zinc-400 mb-2">Standard-Keyword</label>
+                      <input
+                        type="text"
+                        value={podcastDmSettings.defaultKeyword}
+                        onChange={(e) => setPodcastDmSettings((prev) => ({ ...prev, defaultKeyword: e.target.value || 'Video' }))}
+                        className="input-field"
+                        placeholder="Video"
+                      />
+                      <p className="mt-2 text-xs text-zinc-500">
+                        Instagram-CTA, wenn im Job aktiv: Kommentiere &quot;&lt;Keyword&gt;&quot; und wir senden dir den Link zum Podcast zu.
+                      </p>
+                    </div>
                   </div>
                   <div className="border border-white/5 rounded-xl p-4 space-y-4 bg-black/10">
                     <div>
@@ -3388,7 +5883,27 @@ function App() {
                   </p>
                 </div>
 
-                <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} />
+                <MediaInput
+                  onProcess={handleProcess}
+                  isProcessing={isQueueSubmitting}
+                  resetToken={mediaInputResetToken}
+                  submittingLabel="Job wird eingereiht..."
+                  helperText="Jobs laufen seriell, solange das Backend laeuft. Du kannst nach dem Einreihen sofort den naechsten Job konfigurieren."
+                  activeProfileName={uploadUserId}
+                  profileContext={uploadProfileContexts[uploadUserId] || ''}
+                />
+
+                {queueSubmitStatus?.message && (
+                  <div className={`rounded-2xl border px-4 py-3 text-sm ${
+                    queueSubmitStatus.type === 'success'
+                      ? 'border-green-500/20 bg-green-500/10 text-green-200'
+                      : queueSubmitStatus.type === 'info'
+                        ? 'border-cyan-500/20 bg-cyan-500/10 text-cyan-100'
+                        : 'border-red-500/20 bg-red-500/10 text-red-200'
+                  }`}>
+                    {queueSubmitStatus.message}
+                  </div>
+                )}
 
                 <div className="flex items-center justify-center gap-8 text-zinc-500 text-sm">
                   <span className="flex items-center gap-2"><Youtube size={16} /> YouTube</span>
@@ -3404,7 +5919,7 @@ function App() {
             <div className="h-full min-h-0 flex flex-col md:flex-row animate-[fadeIn_0.3s_ease-out]">
 
               {/* Left Panel: Preview & Status */}
-              <div className={`${status === 'complete' ? 'w-full md:w-[30%] lg:w-[25%]' : 'w-full md:w-[55%] lg:w-[60%]'} md:h-full ${isMobileLiveAnalysisOpen ? 'h-[44dvh]' : 'h-auto'} md:max-h-none flex flex-col border-b md:border-b-0 md:border-r border-white/5 bg-black/20 p-4 md:p-6 overflow-hidden md:overflow-y-auto custom-scrollbar touch-scroll transition-all duration-700 ease-in-out`}>
+              <div className={`${status === 'complete' ? (isDesktopLiveAnalysisOpen ? 'w-full md:w-[30%] lg:w-[25%]' : 'w-full md:w-0 md:p-0 md:border-0 md:opacity-0') : 'w-full md:w-[55%] lg:w-[60%]'} md:h-full ${isMobileLiveAnalysisOpen ? 'h-[44dvh]' : 'h-auto'} md:max-h-none flex flex-col border-b md:border-b-0 md:border-r border-white/5 bg-black/20 p-4 md:p-6 overflow-hidden md:overflow-y-auto custom-scrollbar touch-scroll transition-all duration-500 ease-in-out`}>
                 <div className="mb-4 md:mb-6 flex items-center justify-between gap-3">
                   <h2 className="text-lg font-semibold flex items-center gap-2">
                     <Activity className={`text-primary ${status === 'processing' ? 'animate-pulse' : ''}`} size={20} />
@@ -3451,7 +5966,7 @@ function App() {
                   </div>
                 )}
 
-                <div className={`${isMobileLiveAnalysisOpen ? 'flex' : 'hidden'} md:flex flex-1 min-h-0 flex-col gap-4`}>
+                <div className={`${isMobileLiveAnalysisOpen ? 'flex' : 'hidden'} ${status === 'complete' && !isDesktopLiveAnalysisOpen ? 'md:hidden' : 'md:flex'} flex-1 min-h-0 flex-col gap-4`}>
                   {/* Video Preview */}
                   {processingMedia && (
                     <ProcessingAnimation
@@ -3491,7 +6006,49 @@ function App() {
               </div>
 
               {/* Right Panel: Results Grid */}
-              <div className={`${status === 'complete' ? 'w-full md:w-[70%] lg:w-[75%]' : 'w-full md:w-[45%] lg:w-[40%]'} flex-1 min-h-0 md:h-full flex flex-col bg-background p-4 md:p-6 transition-all duration-700 ease-in-out`}>
+              <div className={`${status === 'complete' ? (isDesktopLiveAnalysisOpen ? 'w-full md:w-[70%] lg:w-[75%]' : 'w-full') : 'w-full md:w-[45%] lg:w-[40%]'} flex-1 min-h-0 md:h-full flex flex-col bg-background p-4 md:p-6 transition-all duration-500 ease-in-out`}>
+                {status === 'processing' && (
+                  <div className="mb-4 shrink-0 rounded-2xl border border-cyan-500/15 bg-cyan-500/5">
+                    <button
+                      type="button"
+                      onClick={() => setIsQueuePanelOpen((value) => !value)}
+                      className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left hover:bg-cyan-400/5"
+                    >
+                      <div className="min-w-0">
+                        <h3 className="text-sm font-semibold text-cyan-100">Nächsten Job einreihen</h3>
+                        <p className="mt-1 text-xs text-zinc-500">
+                          Aktuell laufen {queueOverview?.running_count ?? (jobState === 'processing' ? 1 : 0)} / {queueOverview?.max_concurrent_jobs ?? 1}; wartend: {queueOverview?.queued_count ?? 0}.
+                        </p>
+                      </div>
+                      <ChevronDown size={16} className={`text-cyan-100 transition-transform ${isQueuePanelOpen ? '' : '-rotate-90'}`} />
+                    </button>
+                    {isQueuePanelOpen && (
+                      <div className="border-t border-cyan-500/10 p-3 md:p-4">
+                        <MediaInput
+                          onProcess={handleProcess}
+                          isProcessing={isQueueSubmitting}
+                          resetToken={mediaInputResetToken}
+                          submitLabel="Job hinten einreihen"
+                          submittingLabel="Job wird eingereiht..."
+                          helperText="Der laufende Job bleibt aktiv. Dieser Job startet automatisch, sobald er vorne in der Queue ist und das Backend weiterlaeuft."
+                          activeProfileName={uploadUserId}
+                          profileContext={uploadProfileContexts[uploadUserId] || ''}
+                        />
+                        {queueSubmitStatus?.message && (
+                          <div className={`mt-3 rounded-xl border px-3 py-2 text-sm ${
+                            queueSubmitStatus.type === 'success'
+                              ? 'border-green-500/20 bg-green-500/10 text-green-200'
+                              : queueSubmitStatus.type === 'info'
+                                ? 'border-cyan-500/20 bg-cyan-500/10 text-cyan-100'
+                                : 'border-red-500/20 bg-red-500/10 text-red-200'
+                          }`}>
+                            {queueSubmitStatus.message}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div className="mb-4 flex flex-col gap-3 shrink-0">
                   <div className="flex flex-wrap items-start gap-3">
                     <div className="min-w-0">
@@ -3504,6 +6061,94 @@ function App() {
                       </p>
                     </div>
                     <div className="ml-auto flex flex-wrap items-center gap-2">
+                      {jobId && (
+                        <button
+                          type="button"
+                          onClick={openActiveJobAnalysisContext}
+                          className="inline-flex items-center gap-2 rounded-full border border-fuchsia-500/20 bg-fuchsia-500/10 px-3 py-1.5 text-xs text-fuchsia-100 hover:bg-fuchsia-500/15"
+                        >
+                          <Settings size={13} />
+                          Profil & Analyseanweisungen
+                        </button>
+                      )}
+                      {jobId && results?.clips?.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsPodcastCommentTemplateEditing(false);
+                            setIsPodcastDmPanelOpen(true);
+                          }}
+                          className="inline-flex items-center gap-2 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1.5 text-xs text-cyan-100 hover:bg-cyan-500/15"
+                        >
+                          <Share2 size={13} />
+                          Kommentar-DM-Link
+                          <span className={`h-1.5 w-1.5 rounded-full ${
+                            activeJobSocialDefaults.podcastDmEnabled === true && activeJobSocialDefaults.podcastYoutubeUrl
+                              ? 'bg-green-300'
+                              : 'bg-zinc-500'
+                          }`} />
+                        </button>
+                      )}
+                      {status === 'complete' && (
+                        <button
+                          type="button"
+                          onClick={() => setIsDesktopLiveAnalysisOpen((value) => !value)}
+                          className="hidden md:inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/10"
+                        >
+                          <Activity size={13} />
+                          {isDesktopLiveAnalysisOpen ? 'Analyse ausblenden' : 'Analyse einblenden'}
+                        </button>
+                      )}
+                      {jobId && (
+                        <button
+                          type="button"
+                          onClick={() => handleReanalyzeJobWithMinimax(
+                            historyJobs.find((entry) => entry.job_id === jobId) || {
+                              job_id: jobId,
+                              result: results || null,
+                              logs,
+                              request: {},
+                              source_label: results?.source_label || jobId,
+                            }
+                          )}
+                          disabled={reanalyzingJobId === jobId || !minimaxKey}
+                          className="inline-flex items-center gap-2 rounded-full border border-fuchsia-500/20 bg-fuchsia-500/10 px-3 py-1.5 text-xs text-fuchsia-100 hover:bg-fuchsia-500/15 disabled:opacity-50"
+                        >
+                          {reanalyzingJobId === jobId ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />}
+                          Mit MiniMax neu analysieren
+                        </button>
+                      )}
+                      {jobId && results?.clips?.length > 0 && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={syncCurrentJobSocialPosts}
+                            disabled={socialSyncBusy}
+                            className="inline-flex items-center gap-2 rounded-full border border-red-500/20 bg-red-500/10 px-3 py-1.5 text-xs text-red-100 hover:bg-red-500/15 disabled:opacity-50"
+                          >
+                            {socialSyncBusy ? <Loader2 size={13} className="animate-spin" /> : <RefreshCcw size={13} />}
+                            Upload-Post Sync
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => loadJobCalendar(jobId)}
+                            disabled={jobCalendarLoading}
+                            className="inline-flex items-center gap-2 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1.5 text-xs text-cyan-100 hover:bg-cyan-500/15 disabled:opacity-50"
+                          >
+                            {jobCalendarLoading ? <Loader2 size={13} className="animate-spin" /> : <CalendarDays size={13} />}
+                            Kalender
+                          </button>
+                          <button
+                            type="button"
+                            onClick={rescheduleAllCurrentJobSocialPosts}
+                            disabled={jobRescheduleAllBusy}
+                            className="inline-flex items-center gap-2 rounded-full border border-fuchsia-500/20 bg-fuchsia-500/10 px-3 py-1.5 text-xs text-fuchsia-100 hover:bg-fuchsia-500/15 disabled:opacity-50"
+                          >
+                            {jobRescheduleAllBusy ? <Loader2 size={13} className="animate-spin" /> : <RefreshCcw size={13} />}
+                            Reschedule all
+                          </button>
+                        </>
+                      )}
                       {results?.clips?.length > 0 && (
                         <span className="text-xs bg-white/10 text-white px-2 py-0.5 rounded-full">
                           {filteredClipEntries.length}/{results.clips.length} Clips
@@ -3546,6 +6191,24 @@ function App() {
                           {option.label}
                         </button>
                       ))}
+                      {[
+                        { value: 'all', label: 'Alle Render-States' },
+                        { value: 'rendered', label: 'Gerendert' },
+                        { value: 'unrendered', label: 'Nicht gerendert' },
+                      ].map((option) => (
+                        <button
+                          key={`render-${option.value}`}
+                          type="button"
+                          onClick={() => setClipRenderFilter(option.value)}
+                          className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${
+                            clipRenderFilter === option.value
+                              ? 'border-cyan-500/40 bg-cyan-500/15 text-white'
+                              : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
+                          }`}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
                       <button
                         type="button"
                         onClick={() => setShowSelectedOnly((prev) => !prev)}
@@ -3571,6 +6234,39 @@ function App() {
                       </button>
                       <button
                         type="button"
+                        onClick={() => setShowFailedPostsOnly((prev) => !prev)}
+                        className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${
+                          showFailedPostsOnly
+                            ? 'border-red-500/30 bg-red-500/10 text-red-100'
+                            : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
+                        }`}
+                      >
+                        {showFailedPostsOnly ? 'Alle Posting-Fehler' : 'Fehlgeschlagen'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setHideFillerStarts((prev) => !prev)}
+                        className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${
+                          hideFillerStarts
+                            ? 'border-amber-500/30 bg-amber-500/10 text-amber-100'
+                            : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
+                        }`}
+                      >
+                        {hideFillerStarts ? 'Filler-Starts anzeigen' : 'Filler-Starts ausblenden'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDeferPreviewLoading((prev) => !prev)}
+                        className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${
+                          deferPreviewLoading
+                            ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-100'
+                            : 'border-white/10 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
+                        }`}
+                      >
+                        {deferPreviewLoading ? 'Previews manuell laden' : 'Vorhandene Previews direkt laden'}
+                      </button>
+                      <button
+                        type="button"
                         onClick={selectAllVisibleClips}
                         disabled={!filteredClipEntries.length}
                         className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
@@ -3589,15 +6285,254 @@ function App() {
                     </div>
                   )}
 
-                  {bulkStatus?.message && !showBulkActionsBar && (
+                  {(socialSyncStatus?.message || (bulkStatus?.message && !showBulkActionsBar)) && (
                     <div className={`rounded-xl border px-3 py-2 text-sm ${
-                      bulkStatus.type === 'success'
+                      (socialSyncStatus?.type || bulkStatus?.type) === 'success'
                         ? 'border-green-500/20 bg-green-500/10 text-green-200'
-                        : bulkStatus.type === 'warning'
+                        : (socialSyncStatus?.type || bulkStatus?.type) === 'warning'
                           ? 'border-amber-500/20 bg-amber-500/10 text-amber-100'
-                          : 'border-red-500/20 bg-red-500/10 text-red-200'
+                          : (socialSyncStatus?.type || bulkStatus?.type) === 'info'
+                            ? 'border-cyan-500/20 bg-cyan-500/10 text-cyan-100'
+                            : 'border-red-500/20 bg-red-500/10 text-red-200'
                     }`}>
-                      {bulkStatus.message}
+                      {socialSyncStatus?.message || bulkStatus?.message}
+                    </div>
+                  )}
+
+                  {jobId && isAnalysisContextOpen && (
+                    <div className="fixed inset-0 z-[180] flex items-center justify-center p-4">
+                      <button
+                        type="button"
+                        aria-label="Dialog schliessen"
+                        onClick={() => setIsAnalysisContextOpen(false)}
+                        className="absolute inset-0 bg-black/75 backdrop-blur-sm"
+                      />
+                      <div className="relative z-10 max-h-[88vh] w-full max-w-4xl overflow-y-auto rounded-3xl border border-fuchsia-400/20 bg-zinc-950 shadow-2xl shadow-fuchsia-950/40">
+                        <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-white/10 bg-zinc-950/95 px-5 py-4 backdrop-blur">
+                          <div>
+                            <h3 className="text-lg font-semibold text-white">Profil & Analyseanweisungen</h3>
+                            <p className="mt-1 text-xs text-zinc-400">Kanalbeschreibung profilweit verwalten oder den aktuellen Entwurf nur diesem Job zuweisen.</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setIsAnalysisContextOpen(false)}
+                            className="rounded-full border border-white/10 bg-white/5 p-2 text-zinc-300 hover:bg-white/10 hover:text-white"
+                            aria-label="Schliessen"
+                          >
+                            <X size={16} />
+                          </button>
+                        </div>
+                        <div className="grid gap-5 p-5 lg:grid-cols-2">
+                          <div>
+                            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-400">Upload-Post-Profil</label>
+                            <select
+                              value={activeJobAnalysisContext.profileName || uploadUserId || ''}
+                              onChange={(event) => {
+                                const profileName = event.target.value;
+                                setActiveJobAnalysisContext((previous) => ({
+                                  ...previous,
+                                  profileName,
+                                  profileContext: uploadProfileContexts[profileName] || '',
+                                }));
+                              }}
+                              className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
+                            >
+                              <option value="">Nicht zugeordnet</option>
+                              {userProfiles.map((profile) => <option key={profile.username} value={profile.username}>{profile.username}</option>)}
+                            </select>
+                            <label className="mb-1 mt-4 block text-xs font-semibold uppercase tracking-wide text-zinc-400">Kanalbeschreibung</label>
+                            <textarea
+                              value={activeJobAnalysisContext.profileContext}
+                              onChange={(event) => setActiveJobAnalysisContext((previous) => ({ ...previous, profileContext: event.target.value }))}
+                              rows={7}
+                              className="w-full resize-y rounded-xl border border-white/10 bg-black/40 p-3 text-sm text-white"
+                              placeholder="Kanalbeschreibung, Zielgruppe, Tonalitaet und Themenschwerpunkte"
+                            />
+                            <p className="mt-2 text-xs text-zinc-500">Profilübergreifend speichern übernimmt diese Beschreibung automatisch für künftig angelegte Jobs dieses Profils.</p>
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-400">Anweisungen fuer diesen Job</label>
+                            <textarea
+                              value={activeJobAnalysisContext.jobInstructions}
+                              onChange={(event) => setActiveJobAnalysisContext((previous) => ({ ...previous, jobInstructions: event.target.value }))}
+                              rows={11}
+                              className="w-full resize-y rounded-xl border border-white/10 bg-black/40 p-3 text-sm text-white"
+                              placeholder="Z. B. Titel immer mit einem bestimmten Wort beginnen lassen oder einen inhaltlichen Schwerpunkt setzen."
+                            />
+                            <p className="mt-2 text-xs text-zinc-500">Job-Anweisungen bleiben ausschließlich bei diesem Job und werden bei einer erneuten Analyse berücksichtigt.</p>
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap justify-end gap-3 border-t border-white/10 bg-black/20 px-5 py-4">
+                          <button
+                            type="button"
+                            onClick={saveActiveProfileContext}
+                            disabled={!String(activeJobAnalysisContext.profileName || uploadUserId || '').trim()}
+                            className="rounded-xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-100 hover:bg-cyan-400/15 disabled:opacity-40"
+                          >
+                            Profilübergreifend speichern
+                          </button>
+                          <button
+                            type="button"
+                            onClick={saveActiveJobAnalysisContext}
+                            disabled={analysisContextSaving}
+                            className="rounded-xl border border-fuchsia-400/20 bg-fuchsia-500/10 px-4 py-2 text-sm font-semibold text-fuchsia-100 hover:bg-fuchsia-500/15 disabled:opacity-50"
+                          >
+                            {analysisContextSaving ? 'Speichert...' : 'Nur fuer diesen Job speichern'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {jobId && results?.clips?.length > 0 && isPodcastDmPanelOpen && (
+                    <div className="fixed inset-0 z-[180] flex items-center justify-center p-4">
+                      <button
+                        type="button"
+                        aria-label="Dialog schliessen"
+                        onClick={() => setIsPodcastDmPanelOpen(false)}
+                        className="absolute inset-0 bg-black/75 backdrop-blur-sm"
+                      />
+                      <div className="relative z-10 w-full max-w-3xl rounded-3xl border border-cyan-400/20 bg-zinc-950 shadow-2xl shadow-cyan-950/30">
+                        <div className="flex items-start justify-between gap-4 border-b border-white/10 px-5 py-4">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h3 className="text-lg font-semibold text-white">Kommentar-DM-Link</h3>
+                              <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                                activeJobSocialDefaults.podcastDmEnabled === true && activeJobSocialDefaults.podcastYoutubeUrl
+                                  ? 'bg-green-400/15 text-green-200'
+                                  : 'bg-zinc-500/15 text-zinc-300'
+                              }`}>
+                                {activeJobSocialDefaults.podcastDmEnabled === true && activeJobSocialDefaults.podcastYoutubeUrl
+                                  ? 'Aktiv fuer Instagram'
+                                  : 'Inaktiv'}
+                              </span>
+                            </div>
+                            <p className="mt-1 text-xs text-zinc-400">Ziel-Link und Kommentar-Keyword für diesen Job festlegen.</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setIsPodcastDmPanelOpen(false)}
+                            className="rounded-full border border-white/10 bg-white/5 p-2 text-zinc-300 hover:bg-white/10 hover:text-white"
+                            aria-label="Schliessen"
+                          >
+                            <X size={16} />
+                          </button>
+                        </div>
+                        <div className="p-5">
+                          <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_180px]">
+                            <div>
+                              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-cyan-100/80">Ziel-Link</label>
+                              <input
+                                type="url"
+                                value={activeJobSocialDefaults.podcastYoutubeUrl}
+                                onChange={(event) => updatePodcastLinkDraftForJob(jobId, { podcastYoutubeUrl: event.target.value })}
+                                className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-cyan-400/50 focus:outline-none"
+                                placeholder="https://example.com/podcast-oder-tutorial"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-cyan-100/80">Keyword</label>
+                              <input
+                                type="text"
+                                value={activeJobSocialDefaults.podcastKeyword}
+                                onChange={(event) => updatePodcastLinkDraftForJob(jobId, { podcastKeyword: event.target.value })}
+                                className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-cyan-400/50 focus:outline-none"
+                                placeholder="Video"
+                              />
+                            </div>
+                          </div>
+                          <div className="mt-4 rounded-xl border border-white/10 bg-black/30 p-4">
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                              <div>
+                                <label className="block text-xs font-semibold uppercase tracking-wide text-cyan-100/80">CTA in Caption und First Comment</label>
+                                <p className="mt-1 text-xs text-zinc-500">Der Platzhalter <code className="text-cyan-200">&lt;keyword&gt;</code> wird beim Posting durch das Keyword ersetzt.</p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setIsPodcastCommentTemplateEditing((value) => !value)}
+                                className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-white/10"
+                              >
+                                {isPodcastCommentTemplateEditing ? 'Vorschau' : 'Bearbeiten'}
+                              </button>
+                            </div>
+                            {isPodcastCommentTemplateEditing ? (
+                              <>
+                                <textarea
+                                  value={activeJobSocialDefaults.podcastCommentTemplate}
+                                  onChange={(event) => updatePodcastLinkDraftForJob(jobId, { podcastCommentTemplate: event.target.value })}
+                                  rows={3}
+                                  className="mt-3 w-full resize-y rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:border-cyan-400/50 focus:outline-none"
+                                  placeholder={DEFAULT_PODCAST_COMMENT_TEMPLATE}
+                                />
+                                {!String(activeJobSocialDefaults.podcastCommentTemplate || '').toLowerCase().includes('<keyword>') && (
+                                  <p className="mt-2 text-xs text-amber-300">Bitte den Platzhalter &lt;keyword&gt; verwenden.</p>
+                                )}
+                              </>
+                            ) : (
+                              <div className="mt-3 rounded-lg border border-cyan-400/15 bg-cyan-400/5 px-3 py-2 text-sm text-cyan-50">
+                                {renderPodcastCommentTemplate(
+                                  activeJobSocialDefaults.podcastCommentTemplate,
+                                  activeJobSocialDefaults.podcastKeyword,
+                                )}
+                              </div>
+                            )}
+                          </div>
+                          <label className="mt-4 flex items-center gap-3 rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-zinc-200">
+                            <input
+                              type="checkbox"
+                              checked={activeJobSocialDefaults.podcastDmEnabled === true}
+                              onChange={(event) => updatePodcastLinkDraftForJob(jobId, { podcastDmEnabled: event.target.checked })}
+                              className="h-4 w-4 rounded border-zinc-600 bg-black/50 text-cyan-400 focus:ring-cyan-400"
+                            />
+                            Kommentar-DM-Automation fuer Instagram aktivieren
+                          </label>
+                          <p className="mt-3 text-xs text-cyan-100/65">
+                            Die CTA wird aktuell nur bei Instagram in Caption und First Comment ergänzt. Andere Plattformen posten unverändert; das Relay registriert nur von Upload-Post unterstützte Kommentar-DMs.
+                          </p>
+                        </div>
+                        <div className="flex justify-end gap-3 border-t border-white/10 bg-black/20 px-5 py-4">
+                          <button
+                            type="button"
+                            onClick={() => setIsPodcastDmPanelOpen(false)}
+                            className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-zinc-300 hover:bg-white/10"
+                          >
+                            Abbrechen
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const result = await applyPodcastLinkToJob(jobId, activeJobSocialDefaults);
+                              if (result?.success) setIsPodcastCommentTemplateEditing(false);
+                            }}
+                            disabled={!String(activeJobSocialDefaults.podcastCommentTemplate || '').toLowerCase().includes('<keyword>')}
+                            className="inline-flex items-center justify-center gap-2 rounded-xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-100 hover:bg-cyan-400/15"
+                          >
+                            Fuer diesen Job speichern
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const saved = await applyPodcastLinkToJob(jobId, activeJobSocialDefaults);
+                              if (!saved?.success) return;
+                              setIsPodcastCommentTemplateEditing(false);
+                              await repairPodcastCampaignSchedules({
+                                jobIds: [jobId],
+                                profileUsername: activeJobUploadProfile,
+                              }).catch(() => {});
+                            }}
+                            disabled={
+                              podcastCampaignRepairBusy
+                              || activeJobSocialDefaults.podcastDmEnabled !== true
+                              || !String(activeJobSocialDefaults.podcastYoutubeUrl || '').trim()
+                              || !String(activeJobSocialDefaults.podcastCommentTemplate || '').toLowerCase().includes('<keyword>')
+                            }
+                            className="inline-flex items-center justify-center gap-2 rounded-xl border border-amber-400/25 bg-amber-400/10 px-4 py-2 text-sm font-semibold text-amber-100 hover:bg-amber-400/15 disabled:opacity-40"
+                          >
+                            {podcastCampaignRepairBusy ? <Loader2 size={15} className="animate-spin" /> : <RefreshCcw size={15} />}
+                            Speichern + bestehende Posts reparieren
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -3609,7 +6544,7 @@ function App() {
                 }`}>
                   {results && results.clips && results.clips.length > 0 ? (
                     filteredClipEntries.length > 0 ? (
-                    <div className={`grid gap-4 pb-10 ${status === 'complete' ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1'}`}>
+                    <div className="grid grid-cols-1 gap-4 pb-10">
                       {filteredClipEntries.map(({ clip, index: i, key, hookDraftText }) => (
                         <ResultCard
                           key={key}
@@ -3617,8 +6552,16 @@ function App() {
                           index={i}
                           jobId={jobId}
                           uploadPostKey={uploadPostKey}
-                          uploadUserId={uploadUserId}
+                          uploadUserId={activeJobUploadProfile}
                           geminiApiKey={apiKey}
+                          geminiModel={geminiModel}
+                          openaiKey={openaiKey}
+                          openaiModel={openaiModel}
+                          claudeKey={claudeKey}
+                          claudeModel={claudeModel}
+                          minimaxKey={minimaxKey}
+                          minimaxAuthMode={minimaxAuthMode}
+                          minimaxModel={minimaxModel}
                           llmProvider={llmProvider}
                           ollamaBaseUrl={ollamaBaseUrl}
                           ollamaModel={ollamaModel}
@@ -3628,7 +6571,8 @@ function App() {
                           tightEditPreset={tightEditSettings.preset || DEFAULT_TIGHT_EDIT_SETTINGS.preset}
                           socialPostSettings={socialPostSettings}
                           jobInstagramCollaborators={activeJobSocialDefaults.instagramCollaborators}
-                          activeUploadProfile={uploadUserId}
+                          podcastDmSettings={podcastDmSettings}
+                          activeUploadProfile={activeJobUploadProfile}
                           onApplySubtitleDefaultsToJob={(style) => applySubtitleDefaultsToJob(jobId, style)}
                           onApplyHookDefaultsToJob={(style) => applyHookDefaultsToJob(jobId, style)}
                           onApplyInstagramCollaboratorsToJob={(value) => applyInstagramCollaboratorsToJob(jobId, value)}
@@ -3640,6 +6584,7 @@ function App() {
                           onPause={handleClipPause}
                           hookDraftText={hookDraftText}
                           onHookDraftChange={(value) => updateClipHookDraft(clip, i, value)}
+                          deferPreviewLoading={deferPreviewLoading}
                           isSelected={selectedClipKeys.includes(key)}
                           onToggleSelect={() => toggleClipSelection(clip, i)}
                         />
@@ -3653,9 +6598,17 @@ function App() {
                         <p className="text-sm">
                           {showSelectedOnly
                             ? 'In der aktuellen Auswahl ist kein Clip sichtbar.'
+                            : clipRenderFilter === 'rendered'
+                              ? 'Kein Clip ist aktuell gerendert.'
+                              : clipRenderFilter === 'unrendered'
+                                ? 'Kein Clip ist aktuell im Rohzustand.'
                             : showUnpostedOnly
                               ? 'Kein Clip passt zum Filter Nicht gepostet.'
-                            : 'Kein Clip passt zum aktiven Filter.'}
+                              : showFailedPostsOnly
+                                ? 'Kein Clip passt zum Filter Fehlgeschlagen.'
+                                : hideFillerStarts
+                                  ? 'Alle sichtbaren Clips starten aktuell mit einem markierten Fuellwort.'
+                                  : 'Kein Clip passt zum aktiven Filter.'}
                         </p>
                       </div>
                     )
@@ -3682,16 +6635,31 @@ function App() {
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="rounded-full border border-fuchsia-500/30 bg-fuchsia-500/10 px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-fuchsia-200">
-                              {selectedClipKeys.length} Shorts ausgewaehlt
+                              {currentBulkOperation?.total_count || selectedClipKeys.length} Shorts
                             </span>
-                            {bulkProgress && (
+                            {(bulkProgress || currentBulkOperation) && (
                               <span className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-cyan-200">
-                              {bulkProgress.current}/{bulkProgress.total} {bulkProgress.phase === 'render' ? 'Render' : 'Schedule'}
+                                {currentBulkOperation
+                                  ? formatBulkOperationSummary(currentBulkOperation)
+                                  : `${bulkProgress.current}/${bulkProgress.total} ${bulkProgress.phase === 'render' ? 'Render' : 'Planung'}`}
+                              </span>
+                            )}
+                            {currentBulkOperation && (bulkOperationIsRunning || bulkOperationCanResume) && (
+                              <span className={`rounded-full border px-2 py-1 text-[11px] font-semibold uppercase tracking-wide ${
+                                bulkOperationIsRunning
+                                  ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-100'
+                                  : bulkOperationCanResume
+                                    ? 'border-amber-500/30 bg-amber-500/10 text-amber-100'
+                                    : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100'
+                              }`}>
+                                {currentBulkOperation.status}
                               </span>
                             )}
                           </div>
                           <p className="mt-2 text-xs text-zinc-400">
-                            {isBulkBarCollapsed
+                            {(currentBulkOperation && (bulkOperationIsRunning || bulkOperationCanResume) && currentBulkOperation.message)
+                              ? currentBulkOperation.message
+                              : isBulkBarCollapsed
                               ? 'Multi-Post-Leiste minimiert. Erweitern, um Reihenfolge, Timing und Posting-Optionen zu bearbeiten.'
                               : 'Quick-Render nutzt globale Untertitel- und Hook-Vorgaben. Die Reihenfolge-Liste bestimmt die Posting-Reihenfolge.'}
                           </p>
@@ -3700,6 +6668,7 @@ function App() {
                           <button
                             type="button"
                             onClick={() => setIsBulkOrderOpen((prev) => !prev)}
+                            disabled={!selectedClipEntries.length}
                             className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200 hover:bg-white/10"
                           >
                             <GripVertical size={15} />
@@ -3716,21 +6685,100 @@ function App() {
                           <button
                             type="button"
                             onClick={() => setSelectedClipKeys([])}
-                            disabled={isBulkScheduling}
+                            disabled={isBulkScheduling || bulkOperationIsRunning}
                             className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-300 hover:bg-white/10 disabled:opacity-50"
                           >
                             <X size={15} />
                             Auswahl leeren
                           </button>
-                          <button
-                            type="button"
-                            onClick={handleBulkRenderAndSchedule}
-                            disabled={isBulkScheduling}
-                            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-fuchsia-600 to-pink-600 px-4 py-2.5 text-sm font-semibold text-white hover:from-fuchsia-500 hover:to-pink-500 disabled:opacity-60"
-                          >
-                            {isBulkScheduling ? <Loader2 size={16} className="animate-spin" /> : <Share2 size={16} />}
-                            {isBulkScheduling ? 'Bearbeite Auswahl...' : 'Rendern & planen'}
-                          </button>
+                          {currentBulkOperation && (bulkOperationIsRunning || bulkOperationCanResume) ? (
+                            <>
+                              {bulkOperationIsRunning ? (
+                                <button
+                                  type="button"
+                                  onClick={handlePauseBulkOperation}
+                                  disabled={bulkControlBusy === 'pause'}
+                                  className="inline-flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-sm font-medium text-amber-100 hover:bg-amber-500/15 disabled:opacity-60"
+                                >
+                                  {bulkControlBusy === 'pause' ? <Loader2 size={16} className="animate-spin" /> : <Clock3 size={16} />}
+                                  Pause
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={handleResumeBulkOperation}
+                                  disabled={bulkControlBusy === 'resume'}
+                                  className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-600 to-sky-600 px-4 py-2.5 text-sm font-semibold text-white hover:from-cyan-500 hover:to-sky-500 disabled:opacity-60"
+                                >
+                                  {bulkControlBusy === 'resume' ? <Loader2 size={16} className="animate-spin" /> : <Share2 size={16} />}
+                                  Fortsetzen
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={handleStopBulkOperation}
+                                disabled={bulkControlBusy === 'stop'}
+                                className="inline-flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-sm font-medium text-red-200 hover:bg-red-500/15 disabled:opacity-60"
+                              >
+                                {bulkControlBusy === 'stop' ? <Loader2 size={16} className="animate-spin" /> : <X size={16} />}
+                                Stop
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleBulkAction(BULK_OPERATION_MODES.RENDER_ONLY)}
+                                disabled={isBulkScheduling}
+                                className={`inline-flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-medium transition-colors disabled:opacity-60 ${
+                                  bulkOperationMode === BULK_OPERATION_MODES.RENDER_ONLY
+                                    ? 'border-fuchsia-500/50 bg-fuchsia-500/15 text-fuchsia-100 hover:bg-fuchsia-500/20'
+                                    : 'border-white/10 bg-white/5 text-zinc-200 hover:bg-white/10'
+                                }`}
+                              >
+                                {isBulkScheduling && bulkOperationMode === BULK_OPERATION_MODES.RENDER_ONLY
+                                  ? <Loader2 size={16} className="animate-spin" />
+                                  : <Sparkles size={16} />}
+                                {isBulkScheduling && bulkOperationMode === BULK_OPERATION_MODES.RENDER_ONLY
+                                  ? BULK_OPERATION_CONFIG[BULK_OPERATION_MODES.RENDER_ONLY].progressButtonLabel
+                                  : BULK_OPERATION_CONFIG[BULK_OPERATION_MODES.RENDER_ONLY].label}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleBulkAction(BULK_OPERATION_MODES.POST_ONLY)}
+                                disabled={isBulkScheduling}
+                                className={`inline-flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-medium transition-colors disabled:opacity-60 ${
+                                  bulkOperationMode === BULK_OPERATION_MODES.POST_ONLY
+                                    ? 'border-cyan-500/50 bg-cyan-500/15 text-cyan-100 hover:bg-cyan-500/20'
+                                    : 'border-white/10 bg-white/5 text-zinc-200 hover:bg-white/10'
+                                }`}
+                              >
+                                {isBulkScheduling && bulkOperationMode === BULK_OPERATION_MODES.POST_ONLY
+                                  ? <Loader2 size={16} className="animate-spin" />
+                                  : <CalendarDays size={16} />}
+                                {isBulkScheduling && bulkOperationMode === BULK_OPERATION_MODES.POST_ONLY
+                                  ? BULK_OPERATION_CONFIG[BULK_OPERATION_MODES.POST_ONLY].progressButtonLabel
+                                  : BULK_OPERATION_CONFIG[BULK_OPERATION_MODES.POST_ONLY].label}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleBulkAction(BULK_OPERATION_MODES.RENDER_AND_POST)}
+                                disabled={isBulkScheduling}
+                                className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-white transition-all disabled:opacity-60 ${
+                                  bulkOperationMode === BULK_OPERATION_MODES.RENDER_AND_POST
+                                    ? 'bg-gradient-to-r from-fuchsia-600 to-pink-600 hover:from-fuchsia-500 hover:to-pink-500'
+                                    : 'bg-gradient-to-r from-zinc-700 to-zinc-600 hover:from-zinc-600 hover:to-zinc-500'
+                                }`}
+                              >
+                                {isBulkScheduling && bulkOperationMode === BULK_OPERATION_MODES.RENDER_AND_POST
+                                  ? <Loader2 size={16} className="animate-spin" />
+                                  : <Share2 size={16} />}
+                                {isBulkScheduling && bulkOperationMode === BULK_OPERATION_MODES.RENDER_AND_POST
+                                  ? BULK_OPERATION_CONFIG[BULK_OPERATION_MODES.RENDER_AND_POST].progressButtonLabel
+                                  : BULK_OPERATION_CONFIG[BULK_OPERATION_MODES.RENDER_AND_POST].label}
+                              </button>
+                            </>
+                          )}
                           <button
                             type="button"
                             onClick={() => setIsBulkBarCollapsed((prev) => !prev)}
@@ -3788,7 +6836,7 @@ function App() {
                       )}
 
                       {!isBulkBarCollapsed && (
-                        <div className="grid gap-3 md:grid-cols-[180px_140px_minmax(0,1fr)] xl:grid-cols-[180px_140px_minmax(0,1fr)_minmax(0,1fr)]">
+                        <div className="grid gap-3 md:grid-cols-[180px_140px_140px_minmax(0,1fr)] xl:grid-cols-[180px_140px_140px_minmax(0,1fr)_minmax(0,1fr)]">
                         <div className="rounded-xl border border-white/10 bg-black/20 p-3">
                           <label className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
                             <CalendarDays size={14} />
@@ -3818,6 +6866,24 @@ function App() {
                           />
                           <p className="mt-2 text-[11px] text-zinc-500">
                             `1` = taeglich, `3` = jeder dritte Tag.
+                          </p>
+                        </div>
+
+                        <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                          <label className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
+                            <SkipForward size={14} />
+                            Skip
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="1"
+                            value={bulkSkipCount}
+                            onChange={(e) => setBulkSkipCount(Math.max(0, Number(e.target.value) || 0))}
+                            className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:border-primary/50"
+                          />
+                          <p className="mt-2 text-[11px] text-zinc-500">
+                            Ueberspringt die ersten {normalizedBulkSkipCount} ausgewaehlten Shorts und setzt beim naechsten Slot fort.
                           </p>
                         </div>
 
@@ -3855,6 +6921,11 @@ function App() {
                         <div className="rounded-xl border border-white/10 bg-black/20 p-3">
                           <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-400">
                             Nächste Slots
+                          </div>
+                          <div className="mb-2 text-[11px] text-zinc-500">
+                            {bulkProcessEntries.length > 0
+                              ? `${bulkProcessEntries.length} Shorts werden verarbeitet.`
+                              : 'Mit dem aktuellen Skip bleibt keine Short mehr uebrig.'}
                           </div>
                           {bulkSchedulePreviewError ? (
                             <p className="text-[11px] text-red-300">{bulkSchedulePreviewError}</p>
@@ -4029,6 +7100,50 @@ function App() {
           )}
 
         </div>
+        <UploadPostCalendarModal
+          isOpen={isJobCalendarOpen}
+          title="Job-Kalender"
+          events={jobCalendarEvents}
+          loading={jobCalendarLoading}
+          error={jobCalendarError}
+          onClose={() => setIsJobCalendarOpen(false)}
+          onRefresh={() => loadJobCalendar(jobId)}
+          onSaveEvent={({ event, payload }) => saveCalendarEvent({ event, payload, scope: 'job' })}
+          onRescheduleEvent={({ event, payload }) => saveCalendarEvent({ event, payload: { ...payload, mode: 'recreate' }, scope: 'job' })}
+          onDeleteEvent={(event) => deleteCalendarEvent(event, 'job')}
+          onResolveRemotePreview={resolveCalendarRemotePreview}
+          onRescheduleAll={rescheduleAllCurrentJobSocialPosts}
+          showRescheduleAll
+          rescheduleAllBusy={jobRescheduleAllBusy}
+        />
+        <UploadPostCalendarModal
+          isOpen={isGlobalCalendarOpen}
+          title="Upload-Post Kalender"
+          events={globalCalendarEvents}
+          pendingItems={globalCalendarPendingItems}
+          loading={globalCalendarLoading}
+          error={globalCalendarError}
+          onClose={() => setIsGlobalCalendarOpen(false)}
+          onRefresh={loadGlobalCalendar}
+          onSaveEvent={({ event, payload }) => saveCalendarEvent({ event, payload, scope: 'global' })}
+          onRescheduleEvent={({ event, payload }) => saveCalendarEvent({ event, payload: { ...payload, mode: 'recreate' }, scope: 'global' })}
+          onDeleteEvent={(event) => deleteCalendarEvent(event, 'global')}
+          onResolveRemotePreview={resolveCalendarRemotePreview}
+          pendingSummary={{
+            total_count: globalCalendarPendingItems.length,
+            failed_count: globalCalendarPendingItems.filter((item) => item.status === 'failed').length,
+            ready_count: globalCalendarPendingItems.filter((item) => item.status !== 'failed').length,
+          }}
+          defaultPostSettings={socialPostSettings}
+          onSavePendingItem={saveGlobalPendingCalendarItem}
+          onSchedulePendingItems={scheduleGlobalPendingCalendarItems}
+          showPendingScheduler
+          vendorCalendarComplete={globalCalendarVendorComplete}
+          pendingOperationProgress={globalScheduleBatchProgress}
+          onRepairPodcastCampaigns={repairPodcastCampaignSchedules}
+          podcastCampaignRepairBusy={podcastCampaignRepairBusy}
+          podcastCampaignRepairStatus={podcastCampaignRepairStatus}
+        />
       </main>
     </div>
   );

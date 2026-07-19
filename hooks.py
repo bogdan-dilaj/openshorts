@@ -16,6 +16,8 @@ from overlay_styles import (
 from runtime_limits import FFMPEG_PRESET, ffmpeg_thread_args, subprocess_priority_kwargs
 
 OVERLAY_FFMPEG_PRESET = (os.environ.get("OVERLAY_FFMPEG_PRESET") or "veryfast").strip() or FFMPEG_PRESET
+DEFAULT_HOOK_VISIBLE_SECONDS = max(0.0, float(os.environ.get("HOOK_VISIBLE_SECONDS", "4.0") or "4.0"))
+DEFAULT_HOOK_FADE_OUT_SECONDS = max(0.0, float(os.environ.get("HOOK_FADE_OUT_SECONDS", "0.45") or "0.45"))
 
 WIDTH_PRESETS = {
     "full": 0.96,
@@ -553,6 +555,8 @@ def add_hook_to_video(
     width_preset="wide",
     font_name=DEFAULT_HOOK_FONT,
     background_style=DEFAULT_BACKGROUND_STYLE,
+    visible_seconds=DEFAULT_HOOK_VISIBLE_SECONDS,
+    fade_out_seconds=DEFAULT_HOOK_FADE_OUT_SECONDS,
 ):
     """
     Overlays text hook onto video.
@@ -603,15 +607,28 @@ def add_hook_to_video(
         # 4. FFmpeg Command
         print(f"🎬 Overlaying hook: '{text}' with preview-matched layout")
         
+        visible_seconds = max(0.0, float(visible_seconds or 0.0))
+        fade_out_seconds = max(0.0, float(fade_out_seconds or 0.0))
+        if visible_seconds > 0.0 and fade_out_seconds > 0.0:
+            fade_start = max(0.0, visible_seconds - fade_out_seconds)
+            filter_complex = (
+                f"[1:v]format=rgba,fade=t=out:st={fade_start:.3f}:d={fade_out_seconds:.3f}:alpha=1[hook];"
+                "[0:v][hook]overlay=0:0[vout]"
+            )
+        else:
+            filter_complex = "[0:v][1:v]overlay=0:0[vout]"
+
         ffmpeg_cmd = [
             'ffmpeg', '-y',
             '-loglevel', 'error',
             '-i', video_path,
+            '-loop', '1',
             '-i', img_path,
             *ffmpeg_thread_args(include_filter_threads=True),
-            '-filter_complex', "[0:v][1:v]overlay=0:0[vout]",
+            '-filter_complex', filter_complex,
             '-map', '[vout]',
             '-map', '0:a?',
+            '-shortest',
             '-c:a', 'copy',
             '-c:v', 'libx264', '-preset', OVERLAY_FFMPEG_PRESET, '-crf', '18',
             '-movflags', '+faststart',

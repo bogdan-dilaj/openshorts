@@ -473,8 +473,19 @@ def render_keep_segments(
     args = list(thread_args or [])
     run_kwargs = dict(subprocess_kwargs or {})
 
+    def run_ffmpeg(cmd: List[str]) -> None:
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **run_kwargs)
+        except subprocess.CalledProcessError as exc:
+            stderr_text = exc.stderr.decode("utf-8", errors="replace").strip() if exc.stderr else ""
+            if len(stderr_text) > 2000:
+                stderr_text = stderr_text[-2000:]
+            detail = stderr_text or str(exc)
+            raise RuntimeError(f"FFmpeg keep-segment render failed: {detail}") from exc
+
     if len(safe_segments) == 1:
         start, end = safe_segments[0]
+        duration = max(0.001, end - start)
         cmd = [
             "ffmpeg",
             "-y",
@@ -482,10 +493,10 @@ def render_keep_segments(
             "error",
             "-ss",
             f"{start:.3f}",
-            "-to",
-            f"{end:.3f}",
             "-i",
             input_video,
+            "-t",
+            f"{duration:.3f}",
             *args,
             "-c:v",
             "libx264",
@@ -501,7 +512,7 @@ def render_keep_segments(
             "+faststart",
             output_path,
         ]
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **run_kwargs)
+        run_ffmpeg(cmd)
         return
 
     has_audio = _has_audio_stream(input_video)
@@ -550,4 +561,4 @@ def render_keep_segments(
         cmd.extend(["-c:a", "aac", "-b:a", audio_bitrate])
 
     cmd.extend(["-movflags", "+faststart", output_path])
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **run_kwargs)
+    run_ffmpeg(cmd)

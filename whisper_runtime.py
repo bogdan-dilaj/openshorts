@@ -1,11 +1,15 @@
 import hashlib
+import glob
 import os
 import re
 import threading
 import time
-from typing import Any, Dict, List, Tuple
+import ctypes
+import gc
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from faster_whisper import WhisperModel
+if TYPE_CHECKING:
+    from faster_whisper import WhisperModel
 
 from runtime_limits import WHISPER_CPU_THREADS
 
@@ -15,12 +19,18 @@ except Exception:  # pragma: no cover - torch is available in runtime, keep fall
     torch = None
 
 
-_MODEL_CACHE: Dict[Tuple[str, str, str, int, int], WhisperModel] = {}
+_MODEL_CACHE: Dict[Tuple[str, str, str, int, int], Any] = {}
 _MODEL_META: Dict[Tuple[str, str, str, int, int], Dict[str, Any]] = {}
 _MODEL_LOCK = threading.Lock()
 _MODEL_RESOLUTION_CACHE: Dict[str, str] = {}
 _MODEL_RESOLUTION_LOCK = threading.Lock()
 _VALID_LANGUAGE_TOKEN = set("abcdefghijklmnopqrstuvwxyz-")
+_FASTER_WHISPER_MODEL_CLASS = None
+_CUDA_RUNTIME_READY: Optional[bool] = None
+_CUDA_RUNTIME_LOCK = threading.Lock()
+_LEGACY_MODEL_MAPPINGS = {
+    "primeline/distil-whisper-large-v3-german": "primeline/whisper-large-v3-german",
+}
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -63,6 +73,97 @@ def _normalize_language_code(raw: Any) -> str:
     return value.split("-")[0]
 
 
+def _normalize_model_hint(raw: Any) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    return _LEGACY_MODEL_MAPPINGS.get(value, value)
+
+
+def _is_english_biased_distil_model(model_name: Any) -> bool:
+    lowered = str(model_name or "").strip().lower()
+    if not lowered:
+        return False
+    if "german" in lowered or lowered.endswith(".de"):
+        return False
+    return "distil-large-v3" in lowered
+
+
+def _get_whisper_model_class():
+    global _FASTER_WHISPER_MODEL_CLASS
+    if _FASTER_WHISPER_MODEL_CLASS is not None:
+        return _FASTER_WHISPER_MODEL_CLASS
+    from faster_whisper import WhisperModel as FasterWhisperModel
+    _FASTER_WHISPER_MODEL_CLASS = FasterWhisperModel
+    return _FASTER_WHISPER_MODEL_CLASS
+
+
+def _is_memory_pressure_error(exc: Exception) -> bool:
+    if isinstance(exc, MemoryError):
+        return True
+    text = str(exc or "").strip().lower()
+    return any(
+        needle in text
+        for needle in (
+            "std::bad_alloc",
+            "bad_alloc",
+            "cannot allocate memory",
+            "out of memory",
+            "insufficient memory",
+        )
+    )
+
+
+def _release_cached_whisper_runtime(meta: Dict[str, Any]) -> None:
+    key = _runtime_key(
+        str(meta.get("resolved_model") or ""),
+        str(meta.get("device") or ""),
+        str(meta.get("compute_type") or ""),
+        int(meta.get("cpu_threads") or 1),
+        int(meta.get("num_workers") or 1),
+    )
+    model = _MODEL_CACHE.pop(key, None)
+    _MODEL_META.pop(key, None)
+    if model is not None:
+        try:
+            del model
+        except Exception:
+            pass
+    gc.collect()
+    if torch is not None and torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+def _memory_retry_model_candidates(language_hint: str, attempted_models: List[str]) -> List[str]:
+    attempted = {str(item or "").strip() for item in attempted_models if str(item or "").strip()}
+    candidates: List[str] = []
+    if _normalize_language_code(language_hint) == "de":
+        candidates.extend([
+            "primeline/whisper-large-v3-german",
+            "large-v3",
+            "medium",
+            "small",
+            "base",
+        ])
+    else:
+        candidates.extend([
+            "distil-large-v3",
+            "medium",
+            "small",
+            "base",
+        ])
+    ordered: List[str] = []
+    for item in candidates:
+        normalized = str(item or "").strip()
+        if not normalized or normalized in attempted or normalized in ordered:
+            continue
+        ordered.append(normalized)
+    return ordered
+
+
 def _language_hints() -> List[str]:
     hints = _csv_env("WHISPER_LANGUAGE_HINTS", [])
     normalized: List[str] = []
@@ -77,13 +178,14 @@ def _language_hints() -> List[str]:
 
 
 def _transcribe_once(
-    model: WhisperModel,
+    model: Any,
     audio_path: str,
     *,
     word_timestamps: bool,
     beam_size: int,
     vad_filter: bool,
     language: str = "",
+    progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
 ):
     kwargs = {
         "task": "transcribe",
@@ -111,6 +213,18 @@ def _transcribe_once(
                 "⏳ Whisper decoding... "
                 f"segments={idx}, audio={minutes:02d}:{seconds:02d}"
             )
+            if progress_cb is not None:
+                try:
+                    progress_cb(
+                        {
+                            "status": "decoding",
+                            "segments": idx,
+                            "audio_seconds": seg_end,
+                            "audio_label": f"{minutes:02d}:{seconds:02d}",
+                        }
+                    )
+                except Exception:
+                    pass
             last_progress_log = now
 
     if segments:
@@ -120,8 +234,32 @@ def _transcribe_once(
             "✅ Whisper decoding finished. "
             f"segments={len(segments)}, audio={minutes:02d}:{seconds:02d}"
         )
+        if progress_cb is not None:
+            try:
+                progress_cb(
+                    {
+                        "status": "completed",
+                        "segments": len(segments),
+                        "audio_seconds": last_audio_second,
+                        "audio_label": f"{minutes:02d}:{seconds:02d}",
+                    }
+                )
+            except Exception:
+                pass
     else:
         print("⚠️ Whisper decoding finished with no segments.")
+        if progress_cb is not None:
+            try:
+                progress_cb(
+                    {
+                        "status": "completed",
+                        "segments": 0,
+                        "audio_seconds": 0.0,
+                        "audio_label": "00:00",
+                    }
+                )
+            except Exception:
+                pass
 
     return segments, info
 
@@ -129,10 +267,98 @@ def _transcribe_once(
 def _resolve_device() -> str:
     configured = (os.environ.get("WHISPER_DEVICE") or "auto").strip().lower()
     if configured in {"cpu", "cuda"}:
+        if configured == "cuda" and not _cuda_runtime_libraries_available():
+            print("⚠️ Whisper CUDA requested, but libcublas.so.12 is unavailable. Falling back to CPU.")
+            return "cpu"
         return configured
-    if torch is not None and torch.cuda.is_available():
+    if torch is not None and torch.cuda.is_available() and _cuda_runtime_libraries_available():
         return "cuda"
     return "cpu"
+
+
+def _candidate_cuda_library_dirs() -> List[str]:
+    candidates: List[str] = []
+    patterns = [
+        "/opt/venv/lib/python*/site-packages/nvidia/*/lib",
+        "/opt/venv/lib64/python*/site-packages/nvidia/*/lib",
+        "/usr/local/lib/openshorts-nvidia",
+        "/usr/local/nvidia/lib64",
+        "/usr/local/nvidia/lib",
+    ]
+    for pattern in patterns:
+        if "*" in pattern or "?" in pattern or "[" in pattern:
+            matches = glob.glob(pattern)
+        else:
+            matches = [pattern]
+        for path in matches:
+            normalized = str(path or "").strip()
+            if not normalized or not os.path.isdir(normalized):
+                continue
+            if normalized not in candidates:
+                candidates.append(normalized)
+    return candidates
+
+
+def _load_cuda_runtime_libraries() -> bool:
+    required_by_priority = [
+        "libcudart.so.12",
+        "libnvrtc.so.12",
+        "libcublasLt.so.12",
+        "libcublas.so.12",
+        "libcudnn.so.9",
+    ]
+    optional = [
+        "libcufft.so.11",
+        "libcurand.so.10",
+        "libcusolver.so.11",
+        "libcusparse.so.12",
+        "libnccl.so.2",
+        "libnvJitLink.so.12",
+    ]
+    library_dirs = _candidate_cuda_library_dirs()
+    if not library_dirs:
+        return False
+    loaded_any = False
+    for name in [*required_by_priority, *optional]:
+        loaded = False
+        for directory in library_dirs:
+            candidate = os.path.join(directory, name)
+            if not os.path.exists(candidate):
+                continue
+            try:
+                ctypes.CDLL(candidate, mode=ctypes.RTLD_GLOBAL)
+                loaded = True
+                loaded_any = True
+                break
+            except OSError:
+                continue
+        if name in required_by_priority and not loaded:
+            return False
+    return loaded_any
+
+
+def _cuda_runtime_libraries_available() -> bool:
+    global _CUDA_RUNTIME_READY
+    if torch is None or not torch.cuda.is_available():
+        return False
+    with _CUDA_RUNTIME_LOCK:
+        if _CUDA_RUNTIME_READY is True:
+            return True
+        try:
+            ctypes.CDLL("libcublas.so.12")
+            _CUDA_RUNTIME_READY = True
+            return True
+        except OSError:
+            pass
+        try:
+            if _load_cuda_runtime_libraries():
+                ctypes.CDLL("libcublas.so.12")
+                _CUDA_RUNTIME_READY = True
+                return True
+        except OSError:
+            pass
+        _CUDA_RUNTIME_READY = False
+        return False
 
 
 def _compute_candidates(device: str, safe_mode: bool) -> List[str]:
@@ -140,6 +366,10 @@ def _compute_candidates(device: str, safe_mode: bool) -> List[str]:
     if configured and configured != "auto":
         if device == "cpu" and configured in {"float16", "int8_float16", "bfloat16"}:
             return ["int8"] if safe_mode else ["float32"]
+        if device == "cuda" and safe_mode:
+            preferred_order = ["float16", "int8_float16", "int8"]
+            if configured in preferred_order:
+                return [configured, *[item for item in preferred_order if item != configured]]
         return [configured]
     if device == "cuda":
         return ["float16", "int8_float16", "int8"] if safe_mode else ["float16"]
@@ -153,16 +383,24 @@ def _model_candidates(
     log_cpu_optimization: bool = True,
     primary_override: str = "",
     cpu_primary_override: str = "",
+    language_hint: str = "",
 ) -> List[str]:
     primary = (primary_override or os.environ.get("WHISPER_MODEL") or "distil-large-v3").strip() or "distil-large-v3"
     cpu_primary = (cpu_primary_override or os.environ.get("WHISPER_CPU_MODEL") or "").strip()
     cpu_auto_distil = _env_bool("WHISPER_CPU_AUTO_DISTIL", True)
+    normalized_language_hint = _normalize_language_code(language_hint)
+    non_english_requested = bool(normalized_language_hint and normalized_language_hint != "en")
 
     ordered_primary: List[str] = []
     if safe_mode and device == "cpu":
         if cpu_primary:
             ordered_primary.append(cpu_primary)
-        elif cpu_auto_distil and "large-v3" in primary.lower() and "distil" not in primary.lower():
+        elif (
+            cpu_auto_distil
+            and not non_english_requested
+            and "large-v3" in primary.lower()
+            and "distil" not in primary.lower()
+        ):
             ordered_primary.append("distil-large-v3")
         if log_cpu_optimization and ordered_primary and ordered_primary[0] != primary:
             print(
@@ -173,10 +411,19 @@ def _model_candidates(
 
     if not safe_mode:
         return [ordered_primary[-1]]
-    fallbacks = _csv_env("WHISPER_MODEL_FALLBACKS", ["medium", "small", "base"])
+    if device == "cuda":
+        fallbacks = _csv_env("WHISPER_CUDA_MODEL_FALLBACKS", ["distil-large-v3", "medium", "small", "base"])
+    else:
+        fallbacks = _csv_env("WHISPER_MODEL_FALLBACKS", ["medium", "small", "base"])
     seen = set()
     ordered: List[str] = []
     for model in [*ordered_primary, *fallbacks]:
+        if non_english_requested and _is_english_biased_distil_model(model):
+            print(
+                "⚠️ Whisper model candidate ignored for non-English transcription: "
+                f"{model} (language={normalized_language_hint})"
+            )
+            continue
         if model in seen:
             continue
         seen.add(model)
@@ -275,8 +522,8 @@ def _resolve_model_reference(model_name: str) -> str:
 
     cache_root = (
         os.environ.get("WHISPER_HF_CONVERT_CACHE_DIR")
-        or "/tmp/.cache/whisper_ct2"
-    ).strip() or "/tmp/.cache/whisper_ct2"
+        or "/app/output/.cache/whisper_ct2"
+    ).strip() or "/app/output/.cache/whisper_ct2"
     os.makedirs(cache_root, exist_ok=True)
     digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
     target_dir = os.path.join(cache_root, f"{_slugify_model_name(normalized)}-{digest}")
@@ -338,24 +585,34 @@ def _resolve_model_reference(model_name: str) -> str:
     return target_dir
 
 
-def get_whisper_model(language_hint: str = "") -> Tuple[WhisperModel, Dict[str, Any]]:
+def get_whisper_model(
+    language_hint: str = "",
+    *,
+    model_override: str = "",
+    cpu_model_override: str = "",
+) -> Tuple[Any, Dict[str, Any]]:
     safe_mode = _env_bool("WHISPER_SAFE_MODE", True)
     device = _resolve_device()
     configured_device = (os.environ.get("WHISPER_DEVICE") or "auto").strip().lower()
     cpu_threads = _env_int("WHISPER_CPU_THREADS", WHISPER_CPU_THREADS, minimum=1)
     num_workers = _env_int("WHISPER_NUM_WORKERS", 1, minimum=1)
-    vram_margin_mb = _env_int("WHISPER_SAFE_VRAM_MARGIN_MB", 1800, minimum=0)
+    vram_margin_mb = _env_int("WHISPER_SAFE_VRAM_MARGIN_MB", 512, minimum=0)
     normalized_language_hint = _normalize_language_code(language_hint)
 
     non_english_requested = bool(normalized_language_hint and normalized_language_hint != "en")
-    primary_override = ""
-    cpu_primary_override = ""
-    if non_english_requested:
-        configured_primary = (os.environ.get("WHISPER_MODEL") or "").strip()
-        configured_de = (os.environ.get("WHISPER_MODEL_DE") or "").strip()
-        configured_non_en = (os.environ.get("WHISPER_MODEL_NON_EN") or "").strip()
-        configured_cpu_de = (os.environ.get("WHISPER_CPU_MODEL_DE") or "").strip()
-        configured_cpu_non_en = (os.environ.get("WHISPER_CPU_MODEL_NON_EN") or "").strip()
+    primary_override = _normalize_model_hint(model_override)
+    cpu_primary_override = _normalize_model_hint(cpu_model_override)
+    if primary_override:
+        print(
+            "🗣️ Whisper explicit model override: "
+            f"language={normalized_language_hint or 'auto'}, target_model={primary_override}"
+        )
+    elif non_english_requested:
+        configured_primary = _normalize_model_hint(os.environ.get("WHISPER_MODEL"))
+        configured_de = _normalize_model_hint(os.environ.get("WHISPER_MODEL_DE"))
+        configured_non_en = _normalize_model_hint(os.environ.get("WHISPER_MODEL_NON_EN"))
+        configured_cpu_de = _normalize_model_hint(os.environ.get("WHISPER_CPU_MODEL_DE"))
+        configured_cpu_non_en = _normalize_model_hint(os.environ.get("WHISPER_CPU_MODEL_NON_EN"))
 
         if normalized_language_hint == "de" and configured_de:
             primary_override = configured_de
@@ -385,6 +642,7 @@ def get_whisper_model(language_hint: str = "") -> Tuple[WhisperModel, Dict[str, 
         "cuda",
         primary_override=primary_override,
         cpu_primary_override=cpu_primary_override,
+        language_hint=normalized_language_hint,
     )
     cpu_models = _model_candidates(
         safe_mode,
@@ -392,6 +650,7 @@ def get_whisper_model(language_hint: str = "") -> Tuple[WhisperModel, Dict[str, 
         log_cpu_optimization=(device == "cpu"),
         primary_override=primary_override,
         cpu_primary_override=cpu_primary_override,
+        language_hint=normalized_language_hint,
     )
     seen_attempts = set()
 
@@ -423,6 +682,7 @@ def get_whisper_model(language_hint: str = "") -> Tuple[WhisperModel, Dict[str, 
     errors: List[str] = []
     had_cuda_failure = False
     logged_cpu_fallback = False
+    last_cuda_failure_detail = ""
 
     with _MODEL_LOCK:
         for model_name, attempt_device, compute_type in attempts:
@@ -432,16 +692,18 @@ def get_whisper_model(language_hint: str = "") -> Tuple[WhisperModel, Dict[str, 
                 and had_cuda_failure
                 and not logged_cpu_fallback
             ):
-                print("⚠️ Whisper GPU unavailable/unstable. Falling back to CPU safe mode.")
+                detail = f" Reason: {last_cuda_failure_detail}" if last_cuda_failure_detail else ""
+                print(f"⚠️ Whisper GPU unavailable/unstable. Falling back to CPU safe mode.{detail}")
                 logged_cpu_fallback = True
 
             if attempt_device == "cuda" and safe_mode:
                 free_mb = _cuda_free_mb()
                 required_mb = _estimated_vram_mb(model_name) + vram_margin_mb
                 if free_mb and free_mb < required_mb:
-                    errors.append(
-                        f"{model_name}/{attempt_device}/{compute_type}: skipped (free VRAM {free_mb}MB < required {required_mb}MB)"
-                    )
+                    message = f"free VRAM {free_mb}MB < required {required_mb}MB"
+                    print(f"⚠️ Whisper CUDA candidate skipped: {model_name}/{compute_type} ({message})")
+                    errors.append(f"{model_name}/{attempt_device}/{compute_type}: skipped ({message})")
+                    last_cuda_failure_detail = f"{model_name}/{compute_type} skipped because {message}"
                     had_cuda_failure = True
                     continue
 
@@ -450,6 +712,7 @@ def get_whisper_model(language_hint: str = "") -> Tuple[WhisperModel, Dict[str, 
             except Exception as exc:
                 errors.append(f"{model_name}/{attempt_device}/{compute_type}: model resolve failed ({exc})")
                 if attempt_device == "cuda":
+                    last_cuda_failure_detail = f"{model_name}/{compute_type} resolve failed: {exc}"
                     had_cuda_failure = True
                 continue
 
@@ -459,6 +722,7 @@ def get_whisper_model(language_hint: str = "") -> Tuple[WhisperModel, Dict[str, 
                 return cached, _MODEL_META[key]
 
             try:
+                WhisperModel = _get_whisper_model_class()
                 model = WhisperModel(
                     resolved_model_name,
                     device=attempt_device,
@@ -488,12 +752,21 @@ def get_whisper_model(language_hint: str = "") -> Tuple[WhisperModel, Dict[str, 
             except Exception as exc:
                 errors.append(f"{model_name}/{attempt_device}/{compute_type}: {exc}")
                 if attempt_device == "cuda":
+                    last_cuda_failure_detail = f"{model_name}/{compute_type} failed: {exc}"
                     had_cuda_failure = True
 
     raise RuntimeError("Failed to initialize Whisper model. Attempts: " + " | ".join(errors[-8:]))
 
 
-def transcribe_with_runtime(audio_path: str, *, word_timestamps: bool = True, language: Any = None):
+def transcribe_with_runtime(
+    audio_path: str,
+    *,
+    word_timestamps: bool = True,
+    language: Any = None,
+    model_override: Any = None,
+    cpu_model_override: Any = None,
+    progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
+):
     safe_mode = _env_bool("WHISPER_SAFE_MODE", True)
     beam_size = _env_int("WHISPER_BEAM_SIZE", 5, minimum=1)
     if safe_mode:
@@ -502,20 +775,110 @@ def transcribe_with_runtime(audio_path: str, *, word_timestamps: bool = True, la
 
     requested_language = _normalize_language_code(language)
     if not requested_language:
-        requested_language = _normalize_language_code(os.environ.get("WHISPER_LANGUAGE"))
+        requested_language = _normalize_language_code(os.environ.get("WHISPER_LANGUAGE") or "de")
     hints = _language_hints()
     lang_retry_enabled = _env_bool("WHISPER_LANGUAGE_RETRY_ENABLED", True)
     lang_retry_max_probability = _env_float("WHISPER_LANGUAGE_RETRY_MAX_PROBABILITY", 0.92)
 
-    model, runtime_meta = get_whisper_model(requested_language)
-    segments, info = _transcribe_once(
-        model,
-        audio_path,
-        word_timestamps=word_timestamps,
-        beam_size=beam_size,
-        vad_filter=vad_filter,
-        language=requested_language,
+    explicit_model_override = str(model_override).strip() if model_override else ""
+    explicit_cpu_model_override = str(cpu_model_override).strip() if cpu_model_override else ""
+    attempted_models: List[str] = []
+    active_word_timestamps = bool(word_timestamps)
+    word_timestamp_fallback_used = not active_word_timestamps
+    retry_candidates = _memory_retry_model_candidates(
+        requested_language,
+        [explicit_model_override, explicit_cpu_model_override],
     )
+
+    while True:
+        model, runtime_meta = get_whisper_model(
+            requested_language,
+            model_override=explicit_model_override,
+            cpu_model_override=explicit_cpu_model_override,
+        )
+        if progress_cb is not None:
+            try:
+                progress_cb(
+                    {
+                        "status": "runtime_ready",
+                        "device": runtime_meta.get("device"),
+                        "model": runtime_meta.get("resolved_model") or runtime_meta.get("model"),
+                        "compute_type": runtime_meta.get("compute_type"),
+                        "word_timestamps": active_word_timestamps,
+                    }
+                )
+            except Exception:
+                pass
+        try:
+            segments, info = _transcribe_once(
+                model,
+                audio_path,
+                word_timestamps=active_word_timestamps,
+                beam_size=beam_size,
+                vad_filter=vad_filter,
+                language=requested_language,
+                progress_cb=progress_cb,
+            )
+            break
+        except Exception as exc:
+            if not _is_memory_pressure_error(exc):
+                raise
+            attempted_models.append(str(runtime_meta.get("model") or ""))
+            _release_cached_whisper_runtime(runtime_meta)
+            next_model = ""
+            while retry_candidates and not next_model:
+                candidate = retry_candidates.pop(0)
+                if candidate and candidate not in attempted_models:
+                    next_model = candidate
+            if not next_model:
+                if active_word_timestamps and not word_timestamp_fallback_used:
+                    active_word_timestamps = False
+                    word_timestamp_fallback_used = True
+                    retry_candidates = _memory_retry_model_candidates(
+                        requested_language,
+                        attempted_models,
+                    )
+                    print(
+                        "⚠️ Whisper memory pressure detected "
+                        f"({exc}). Retrying without word timestamps."
+                    )
+                    if progress_cb is not None:
+                        try:
+                            progress_cb(
+                                {
+                                    "status": "retry",
+                                    "reason": str(exc),
+                                    "retry_mode": "word_timestamps_disabled",
+                                    "word_timestamps": False,
+                                }
+                            )
+                        except Exception:
+                            pass
+                    continue
+                raise RuntimeError(
+                    "Whisper memory retry exhausted. Last error: "
+                    f"{exc}"
+                ) from exc
+            print(
+                "⚠️ Whisper memory pressure detected "
+                f"({exc}). Retrying with smaller model: {next_model}"
+                + ("" if active_word_timestamps else " (word timestamps disabled)")
+            )
+            if progress_cb is not None:
+                try:
+                    progress_cb(
+                        {
+                            "status": "retry",
+                            "reason": str(exc),
+                            "retry_mode": "smaller_model",
+                            "next_model": next_model,
+                            "word_timestamps": active_word_timestamps,
+                        }
+                    )
+                except Exception:
+                    pass
+            explicit_model_override = next_model
+            explicit_cpu_model_override = next_model
 
     detected_language = _normalize_language_code(getattr(info, "language", ""))
     detected_probability = float(getattr(info, "language_probability", 0.0) or 0.0)
@@ -537,10 +900,11 @@ def transcribe_with_runtime(audio_path: str, *, word_timestamps: bool = True, la
             retry_segments, retry_info = _transcribe_once(
                 model,
                 audio_path,
-                word_timestamps=word_timestamps,
+                word_timestamps=active_word_timestamps,
                 beam_size=beam_size,
                 vad_filter=vad_filter,
                 language=retry_language,
+                progress_cb=progress_cb,
             )
             segments = retry_segments
             info = retry_info
@@ -549,6 +913,7 @@ def transcribe_with_runtime(audio_path: str, *, word_timestamps: bool = True, la
     meta = dict(runtime_meta)
     meta["beam_size"] = beam_size
     meta["vad_filter"] = vad_filter
+    meta["word_timestamps"] = active_word_timestamps
     meta["requested_language"] = requested_language or "auto"
     meta["language_hints"] = hints
     meta["language_retry_enabled"] = lang_retry_enabled

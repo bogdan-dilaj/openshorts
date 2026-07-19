@@ -18,16 +18,21 @@ def _env_int(name: str, default: int, minimum: int = 1, maximum: int | None = No
 
 CPU_COUNT = _cpu_count()
 MAX_CONCURRENT_JOBS = _env_int("MAX_CONCURRENT_JOBS", 1, minimum=1, maximum=max(1, CPU_COUNT))
-JOB_NICE_LEVEL = _env_int("JOB_NICE_LEVEL", 10, minimum=0, maximum=19)
-FFMPEG_THREADS = _env_int("FFMPEG_THREADS", min(2, CPU_COUNT), minimum=1, maximum=max(1, CPU_COUNT))
+JOB_NICE_LEVEL = _env_int("JOB_NICE_LEVEL", 0, minimum=0, maximum=19)
+FFMPEG_THREADS = _env_int(
+    "FFMPEG_THREADS",
+    max(1, min(CPU_COUNT, 16)),
+    minimum=1,
+    maximum=max(1, CPU_COUNT),
+)
 FFMPEG_FILTER_THREADS = _env_int(
     "FFMPEG_FILTER_THREADS",
-    1,
+    max(1, min(CPU_COUNT, 8)),
     minimum=1,
     maximum=max(1, min(FFMPEG_THREADS, CPU_COUNT)),
 )
 FFMPEG_PRESET = (os.environ.get("FFMPEG_PRESET") or "fast").strip()
-WHISPER_CPU_THREADS = _env_int("WHISPER_CPU_THREADS", min(4, CPU_COUNT), minimum=1, maximum=max(1, CPU_COUNT))
+WHISPER_CPU_THREADS = _env_int("WHISPER_CPU_THREADS", max(1, min(CPU_COUNT, 16)), minimum=1, maximum=max(1, CPU_COUNT))
 
 
 def apply_process_niceness() -> None:

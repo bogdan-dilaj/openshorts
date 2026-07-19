@@ -1,0 +1,42 @@
+services:
+  backend:
+    build: .
+    container_name: openshorts-backend
+    env_file:
+      - .env
+    environment:
+      NETWORK_MODE: "bridge"
+      WHISPER_DEVICE: "cpu"
+      WHISPER_COMPUTE_TYPE: "int8"
+      NVIDIA_VISIBLE_DEVICES: "none"
+      OMP_NUM_THREADS: "${OMP_NUM_THREADS:-4}"
+      WHISPER_CPU_THREADS: "${WHISPER_CPU_THREADS:-4}"
+    ports:
+      - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - type: bind
+        source: .
+        target: /app
+      - /app/__pycache__
+      - type: bind
+        source: ${LONGFORM_SOURCE_HOST_DIR:-./output/longform_source_mount}
+        target: ${LONGFORM_SOURCE_MOUNT_ROOT:-/mnt/longform-source}
+        read_only: true
+    restart: unless-stopped
+
+  frontend:
+    build: ./dashboard
+    container_name: openshorts-frontend
+    environment:
+      VITE_PROXY_TARGET: "http://backend:8000"
+    ports:
+      - "5175:5175"
+    command: npm run dev -- --host 0.0.0.0 --port 5175
+    volumes:
+      - ./dashboard:/app
+      - /app/node_modules
+    restart: unless-stopped
+    depends_on:
+      - backend

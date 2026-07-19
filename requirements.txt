@@ -1,7 +1,8 @@
 scenedetect
 ultralytics
-torch
-torchvision
+torch==2.8.0
+torchaudio==2.8.0
+torchvision==0.23.0
 tqdm
 yt-dlp
 faster-whisper
@@ -17,3 +18,4 @@ uvicorn
 python-multipart
 httpx
 Pillow
+pyannote.audio>=3.3,<4
