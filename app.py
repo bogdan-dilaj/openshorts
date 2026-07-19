@@ -12345,6 +12345,11 @@ async def post_uploaded_video_to_socials(
     facebook_page_id: Optional[str] = Form(None),
     pinterest_board_id: Optional[str] = Form(None),
     language: Optional[str] = Form(None),
+    podcast_dm_enabled: bool = Form(False),
+    podcast_dm_link_url: Optional[str] = Form(None),
+    podcast_dm_keyword: Optional[str] = Form("Video"),
+    podcast_dm_relay_url: Optional[str] = Form(None),
+    podcast_dm_relay_password: Optional[str] = Form(None),
 ):
     requested_platforms = _parse_social_platforms_form_value(platforms)
     if not requested_platforms:
@@ -12356,6 +12361,35 @@ async def post_uploaded_video_to_socials(
     final_title = (title or "").strip() or "Uploaded Video"
     final_description = (description or "").strip()
     first_comment_value = (first_comment or "").strip()
+    podcast_campaign = _normalize_podcast_link_campaign({
+        "enabled": podcast_dm_enabled,
+        "link_url": podcast_dm_link_url,
+        "keyword": podcast_dm_keyword,
+    })
+    if podcast_dm_enabled:
+        if "instagram" not in requested_platforms:
+            raise HTTPException(status_code=400, detail="The comment-to-DM trigger requires Instagram.")
+        if not podcast_campaign.get("enabled"):
+            raise HTTPException(status_code=400, detail="A valid destination link is required for the Instagram DM trigger.")
+        if not _normalize_podcast_relay_url(podcast_dm_relay_url):
+            raise HTTPException(status_code=400, detail="A valid podcast DM relay URL is required.")
+        if not _normalize_unicode_text(podcast_dm_relay_password).strip():
+            raise HTTPException(status_code=400, detail="The podcast DM relay password is required.")
+
+    instagram_caption = final_description
+    instagram_first_comment = first_comment_value
+    if podcast_campaign.get("enabled"):
+        instagram_caption = _compose_caption_with_podcast_cta(
+            final_description,
+            keyword=podcast_campaign.get("keyword") or "Video",
+            template=podcast_campaign.get("comment_template"),
+        )
+        instagram_first_comment = _compose_first_comment_with_podcast_cta(
+            first_comment_value,
+            keyword=podcast_campaign.get("keyword") or "Video",
+            template=podcast_campaign.get("comment_template"),
+            generated_text=final_description,
+        )
 
     file_content = await video.read()
     if not file_content:
@@ -12375,11 +12409,14 @@ async def post_uploaded_video_to_socials(
             scheduled_date=scheduled_date,
             timezone=timezone,
             instagram_share_mode=instagram_share_mode,
+            instagram_collaborators=None,
             tiktok_post_mode=tiktok_post_mode,
             tiktok_is_aigc=tiktok_is_aigc,
             facebook_page_id=facebook_page_id,
             pinterest_board_id=pinterest_board_id,
             transcript_language=language,
+            instagram_caption=instagram_caption,
+            instagram_first_comment=instagram_first_comment,
         )
         request_settings = _build_social_post_request_settings(
             final_title=final_title,
@@ -12388,11 +12425,15 @@ async def post_uploaded_video_to_socials(
             scheduled_date=scheduled_date,
             timezone=timezone,
             instagram_share_mode=instagram_share_mode,
+            instagram_collaborators=None,
             tiktok_post_mode=tiktok_post_mode,
             tiktok_is_aigc=tiktok_is_aigc,
             facebook_page_id=facebook_page_id,
             pinterest_board_id=pinterest_board_id,
             transcript_language=language,
+            podcast_link_campaign=podcast_campaign,
+            instagram_caption=instagram_caption,
+            instagram_first_comment=instagram_first_comment,
         )
         normalized = _send_upload_post_video(
             api_key=api_key,
@@ -12410,6 +12451,17 @@ async def post_uploaded_video_to_socials(
         )
         normalized["source"] = "uploaded_video"
         normalized["filename"] = filename
+        relay_result = await _notify_podcast_dm_relay(
+            relay_url=podcast_dm_relay_url,
+            relay_password=podcast_dm_relay_password,
+            profile_username=user_id,
+            campaign=podcast_campaign,
+            status_payload=normalized,
+            requested_platforms=requested_platforms,
+            clip_title=final_title,
+        )
+        if relay_result is not None:
+            normalized["podcast_dm_relay"] = relay_result
         return normalized
     except HTTPException:
         raise

@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2, Clock, Loader2, Share2, Upload } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Clock, Loader2, MessageCircle, Share2, Upload } from 'lucide-react';
 import { getApiUrl } from '../config';
 import { DEFAULT_SOCIAL_POST_SETTINGS, INSTAGRAM_SHARE_MODES, SOCIAL_PLATFORM_OPTIONS, TIKTOK_POST_MODES } from '../socialOptions';
 
 const POST_STATUS_POLL_INTERVAL_MS = 4000;
+const DEFAULT_PODCAST_KEYWORD = 'Video';
 const PLATFORM_LABELS = SOCIAL_PLATFORM_OPTIONS.reduce((acc, item) => {
   acc[item.key] = item.label;
   return acc;
@@ -20,6 +21,17 @@ const normalizePlatformKey = (value) => {
 };
 
 const getPlatformLabel = (value) => PLATFORM_LABELS[value] || value;
+
+const isValidDestinationUrl = (value) => {
+  const raw = (value || '').trim();
+  if (!raw) return false;
+  try {
+    const parsed = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+    return ['http:', 'https:'].includes(parsed.protocol) && !!parsed.hostname;
+  } catch {
+    return false;
+  }
+};
 
 const buildDisplayPlatformResults = (result) => {
   if (!result) return [];
@@ -76,6 +88,7 @@ export default function SocialUploadStudio({
   uploadPostKey,
   uploadUserId,
   socialPostSettings = DEFAULT_SOCIAL_POST_SETTINGS,
+  podcastDmSettings = {},
 }) {
   const [videoFile, setVideoFile] = useState(null);
   const [title, setTitle] = useState('');
@@ -87,6 +100,9 @@ export default function SocialUploadStudio({
   const [tiktokIsAigc, setTiktokIsAigc] = useState(!!socialPostSettings.tiktokIsAigc);
   const [facebookPageId, setFacebookPageId] = useState(socialPostSettings.facebookPageId || '');
   const [pinterestBoardId, setPinterestBoardId] = useState(socialPostSettings.pinterestBoardId || '');
+  const [podcastDmEnabled, setPodcastDmEnabled] = useState(false);
+  const [podcastDmLinkUrl, setPodcastDmLinkUrl] = useState('');
+  const [podcastDmKeyword, setPodcastDmKeyword] = useState(podcastDmSettings.defaultKeyword || DEFAULT_PODCAST_KEYWORD);
   const [posting, setPosting] = useState(false);
   const [postResult, setPostResult] = useState(null);
   const [isRefreshingPostStatus, setIsRefreshingPostStatus] = useState(false);
@@ -142,11 +158,16 @@ export default function SocialUploadStudio({
       }
 
       const data = await res.json();
-      setPostResult(data);
+      const nextData = {
+        ...tracking,
+        ...data,
+        podcast_dm_relay: data.podcast_dm_relay || tracking.podcast_dm_relay,
+      };
+      setPostResult(nextData);
 
-      if ((data.status === 'pending' || data.status === 'in_progress') && (data.request_id || data.job_id)) {
+      if ((nextData.status === 'pending' || nextData.status === 'in_progress') && (nextData.request_id || nextData.job_id)) {
         postStatusTimeoutRef.current = window.setTimeout(() => {
-          refreshPostStatus(data, { silent: true });
+          refreshPostStatus(nextData, { silent: true });
         }, POST_STATUS_POLL_INTERVAL_MS);
       } else {
         stopPostStatusPolling();
@@ -189,6 +210,19 @@ export default function SocialUploadStudio({
       setPostResult({ success: false, status: 'failed', message: 'Pinterest benötigt eine Board-ID.', platform_results: [] });
       return;
     }
+    const usePodcastDm = selectedPlatforms.includes('instagram') && podcastDmEnabled;
+    if (usePodcastDm && !podcastDmKeyword.trim()) {
+      setPostResult({ success: false, status: 'failed', message: 'Bitte ein Instagram-Trigger-Keyword eingeben.', platform_results: [] });
+      return;
+    }
+    if (usePodcastDm && !isValidDestinationUrl(podcastDmLinkUrl)) {
+      setPostResult({ success: false, status: 'failed', message: 'Bitte einen gültigen Ziel-Link für die Instagram-DM eingeben.', platform_results: [] });
+      return;
+    }
+    if (usePodcastDm && (!podcastDmSettings.relayUrl || !podcastDmSettings.relayPassword)) {
+      setPostResult({ success: false, status: 'failed', message: 'Für den Instagram-DM-Trigger fehlen Relay-URL oder Relay-Passwort in den Einstellungen.', platform_results: [] });
+      return;
+    }
 
     const formData = new FormData();
     formData.append('video', videoFile);
@@ -203,6 +237,13 @@ export default function SocialUploadStudio({
     formData.append('tiktok_is_aigc', tiktokIsAigc ? 'true' : 'false');
     if (facebookPageId.trim()) formData.append('facebook_page_id', facebookPageId.trim());
     if (pinterestBoardId.trim()) formData.append('pinterest_board_id', pinterestBoardId.trim());
+    formData.append('podcast_dm_enabled', usePodcastDm ? 'true' : 'false');
+    if (usePodcastDm) {
+      formData.append('podcast_dm_link_url', podcastDmLinkUrl.trim());
+      formData.append('podcast_dm_keyword', podcastDmKeyword.trim());
+      formData.append('podcast_dm_relay_url', podcastDmSettings.relayUrl.trim());
+      formData.append('podcast_dm_relay_password', podcastDmSettings.relayPassword);
+    }
 
     setPosting(true);
     setPostResult(null);
@@ -323,18 +364,72 @@ export default function SocialUploadStudio({
           </div>
 
           {platforms.instagram && (
-            <div>
-              <label className="block text-xs font-bold text-zinc-400 mb-2">Instagram-Share-Mode</label>
-              <select
-                value={instagramShareMode}
-                onChange={(e) => setInstagramShareMode(e.target.value)}
-                className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-zinc-200"
-              >
-                {INSTAGRAM_SHARE_MODES.map((mode) => (
-                  <option key={mode.value} value={mode.value} className="bg-zinc-900">{mode.label}</option>
-                ))}
-              </select>
-            </div>
+            <>
+              <div>
+                <label className="block text-xs font-bold text-zinc-400 mb-2">Instagram-Share-Mode</label>
+                <select
+                  value={instagramShareMode}
+                  onChange={(e) => setInstagramShareMode(e.target.value)}
+                  className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-zinc-200"
+                >
+                  {INSTAGRAM_SHARE_MODES.map((mode) => (
+                    <option key={mode.value} value={mode.value} className="bg-zinc-900">{mode.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/5 p-4 space-y-3">
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={podcastDmEnabled}
+                    onChange={(e) => setPodcastDmEnabled(e.target.checked)}
+                    className="mt-0.5 accent-emerald-400 w-4 h-4"
+                  />
+                  <span>
+                    <span className="flex items-center gap-2 text-sm font-semibold text-emerald-200">
+                      <MessageCircle size={15} /> Instagram Kommentar-Trigger aktivieren
+                    </span>
+                    <span className="block mt-1 text-[11px] leading-relaxed text-zinc-400">
+                      Nur Instagram erhält die CTA in Caption und erstem Kommentar. Alle anderen Plattformen behalten die Texte oben unverändert.
+                    </span>
+                  </span>
+                </label>
+
+                {podcastDmEnabled && (
+                  <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
+                    <div>
+                      <label className="block text-xs font-bold text-zinc-400 mb-2">Link für die private DM</label>
+                      <input
+                        value={podcastDmLinkUrl}
+                        onChange={(e) => setPodcastDmLinkUrl(e.target.value)}
+                        className="w-full bg-black/20 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+                        placeholder="https://..."
+                        inputMode="url"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-zinc-400 mb-2">Keyword</label>
+                      <input
+                        value={podcastDmKeyword}
+                        onChange={(e) => setPodcastDmKeyword(e.target.value)}
+                        className="w-full bg-black/20 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+                        placeholder={DEFAULT_PODCAST_KEYWORD}
+                        maxLength={40}
+                      />
+                    </div>
+                    <div className="sm:col-span-2 rounded-lg border border-white/5 bg-black/15 px-3 py-2 text-[11px] text-zinc-400">
+                      Instagram-CTA: <span className="text-zinc-200">Kommentiere &quot;{podcastDmKeyword.trim() || DEFAULT_PODCAST_KEYWORD}&quot; und wir senden dir den Link zum Podcast zu</span>
+                    </div>
+                    {(!podcastDmSettings.relayUrl || !podcastDmSettings.relayPassword) && (
+                      <div className="sm:col-span-2 text-[11px] text-amber-300">
+                        Relay-URL und Relay-Passwort müssen zuerst in den Einstellungen hinterlegt sein.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </>
           )}
 
           {platforms.tiktok && (
@@ -414,6 +509,13 @@ export default function SocialUploadStudio({
                 )}
                 {postResult.poll_error && (
                   <div className="mt-1 text-[10px] text-red-300">{postResult.poll_error}</div>
+                )}
+                {postResult.podcast_dm_relay && (
+                  <div className={`mt-2 text-[11px] ${postResult.podcast_dm_relay.success === false ? 'text-red-300' : 'text-emerald-300'}`}>
+                    {postResult.podcast_dm_relay.success === false
+                      ? `Instagram-DM-Relay konnte nicht registriert werden: ${postResult.podcast_dm_relay.message || 'Unbekannter Fehler'}`
+                      : 'Instagram-DM-Trigger wurde beim Relay registriert.'}
+                  </div>
                 )}
               </div>
             </div>

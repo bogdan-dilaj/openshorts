@@ -9,7 +9,7 @@ Dieses Dokument ist der technische Kontext fuer eine neue Codex-Session. Keine g
 1. Eine aktive Podcast-Link-Kampagne veraendert nur Instagram.
 2. Instagram erhaelt die CTA plus Leerzeile plus KI-Text sowohl in der Caption als auch im ersten Kommentar.
 3. Alle anderen Plattformen behalten den normalen KI-generierten Text und den normalen ersten Kommentar.
-4. Das gilt fuer Einzel-Posts, regulaere Multi-Posts und Reparatur-/Reschedule-Laeufe.
+4. Das gilt fuer Direkt-Uploads, Einzel-Posts, regulaere Multi-Posts und Reparatur-/Reschedule-Laeufe.
 5. Wenn ein Upload-Post-Job ersetzt wird, muss die neue Vendor-Job-ID im PHP-Relay registriert und die alte ersetzt werden.
 6. Der automatisch vom eigenen Instagram-Konto gepostete CTA-Kommentar darf nie eine DM oder Public Reply ausloesen.
 
@@ -27,6 +27,7 @@ Relevanter Code in `app.py`:
 - `_compose_caption_with_podcast_cta`
 - `_compose_first_comment_with_podcast_cta`
 - `_build_upload_post_data_payload`
+- `post_uploaded_video_to_socials`
 - `_post_social_clip`
 - `_build_podcast_caption_patch_candidates`
 - `_repair_podcast_campaign_candidate`
@@ -36,6 +37,19 @@ Die Delivery-Markierung `payload_schema_version = instagram_title_v2` zeigt an, 
 Upload-Post-Referenz:
 
 - https://docs.upload-post.com/api/upload-video/
+
+### Upload-Post Direkt-Upload
+
+`dashboard/src/components/SocialUploadStudio.jsx` bietet bei ausgewaehltem Instagram optional den Schalter `Instagram Kommentar-Trigger aktivieren` mit Keyword und separatem DM-Ziel-Link.
+
+Bei aktivem Trigger:
+
+- Relay-URL und Relay-Passwort kommen aus den globalen Podcast-DM-Einstellungen.
+- Der Backend-Endpunkt `/api/social/post/upload` validiert Link und Relay-Konfiguration vor dem Upload.
+- Nur `instagram_title` und `instagram_first_comment` erhalten CTA plus Leerzeile plus den jeweiligen normalen Text.
+- Globale Felder sowie TikTok-, YouTube- und weitere Plattformfelder bleiben unveraendert.
+- Request-ID bzw. Vendor-Job-ID wird direkt nach Annahme des Uploads beim PHP-Relay registriert.
+- `own_first_comment` wird mitregistriert, damit der Relay nicht auf den automatisch geposteten CTA-Kommentar reagiert.
 
 ## Podcast-DM-Relay
 
@@ -126,6 +140,7 @@ Relevante lokale Checks:
 
 ```bash
 python -m compileall -q app.py main.py
+python tests/test_social_direct_upload_podcast_dm.py
 php -l scripts/uploadpost_podcast_dm_relay.php
 php tests/test_uploadpost_podcast_dm_relay.php
 cd dashboard && npm run build

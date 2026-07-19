@@ -535,6 +535,10 @@ Each generated short can override:
 - Facebook page ID
 - Pinterest board ID
 
+### Direct-upload Instagram DM trigger
+
+When Instagram is selected in `Upload-Post Direkt-Upload`, an optional comment trigger can be enabled with a keyword and destination link. OpenShorts then sends CTA text only through `instagram_title` and `instagram_first_comment`, registers the upload with the configured PHP relay, and leaves captions/comments for all other selected platforms unchanged.
+
 ### Instagram share modes
 - `CUSTOM`
 - `TRIAL_REELS_SHARE_TO_FOLLOWERS_IF_LIKED`

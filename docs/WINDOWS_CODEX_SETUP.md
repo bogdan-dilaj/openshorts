@@ -109,6 +109,7 @@ Im Dashboard:
 3. Podcast-DM-Relay-URL und Passwort sind vorhanden.
 4. Ein kleiner Testjob kann angelegt werden.
 5. Bei Podcast-Kampagne erhaelt nur Instagram CTA-Caption und CTA-Erstkommentar.
+6. Beim Upload-Post Direkt-Upload kann der Instagram Kommentar-Trigger mit eigenem Ziel-Link aktiviert werden; TikTok/YouTube behalten dabei ihre normalen Texte.
 
 ## PHP-Relay
 

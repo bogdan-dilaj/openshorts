@@ -5862,6 +5862,7 @@ function App() {
               uploadPostKey={uploadPostKey}
               uploadUserId={uploadUserId}
               socialPostSettings={socialPostSettings}
+              podcastDmSettings={podcastDmSettings}
             />
           )}
 
