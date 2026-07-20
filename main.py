@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 import math
 import shutil
-from scenedetect import VideoManager, SceneManager
+from scenedetect import SceneManager, open_video
 from scenedetect.detectors import ContentDetector
 from ultralytics import YOLO
 import torch
@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 import json
 from job_store import load_job_manifest, update_job_manifest
 from runtime_limits import FFMPEG_PRESET, ffmpeg_thread_args, subprocess_priority_kwargs
+from video_encoding import selected_h264_encoding_args
 from tight_edit import (
     DEFAULT_TIGHT_EDIT_PRESET,
     TIGHT_EDIT_PRESETS,
@@ -46,6 +47,7 @@ ASPECT_RATIO = 9 / 16
 YOLO_MODEL_PATH = os.environ.get("YOLO_MODEL_PATH", "/tmp/Ultralytics/yolov8n.pt")
 TARGET_VERTICAL_WIDTH = int(os.environ.get("TARGET_VERTICAL_WIDTH", "1080"))
 TARGET_VERTICAL_HEIGHT = int(os.environ.get("TARGET_VERTICAL_HEIGHT", "1920"))
+TRACKING_DETECTION_FPS = max(1.0, float(os.environ.get("TRACKING_DETECTION_FPS", "10")))
 MIN_CLIP_DURATION = float(os.environ.get("MIN_CLIP_DURATION", "60"))
 MAX_CLIP_DURATION = float(os.environ.get("MAX_CLIP_DURATION", "180"))
 MIN_OVER_ONE_MINUTE_CLIP_DURATION = 60.0
@@ -69,6 +71,11 @@ OLLAMA_WARMUP_TIMEOUT_SECONDS = int(os.environ.get("OLLAMA_WARMUP_TIMEOUT_SECOND
 OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "30m")
 OLLAMA_MAX_SEGMENT_LINES = int(os.environ.get("OLLAMA_MAX_SEGMENT_LINES", "90"))
 OLLAMA_MAX_PROMPT_CHARS = int(os.environ.get("OLLAMA_MAX_PROMPT_CHARS", "14000"))
+CLIP_BOUNDARY_CONTEXT_SECONDS = float(os.environ.get("CLIP_BOUNDARY_CONTEXT_SECONDS", "30"))
+CLIP_BOUNDARY_SEARCH_SECONDS = float(os.environ.get("CLIP_BOUNDARY_SEARCH_SECONDS", "14"))
+CLIP_BOUNDARY_MIN_PAUSE_SECONDS = float(os.environ.get("CLIP_BOUNDARY_MIN_PAUSE_SECONDS", "0.7"))
+CLIP_BOUNDARY_START_PAD_SECONDS = float(os.environ.get("CLIP_BOUNDARY_START_PAD_SECONDS", "0.18"))
+CLIP_BOUNDARY_END_PAD_SECONDS = float(os.environ.get("CLIP_BOUNDARY_END_PAD_SECONDS", "0.28"))
 PREFERRED_DOWNLOAD_HEIGHT = int(os.environ.get("PREFERRED_DOWNLOAD_HEIGHT", "1080"))
 MIN_SOURCE_EDGE = int(os.environ.get("MIN_SOURCE_EDGE", "720"))
 DEFAULT_TIGHT_EDIT_PRESET_ENV = normalize_tight_edit_preset(os.environ.get("TIGHT_EDIT_PRESET", DEFAULT_TIGHT_EDIT_PRESET))
@@ -100,12 +107,17 @@ You are a senior short-form video editor. Read the ENTIRE transcript and word-le
 - Only NUMBERS with decimal point, up to 3 decimals (examples: 0, 1.250, 17.350).
 - Ensure 0 ≤ start < end ≤ VIDEO_DURATION_SECONDS.
 - Each clip between {min_clip_duration} and {max_clip_duration} seconds (inclusive).
-- HARD LENGTH RANGE: 60 to 180 seconds. Do not return clips under 60 seconds.
+- HARD LENGTH RANGE: {min_clip_duration} to {max_clip_duration} seconds. Do not return clips outside this range.
 - Prefer 90 to 150 seconds when that helps the story breathe.
 - The clip must cover a complete, coherent thought: setup, claim/conflict, explanation, and payoff or meaningful open loop.
 - Return fewer clips when only a few moments are truly strong. Quality beats count.
-- Prefer starting 0.2–0.4 s BEFORE the hook and ending 0.2–0.4 s AFTER the payoff.
-- Use silence moments for natural cuts; never cut in the middle of a word or phrase.
+- Treat start/end as editorial boundaries, not as duration targets. The maximum duration is a ceiling, never a reason to cut off a sentence or payoff.
+- Before choosing start, inspect at least 15 seconds before the hook. Include missing setup or an antecedent when the opening would otherwise begin as an answer, callback, pronoun reference, or continuation of an earlier sentence.
+- Before choosing end, inspect at least 20 seconds after the planned endpoint. If the speaker is still completing the same answer, explanation, list, causal chain, or payoff, include the continuation or choose a different moment.
+- Start at the first word of a self-contained sentence or thought. The first spoken words must make sense to a viewer who has not seen the full video.
+- End only after the final sentence, conclusion, reaction, or intentional open loop is complete. Never end on a conjunction, subordinate clause, unfinished list, or transition into the actual payoff.
+- Add only 0.15–0.35 s of silence/room tone around the chosen spoken boundaries. Padding must not introduce filler before the hook.
+- Use sentence punctuation and real speech pauses for natural cuts; never cut in the middle of a word, phrase, or active thought.
 - STRICTLY FORBIDDEN to use time formats other than absolute seconds.
 - Every clip must feel semantically meaningful as a standalone short: it must contain a clear claim, insight, story beat, confession, conflict, payoff, or an unresolved but understandable curiosity gap.
 - Reject clips that are mostly isolated keywords, sentence fragments, contextless filler, or references that only make sense if the viewer already knows the previous conversation.
@@ -122,6 +134,9 @@ EDITORIAL_CONTEXT:
 
 GLOBAL_CONTEXT_SUMMARY:
 {global_context_summary}
+
+SELECTION_SCOPE:
+{chunk_hint}
 
 TRANSCRIPT_TEXT (raw):
 {transcript_text}
@@ -179,13 +194,18 @@ Task:
 - Return up to {max_clips} clips.
 - Use ABSOLUTE seconds from the full video.
 - Every clip must be between {min_clip_duration} and {max_clip_duration} seconds.
-- HARD LENGTH RANGE: 60 to 180 seconds. Do not return clips under 60 seconds.
+- HARD LENGTH RANGE: {min_clip_duration} to {max_clip_duration} seconds. Do not return clips outside this range.
 - Prefer 90 to 150 seconds when that helps the story breathe.
 - The clip must cover a complete, coherent thought: setup, claim/conflict, explanation, and payoff or meaningful open loop.
 - Return fewer clips when only a few moments are truly strong. Quality beats count.
 - Prefer conflict, surprise, confession, tension, controversy, emotional payoff, concrete insights, and moments that stop the scroll.
 - Avoid filler, greetings, outros, sponsor sections, and context that has no payoff.
-- Prefer starting slightly before the hook and ending slightly after the payoff.
+- Treat start/end as editorial boundaries, not as duration targets. The maximum duration is a ceiling, never a reason to cut off a sentence or payoff.
+- Inspect the supplied context before and after each possible moment. Include missing setup when an opening is an answer, callback, pronoun reference, or continuation.
+- Start at the first word of a self-contained sentence or thought. The first spoken words must make sense without the previous conversation.
+- End only after the full answer, explanation, causal chain, list, conclusion, reaction, or intentional open loop is complete.
+- Inspect at least 20 seconds after a planned end. If the speaker continues the same important thought, include it or choose another candidate.
+- Add only 0.15–0.35 s of silence around spoken boundaries. Never spend the opening seconds on filler or pre-hook chatter.
 - Every clip must make sense as a standalone short: clear thought, conflict, insight, story beat, or understandable teaser with enough context.
 - Reject clips that are just fragments, disconnected buzzwords, filler, or incomplete context without payoff.
 - The FIRST spoken words of the clip must already be the hook, claim, reveal, tension, or provocative statement. Never start with filler such as "ok", "okay", "genau", "also", "ja", "gut", "äh", "ähm", "so", or a half-finished lead-in.
@@ -212,7 +232,10 @@ SPEAKER ATTRIBUTION — MANDATORY:
 - Never combine the host's identity with the guest's family, exit, trauma, beliefs, or personal history.
 
 VIDEO_DURATION_SECONDS: {video_duration}
-CHUNK_RANGE_SECONDS: {chunk_start} - {chunk_end}
+CANDIDATE_FOCUS_RANGE_SECONDS: {chunk_start} - {chunk_end}
+SURROUNDING_CONTEXT_RANGE_SECONDS: {context_start} - {context_end}
+
+Choose moments whose hook/start belongs to CANDIDATE_FOCUS_RANGE_SECONDS. Use the wider surrounding context to repair setup and payoff boundaries. Do not return a clip if its complete thought is not visible in the supplied context.
 
 EDITORIAL_CONTEXT:
 {editorial_context}
@@ -339,6 +362,7 @@ OUTPUT JSON:
 
 # Load the YOLO model once (Keep for backup or scene analysis if needed)
 model = YOLO(YOLO_MODEL_PATH)
+YOLO_DEVICE = 0 if torch.cuda.is_available() else "cpu"
 
 
 def _load_shortform_editorial_context():
@@ -410,7 +434,7 @@ def build_viral_prompt(
         min_clip_duration=min_clip_duration_fmt,
         preferred_min_clip_duration=_fmt_number(PREFERRED_MIN_CLIP_DURATION),
         max_clip_duration=max_clip_duration_fmt,
-        chunk_hint=chunk_hint,
+        chunk_hint=(chunk_hint or "Use the full transcript. Review local context before and after every proposed clip."),
         editorial_context=_format_shortform_editorial_context(),
         global_context_summary=(global_context_summary or "No extra summary available."),
     )
@@ -1192,60 +1216,261 @@ OPENING_FILLER_TOKENS = {
     "mhm", "so", "und", "aber", "nee", "ne", "nun", "well", "yeah",
 }
 
+CONTEXT_DEPENDENT_OPENING_TOKENS = {
+    "er", "ihm", "dessen", "deren", "davon", "dadurch", "darauf", "dabei", "trotzdem",
+    "deshalb", "deswegen", "danach", "he", "she", "him", "her", "them", "therefore",
+    "afterwards", "because",
+}
 
-def _extract_transcript_window_text(transcript_result, start, end):
-    segments = (transcript_result or {}).get("segments", [])
-    if not isinstance(segments, list):
-        return ""
-
-    parts = []
-    for segment in segments:
-        if not isinstance(segment, dict):
-            continue
-        seg_start = _coerce_float(segment.get("start"))
-        seg_end = _coerce_float(segment.get("end"))
-        if seg_start is None or seg_end is None:
-            continue
-        if seg_end <= start or seg_start >= end:
-            continue
-        text = re.sub(r"\s+", " ", str(segment.get("text") or "")).strip()
-        if text:
-            parts.append(text)
-    return " ".join(parts).strip()
+ENDING_CONTINUATION_TOKENS = {
+    "und", "oder", "aber", "weil", "dass", "wenn", "obwohl", "während", "waehrend",
+    "bevor", "nachdem", "damit", "denn", "sondern", "wie", "als", "and", "or", "but",
+    "because", "if", "although", "while", "before", "after", "that", "so",
+}
 
 
-def _extract_transcript_window_words(transcript_result, start, end):
+def _timed_transcript_words(transcript_result):
     segments = (transcript_result or {}).get("segments", [])
     if not isinstance(segments, list):
         return []
 
     words = []
-    for segment in segments:
+    for segment_index, segment in enumerate(segments):
         if not isinstance(segment, dict):
             continue
-        for word in segment.get("words", []) or []:
-            word_start = _coerce_float(word.get("start"))
-            word_end = _coerce_float(word.get("end"))
-            if word_start is None or word_end is None:
+        segment_words = segment.get("words") or []
+        for word in segment_words:
+            if not isinstance(word, dict):
                 continue
-            if word_end <= start or word_start >= end:
+            start = _coerce_float(word.get("start"))
+            end = _coerce_float(word.get("end"))
+            text = re.sub(r"\s+", " ", str(word.get("word") or "")).strip()
+            if start is None or end is None or end <= start or not text:
                 continue
-            token = re.sub(r"\s+", " ", str(word.get("word") or "")).strip()
-            if token:
-                words.append(token)
-    return words
+            words.append({
+                "text": text,
+                "start": start,
+                "end": end,
+                "segment_index": segment_index,
+                "segment_fallback": False,
+            })
+
+    if not words:
+        for segment_index, segment in enumerate(segments):
+            if not isinstance(segment, dict):
+                continue
+            start = _coerce_float(segment.get("start"))
+            end = _coerce_float(segment.get("end"))
+            text = re.sub(r"\s+", " ", str(segment.get("text") or "")).strip()
+            if start is None or end is None or end <= start or not text:
+                continue
+            words.append({
+                "text": text,
+                "start": start,
+                "end": end,
+                "segment_index": segment_index,
+                "segment_fallback": True,
+            })
+
+    words.sort(key=lambda item: (item["start"], item["end"]))
+    deduped = []
+    seen = set()
+    for word in words:
+        key = (round(word["start"], 3), round(word["end"], 3), word["text"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(word)
+    return deduped
+
+
+def _has_terminal_punctuation(value):
+    return bool(re.search(r"[.!?…][\"'”’)}\]]*$", str(value or "").strip()))
+
+
+def _edge_alpha_token(value, *, first=True):
+    tokens = re.findall(r"[A-Za-zÄÖÜäöüß]+", str(value or "").lower())
+    if not tokens:
+        return ""
+    return tokens[0] if first else tokens[-1]
+
+
+def _word_gap(words, left_index, right_index):
+    if left_index < 0 or right_index >= len(words):
+        return float("inf")
+    return max(0.0, words[right_index]["start"] - words[left_index]["end"])
+
+
+def _is_natural_start_boundary(words, index):
+    if index <= 0:
+        return True
+    previous = words[index - 1]
+    current = words[index]
+    if _has_terminal_punctuation(previous["text"]):
+        return True
+    if _word_gap(words, index - 1, index) >= CLIP_BOUNDARY_MIN_PAUSE_SECONDS:
+        return True
+    return bool(previous.get("segment_fallback") or current.get("segment_fallback"))
+
+
+def _is_natural_end_boundary(words, index):
+    if index >= len(words) - 1:
+        return True
+    current = words[index]
+    following = words[index + 1]
+    if _has_terminal_punctuation(current["text"]):
+        return True
+    if _word_gap(words, index, index + 1) >= CLIP_BOUNDARY_MIN_PAUSE_SECONDS:
+        return True
+    return bool(current.get("segment_fallback") or following.get("segment_fallback"))
+
+
+def _clip_edge_word_indices(words, start, end):
+    included = [
+        index
+        for index, word in enumerate(words)
+        if word["end"] > start and word["start"] < end
+    ]
+    if not included:
+        return None, None
+    return included[0], included[-1]
+
+
+def _refine_clip_boundaries(
+    transcript_result,
+    start,
+    end,
+    video_duration,
+    min_clip_duration,
+    max_clip_duration,
+):
+    words = _timed_transcript_words(transcript_result)
+    if not words:
+        return None
+
+    raw_start = max(0.0, min(float(start), float(video_duration)))
+    raw_end = max(0.0, min(float(end), float(video_duration)))
+    if raw_end <= raw_start:
+        return None
+
+    search = max(2.0, CLIP_BOUNDARY_SEARCH_SECONDS)
+    start_targets = (raw_start, max(0.0, raw_end - max_clip_duration), max(0.0, raw_end - min_clip_duration))
+    end_targets = (raw_end, min(video_duration, raw_start + min_clip_duration), min(video_duration, raw_start + max_clip_duration))
+
+    start_candidates = []
+    end_candidates = []
+    for index, word in enumerate(words):
+        near_start_target = any(abs(word["start"] - target) <= search for target in start_targets)
+        near_end_target = any(abs(word["end"] - target) <= search for target in end_targets)
+        if near_start_target and _is_natural_start_boundary(words, index):
+            padded_start = max(0.0, word["start"] - CLIP_BOUNDARY_START_PAD_SECONDS)
+            if index > 0:
+                padded_start = max(padded_start, min(word["start"], words[index - 1]["end"] + 0.02))
+            start_candidates.append((index, padded_start))
+        if near_end_target and _is_natural_end_boundary(words, index):
+            padded_end = min(video_duration, word["end"] + CLIP_BOUNDARY_END_PAD_SECONDS)
+            if index < len(words) - 1:
+                padded_end = min(padded_end, max(word["end"], words[index + 1]["start"] - 0.02))
+            end_candidates.append((index, padded_end))
+
+    if not start_candidates or not end_candidates:
+        return None
+
+    raw_duration = raw_end - raw_start
+    target_duration = min(max(raw_duration, min_clip_duration), max_clip_duration)
+    minimum_core_overlap = min(raw_duration, max_clip_duration) * 0.5
+    best = None
+    for start_index, candidate_start in start_candidates:
+        opening_token = _edge_alpha_token(words[start_index]["text"], first=True)
+        opening_penalty = 0.0
+        if opening_token in OPENING_FILLER_TOKENS:
+            opening_penalty = 100.0
+        elif opening_token in CONTEXT_DEPENDENT_OPENING_TOKENS:
+            opening_penalty = 55.0
+
+        for end_index, candidate_end in end_candidates:
+            if end_index < start_index:
+                continue
+            duration = candidate_end - candidate_start
+            if duration + 0.001 < min_clip_duration or duration - 0.001 > max_clip_duration:
+                continue
+
+            core_overlap = max(0.0, min(candidate_end, raw_end) - max(candidate_start, raw_start))
+            if core_overlap + 0.001 < minimum_core_overlap:
+                continue
+
+            ending_token = _edge_alpha_token(words[end_index]["text"], first=False)
+            has_terminal_punctuation = _has_terminal_punctuation(words[end_index]["text"])
+            ending_penalty = 100.0 if ending_token in ENDING_CONTINUATION_TOKENS and not has_terminal_punctuation else 0.0
+            if not has_terminal_punctuation:
+                ending_penalty += 3.0
+
+            trimmed_start = max(0.0, candidate_start - raw_start)
+            trimmed_end = max(0.0, raw_end - candidate_end)
+            added_start = max(0.0, raw_start - candidate_start)
+            added_end = max(0.0, candidate_end - raw_end)
+            score = (
+                opening_penalty
+                + ending_penalty
+                + (trimmed_start * 4.0)
+                + (trimmed_end * 7.0)
+                + (added_start * 0.7)
+                + (added_end * 0.45)
+                + (abs(duration - target_duration) * 0.05)
+            )
+            if best is None or score < best[0]:
+                best = (score, candidate_start, candidate_end, words[start_index], words[end_index])
+
+    if best is None:
+        return None
+
+    _, refined_start, refined_end, first_word, last_word = best
+    return {
+        "start": round(refined_start, 3),
+        "end": round(refined_end, 3),
+        "adjustment": {
+            "method": "transcript_sentence_pause_boundaries",
+            "original_start": round(raw_start, 3),
+            "original_end": round(raw_end, 3),
+            "start_shift": round(refined_start - raw_start, 3),
+            "end_shift": round(refined_end - raw_end, 3),
+            "opening_words": re.sub(r"\s+", " ", first_word["text"]).strip()[:120],
+            "closing_words": re.sub(r"\s+", " ", last_word["text"]).strip()[-120:],
+        },
+    }
+
+
+def _extract_transcript_window_text(transcript_result, start, end):
+    return " ".join(_extract_transcript_window_words(transcript_result, start, end)).strip()
+
+
+def _extract_transcript_window_words(transcript_result, start, end):
+    return [
+        word["text"]
+        for word in _timed_transcript_words(transcript_result)
+        if word["end"] > start and word["start"] < end
+    ]
 
 
 def _normalize_alpha_tokens(tokens):
     normalized = []
     for token in tokens:
-        cleaned = re.sub(r"[^A-Za-zÄÖÜäöüß]+", "", str(token or "").lower()).strip()
-        if cleaned:
-            normalized.append(cleaned)
+        normalized.extend(re.findall(r"[A-Za-zÄÖÜäöüß]+", str(token or "").lower()))
     return normalized
 
 
 def _assess_clip_opening_quality(transcript_result, start, end):
+    words = _timed_transcript_words(transcript_result)
+    first_index, _ = _clip_edge_word_indices(words, start, end)
+    if first_index is None:
+        return False, "too_few_opening_words"
+    if not _is_natural_start_boundary(words, first_index):
+        return False, "starts_mid_thought"
+
+    first_token = _edge_alpha_token(words[first_index]["text"], first=True)
+    if first_token in CONTEXT_DEPENDENT_OPENING_TOKENS:
+        return False, f"contextless_opening:{first_token}"
+
     alpha_tokens = _normalize_alpha_tokens(_extract_transcript_window_words(transcript_result, start, min(end, start + 6.0)))
     if len(alpha_tokens) < 4:
         return False, "too_few_opening_words"
@@ -1260,6 +1485,20 @@ def _assess_clip_opening_quality(transcript_result, start, end):
     return True, "ok"
 
 
+def _assess_clip_ending_quality(transcript_result, start, end):
+    words = _timed_transcript_words(transcript_result)
+    _, last_index = _clip_edge_word_indices(words, start, end)
+    if last_index is None:
+        return False, "too_few_closing_words"
+    if not _is_natural_end_boundary(words, last_index):
+        return False, "ends_mid_thought"
+
+    last_token = _edge_alpha_token(words[last_index]["text"], first=False)
+    if last_token in ENDING_CONTINUATION_TOKENS and not _has_terminal_punctuation(words[last_index]["text"]):
+        return False, f"incomplete_ending:{last_token}"
+    return True, "ok"
+
+
 def _collect_clip_quality_flags(transcript_result, start, end):
     if not transcript_result:
         return []
@@ -1267,7 +1506,20 @@ def _collect_clip_quality_flags(transcript_result, start, end):
     flags = []
     opening_ok, opening_detail = _assess_clip_opening_quality(transcript_result, start, end)
     if not opening_ok:
-        if opening_detail.startswith("starts_with_filler:"):
+        if opening_detail == "starts_mid_thought":
+            flags.append({
+                "type": "starts_mid_thought",
+                "detail": "",
+                "label": "Startet mitten im Gedanken",
+            })
+        elif opening_detail.startswith("contextless_opening:"):
+            opening_token = opening_detail.split(":", 1)[1].strip() or "unknown"
+            flags.append({
+                "type": "contextless_opening",
+                "detail": opening_token,
+                "label": f"Unklarer Einstieg ohne Bezug ({opening_token})",
+            })
+        elif opening_detail.startswith("starts_with_filler:"):
             filler_token = opening_detail.split(":", 1)[1].strip() or "unknown"
             flags.append({
                 "type": "starts_with_filler",
@@ -1285,6 +1537,28 @@ def _collect_clip_quality_flags(transcript_result, start, end):
                 "type": "too_few_opening_words",
                 "detail": "",
                 "label": "Zu wenig klare Einstiegswoerter",
+            })
+
+    ending_ok, ending_detail = _assess_clip_ending_quality(transcript_result, start, end)
+    if not ending_ok:
+        if ending_detail == "ends_mid_thought":
+            flags.append({
+                "type": "ends_mid_thought",
+                "detail": "",
+                "label": "Endet mitten im Gedanken",
+            })
+        elif ending_detail.startswith("incomplete_ending:"):
+            ending_token = ending_detail.split(":", 1)[1].strip() or "unknown"
+            flags.append({
+                "type": "incomplete_ending",
+                "detail": ending_token,
+                "label": f"Unvollstaendiger Schluss ({ending_token})",
+            })
+        elif ending_detail == "too_few_closing_words":
+            flags.append({
+                "type": "too_few_closing_words",
+                "detail": "",
+                "label": "Kein klarer Abschluss erkennbar",
             })
     return flags
 
@@ -1382,21 +1656,43 @@ def sanitize_clip_candidates(
         if end <= start:
             continue
 
+        boundary_adjustment = None
         duration = end - start
         short_exception = False
-        if duration < min_clip_duration:
-            midpoint = start + (duration / 2.0)
-            start = max(0.0, midpoint - (min_clip_duration / 2.0))
-            end = min(video_duration, start + min_clip_duration)
-            start = max(0.0, end - min_clip_duration)
-            if (end - start) < min_clip_duration:
+        if transcript_result:
+            refined = _refine_clip_boundaries(
+                transcript_result,
+                start,
+                end,
+                video_duration,
+                min_clip_duration,
+                max_clip_duration,
+            )
+            if not refined:
+                print(
+                    "⚠️  Rejecting clip candidate without viable complete-thought boundaries: "
+                    f"{start:.2f}-{end:.2f}s"
+                )
                 continue
-        elif duration > max_clip_duration:
-            end = min(video_duration, start + max_clip_duration)
+            start = refined["start"]
+            end = refined["end"]
+            boundary_adjustment = refined["adjustment"]
             duration = end - start
+        else:
+            if duration < min_clip_duration:
+                midpoint = start + (duration / 2.0)
+                start = max(0.0, midpoint - (min_clip_duration / 2.0))
+                end = min(video_duration, start + min_clip_duration)
+                start = max(0.0, end - min_clip_duration)
+                if (end - start) < min_clip_duration:
+                    continue
+            elif duration > max_clip_duration:
+                end = min(video_duration, start + max_clip_duration)
+                duration = end - start
 
         if (
-            min_over_one_minute_clip_duration
+            not transcript_result
+            and min_over_one_minute_clip_duration
             and max_clip_duration > MAX_CLIP_DURATION
             and duration > MAX_CLIP_DURATION
             and duration < min_over_one_minute_clip_duration
@@ -1427,6 +1723,26 @@ def sanitize_clip_candidates(
 
         if transcript_result:
             quality_flags = _collect_clip_quality_flags(transcript_result, start, end)
+            fatal_boundary_flags = {
+                "starts_mid_thought",
+                "contextless_opening",
+                "starts_with_filler",
+                "too_few_opening_words",
+                "ends_mid_thought",
+                "incomplete_ending",
+                "too_few_closing_words",
+            }
+            fatal_flags = [
+                flag.get("type")
+                for flag in quality_flags
+                if flag.get("type") in fatal_boundary_flags
+            ]
+            if fatal_flags:
+                print(
+                    "⚠️  Rejecting clip candidate with incomplete or contextless edges: "
+                    f"{start:.2f}-{end:.2f}s ({', '.join(fatal_flags)})"
+                )
+                continue
             semantic_ok, semantic_detail = _assess_clip_semantic_quality(transcript_result, start, end)
             if not semantic_ok:
                 print(
@@ -1456,6 +1772,7 @@ def sanitize_clip_candidates(
                 min(1.0, _coerce_float(clip.get("speaker_attribution_confidence")) or 0.0),
             ),
             "quality_flags": quality_flags if transcript_result else [],
+            "boundary_adjustment": boundary_adjustment,
             "status": "pending",
         })
 
@@ -1753,7 +2070,12 @@ def _get_viral_clips_via_chat_provider_chunked(provider_name, transcript_result,
                 max_clip_duration=max_clip_duration,
                 min_over_one_minute_clip_duration=MIN_OVER_ONE_MINUTE_CLIP_DURATION if max_clip_duration > MAX_CLIP_DURATION else None,
                 minimum_long_clips=min(target_long_count, chunk_limit) if target_long_count else 0,
-                chunk_hint=f"Focus especially on transcript window {window['start']:.2f}-{window['end']:.2f} seconds and return clips that overlap this region.",
+                chunk_hint=(
+                    f"Candidate hooks/starts must belong to {window['start']:.2f}-{window['end']:.2f}s. "
+                    f"Use the supplied surrounding transcript context from "
+                    f"{window.get('context_start', window['start']):.2f}-{window.get('context_end', window['end']):.2f}s "
+                    "to include necessary setup and the complete payoff. Return nothing whose full thought is not visible."
+                ),
                 global_context_summary=global_context_summary,
             )
         chunk_started_at = time.time()
@@ -1809,7 +2131,12 @@ def _get_viral_clips_via_chat_provider_chunked(provider_name, transcript_result,
     return combined_result
 
 
-def split_transcript_for_ollama(transcript_result, window_seconds=OLLAMA_CHUNK_SECONDS, overlap_seconds=OLLAMA_CHUNK_OVERLAP_SECONDS):
+def split_transcript_for_ollama(
+    transcript_result,
+    window_seconds=OLLAMA_CHUNK_SECONDS,
+    overlap_seconds=OLLAMA_CHUNK_OVERLAP_SECONDS,
+    context_seconds=CLIP_BOUNDARY_CONTEXT_SECONDS,
+):
     segments = transcript_result.get("speaker_segments") or transcript_result.get("segments", [])
     if not segments:
         return []
@@ -1819,9 +2146,11 @@ def split_transcript_for_ollama(transcript_result, window_seconds=OLLAMA_CHUNK_S
     start_time = 0.0
     while start_time < total_duration:
         end_time = min(total_duration, start_time + window_seconds)
+        context_start = max(0.0, start_time - max(0.0, context_seconds))
+        context_end = min(total_duration, end_time + max(0.0, context_seconds))
         chunk_segments = [
             segment for segment in segments
-            if segment["end"] >= start_time and segment["start"] <= end_time
+            if segment["end"] >= context_start and segment["start"] <= context_end
         ]
         if chunk_segments:
             chunk_words = []
@@ -1830,7 +2159,7 @@ def split_transcript_for_ollama(transcript_result, window_seconds=OLLAMA_CHUNK_S
                 chunk_text_parts.append(segment["text"])
                 speaker_label = re.sub(r"\s+", " ", str(segment.get("speaker") or "")).strip()
                 for word in segment.get("words", []):
-                    if word["end"] >= start_time and word["start"] <= end_time:
+                    if word["end"] >= context_start and word["start"] <= context_end:
                         w_entry = {
                             "w": word["word"],
                             "s": word["start"],
@@ -1842,6 +2171,8 @@ def split_transcript_for_ollama(transcript_result, window_seconds=OLLAMA_CHUNK_S
             windows.append({
                 "start": start_time,
                 "end": end_time,
+                "context_start": context_start,
+                "context_end": context_end,
                 "text": " ".join(chunk_text_parts).strip(),
                 "words": chunk_words,
                 "segments": chunk_segments,
@@ -1920,6 +2251,8 @@ def build_ollama_prompt(
         video_duration=video_duration,
         chunk_start=f"{transcript_window['start']:.2f}",
         chunk_end=f"{transcript_window['end']:.2f}",
+        context_start=f"{transcript_window.get('context_start', transcript_window['start']):.2f}",
+        context_end=f"{transcript_window.get('context_end', transcript_window['end']):.2f}",
         segment_lines=segment_lines or "[0.00-0.00] No transcript available.",
         output_language_code=output_language_code,
         output_language_name=output_language_name,
@@ -2481,7 +2814,13 @@ def detect_person_yolo(frame):
     Returns [x, y, w, h] of the person's 'upper body' approximation.
     """
     # Use the globally loaded model
-    results = model(frame, verbose=False, classes=[0]) # class 0 is person
+    results = model.predict(
+        frame,
+        verbose=False,
+        classes=[0],
+        device=YOLO_DEVICE,
+        half=YOLO_DEVICE != "cpu",
+    )
     
     if not results:
         return None
@@ -2514,21 +2853,31 @@ def create_general_frame(frame, output_width, output_height):
     """
     orig_h, orig_w = frame.shape[:2]
     
-    # 1. Background (Fill Height)
-    # Crop center to aspect ratio
-    bg_scale = output_height / orig_h
-    bg_w = int(orig_w * bg_scale)
-    bg_resized = cv2.resize(frame, (bg_w, output_height), interpolation=cv2.INTER_CUBIC)
-    
-    # Crop center of background
-    start_x = (bg_w - output_width) // 2
-    if start_x < 0: start_x = 0
-    background = bg_resized[:, start_x:start_x+output_width]
-    if background.shape[1] != output_width:
-        background = cv2.resize(background, (output_width, output_height), interpolation=cv2.INTER_CUBIC)
-        
-    # Blur background
-    background = cv2.GaussianBlur(background, (51, 51), 0)
+    # Crop before scaling so landscape frames do not create a huge throwaway image.
+    target_ratio = output_width / output_height
+    source_crop_width = int(round(orig_h * target_ratio))
+    if source_crop_width <= orig_w:
+        source_x = max(0, (orig_w - source_crop_width) // 2)
+        background_source = frame[:, source_x:source_x + source_crop_width]
+    else:
+        source_crop_height = max(1, int(round(orig_w / target_ratio)))
+        source_y = max(0, (orig_h - source_crop_height) // 2)
+        background_source = frame[source_y:source_y + source_crop_height, :]
+
+    # A low-resolution blur is visually equivalent here and much cheaper per frame.
+    blur_width = max(96, output_width // 4)
+    blur_height = max(160, output_height // 4)
+    background_small = cv2.resize(
+        background_source,
+        (blur_width, blur_height),
+        interpolation=cv2.INTER_AREA,
+    )
+    background_small = cv2.GaussianBlur(background_small, (15, 15), 0)
+    background = cv2.resize(
+        background_small,
+        (output_width, output_height),
+        interpolation=cv2.INTER_LINEAR,
+    )
     
     # 2. Foreground (Fit Width)
     scale = output_width / orig_w
@@ -2592,28 +2941,39 @@ def analyze_scenes_strategy(video_path, scenes):
     """
     cap = cv2.VideoCapture(video_path)
     strategies = []
-    
+
     if not cap.isOpened():
         return ['TRACK'] * len(scenes)
-        
-    for start, end in tqdm(scenes, desc="   Analyzing Scenes"):
-        # Sample 3 frames (start, middle, end)
-        frames_to_check = [
-            start.get_frames() + 5,
-            int((start.get_frames() + end.get_frames()) / 2),
-            end.get_frames() - 5
-        ]
-        
-        face_counts = []
-        for f_idx in frames_to_check:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-            ret, frame = cap.read()
-            if not ret: continue
-            
-            # Detect faces
-            candidates = detect_face_candidates(frame)
-            face_counts.append(len(candidates))
-            
+
+    samples_by_frame = {}
+    for scene_index, (start, end) in enumerate(scenes):
+        start_frame = start.get_frames()
+        end_frame = max(start_frame + 1, end.get_frames())
+        frames_to_check = sorted({
+            min(end_frame - 1, start_frame + 5),
+            min(end_frame - 1, max(start_frame, int((start_frame + end_frame) / 2))),
+            max(start_frame, end_frame - 5),
+        })
+        for frame_index in frames_to_check:
+            samples_by_frame.setdefault(frame_index, []).append(scene_index)
+
+    face_counts_by_scene = [[] for _ in scenes]
+    current_frame = -1
+    for target_frame in tqdm(sorted(samples_by_frame), desc="   Analyzing Scenes"):
+        grabbed = True
+        while current_frame < target_frame and grabbed:
+            grabbed = cap.grab()
+            current_frame += 1
+        if not grabbed:
+            break
+        retrieved, frame = cap.retrieve()
+        if not retrieved:
+            continue
+        face_count = len(detect_face_candidates(frame))
+        for scene_index in samples_by_frame[target_frame]:
+            face_counts_by_scene[scene_index].append(face_count)
+
+    for face_counts in face_counts_by_scene:
         # Decision Logic
         if not face_counts:
             avg_faces = 0
@@ -2634,15 +2994,13 @@ def analyze_scenes_strategy(video_path, scenes):
     return strategies
 
 def detect_scenes(video_path):
-    video_manager = VideoManager([video_path])
+    video = open_video(video_path)
     scene_manager = SceneManager()
     scene_manager.add_detector(ContentDetector())
-    video_manager.set_downscale_factor()
-    video_manager.start()
-    scene_manager.detect_scenes(frame_source=video_manager)
+    scene_manager.auto_downscale = True
+    scene_manager.detect_scenes(video=video)
     scene_list = scene_manager.get_scene_list()
-    fps = video_manager.get_framerate()
-    video_manager.release()
+    fps = video.frame_rate
     return scene_list, fps
 
 
@@ -2779,6 +3137,12 @@ def ensure_cv2_compatible_video(video_path, output_dir):
         "⚠️  Source is not Safari/OpenCV-friendly "
         f"({reason}). Creating H.264 MP4 working copy..."
     )
+    conversion_encoder, conversion_encoder_args = selected_h264_encoding_args(
+        cpu_preset="veryfast",
+        crf="18",
+        pixel_format="yuv420p",
+    )
+    print(f"   Video encoder (working copy): {conversion_encoder}")
     convert_cmd = [
         "ffmpeg",
         "-y",
@@ -2789,14 +3153,7 @@ def ensure_cv2_compatible_video(video_path, output_dir):
         "-map",
         "0:a?",
         *ffmpeg_thread_args(),
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "18",
-        "-pix_fmt",
-        "yuv420p",
+        *conversion_encoder_args,
         "-c:a",
         "aac",
         "-b:a",
@@ -3268,6 +3625,113 @@ REASON: {reason}
             except Exception:
                 pass
 
+def _smoothstep01(value):
+    progress = max(0.0, min(1.0, float(value)))
+    return progress * progress * (3.0 - (2.0 * progress))
+
+
+def _zoom_frame_to_anchor(frame, anchor_x, anchor_y, zoom_delta):
+    frame_height, frame_width = frame.shape[:2]
+    zoom_factor = 1.0 + max(0.0, float(zoom_delta or 0.0))
+    crop_width = max(2, min(frame_width, int(round(frame_width / zoom_factor))))
+    crop_height = max(2, min(frame_height, int(round(frame_height / zoom_factor))))
+    center_x = int(round(max(0.0, min(1.0, anchor_x)) * frame_width))
+    center_y = int(round(max(0.0, min(1.0, anchor_y)) * frame_height))
+    x1 = max(0, min(frame_width - crop_width, center_x - (crop_width // 2)))
+    y1 = max(0, min(frame_height - crop_height, center_y - (crop_height // 2)))
+    cropped = frame[y1:y1 + crop_height, x1:x1 + crop_width]
+    if cropped.size == 0:
+        return frame
+    return cv2.resize(cropped, (frame_width, frame_height), interpolation=cv2.INTER_LINEAR)
+
+
+def _pattern_flash_strength(current_time, event_time, duration_hint):
+    flash_duration = max(0.04, float(duration_hint or 0.08))
+    attack = flash_duration * 0.35
+    release = max(0.02, flash_duration - attack)
+    start_time = event_time - attack
+    end_time = event_time + release
+    if current_time < start_time or current_time > end_time:
+        return 0.0
+    if current_time <= event_time:
+        return _smoothstep01((current_time - start_time) / max(attack, 1e-6))
+    return 1.0 - _smoothstep01((current_time - event_time) / max(release, 1e-6))
+
+
+def _pattern_zoom_delta(current_time, zoom_cycles):
+    zoom_delta = 0.0
+    for cycle in zoom_cycles:
+        zoom_in_start = float(cycle.get("zoom_in_start") or 0.0)
+        zoom_in_duration = max(0.1, float(cycle.get("zoom_in_duration") or 0.56))
+        hold_duration = max(0.0, float(cycle.get("hold_duration") or 5.0))
+        zoom_out_start = float(
+            cycle.get("zoom_out_start")
+            or (zoom_in_start + zoom_in_duration + hold_duration)
+        )
+        zoom_out_duration = max(0.1, float(cycle.get("zoom_out_duration") or 0.64))
+        start_delta = max(0.0, float(cycle.get("start_zoom_delta") or 0.0))
+        target_delta = max(0.0, float(cycle.get("zoom_delta") or 0.0))
+
+        if current_time < zoom_in_start:
+            active_delta = start_delta
+        elif current_time <= zoom_in_start + zoom_in_duration:
+            progress = (current_time - zoom_in_start) / max(zoom_in_duration, 1e-6)
+            active_delta = start_delta + ((target_delta - start_delta) * _smoothstep01(progress))
+        elif current_time <= zoom_out_start:
+            active_delta = target_delta
+        elif current_time <= zoom_out_start + zoom_out_duration:
+            progress = (current_time - zoom_out_start) / max(zoom_out_duration, 1e-6)
+            active_delta = start_delta + ((target_delta - start_delta) * (1.0 - _smoothstep01(progress)))
+        else:
+            active_delta = start_delta
+        zoom_delta = max(zoom_delta, active_delta)
+    return zoom_delta
+
+
+def apply_pattern_interrupts_to_frame(frame, current_time, pattern_plan, interview_mode=False):
+    zoom_cycles = list((pattern_plan or {}).get("zoom_cycles") or [])
+    flash_events = list((pattern_plan or {}).get("flash_events") or [])
+    if not zoom_cycles and not flash_events:
+        return frame
+
+    zoom_delta = _pattern_zoom_delta(current_time, zoom_cycles)
+    processed = frame
+    if zoom_delta > 0.001:
+        if interview_mode:
+            split_y = frame.shape[0] // 2
+            top = _zoom_frame_to_anchor(frame[:split_y, :], 0.5, 0.44, zoom_delta)
+            bottom = _zoom_frame_to_anchor(frame[split_y:, :], 0.5, 0.44, zoom_delta)
+            processed = np.vstack((top, bottom))
+            cv2.line(processed, (0, split_y), (frame.shape[1], split_y), (255, 255, 255), 3)
+        else:
+            processed = _zoom_frame_to_anchor(frame, 0.5, 0.42, zoom_delta)
+
+    flash_level = 0.0
+    for event in flash_events:
+        strength = str(event.get("strength") or "medium")
+        amount_map = (
+            {"low": 0.75, "medium": 1.05, "high": 1.35}
+            if interview_mode
+            else {"low": 0.95, "medium": 1.35, "high": 1.75}
+        )
+        flash_level = max(
+            flash_level,
+            amount_map.get(strength, amount_map["medium"])
+            * _pattern_flash_strength(
+                current_time,
+                float(event.get("time") or 0.0),
+                float(event.get("duration") or 0.1),
+            ),
+        )
+    if flash_level > 0.001:
+        processed = cv2.convertScaleAbs(
+            processed,
+            alpha=1.0 + ((0.10 if interview_mode else 0.14) * flash_level),
+            beta=(42.0 if interview_mode else 64.0) * flash_level,
+        )
+    return processed
+
+
 def process_video_to_vertical(
     input_video,
     final_output_video,
@@ -3279,6 +3743,7 @@ def process_video_to_vertical(
     video_maxrate="12M",
     video_bufsize="24M",
     audio_bitrate="192k",
+    pattern_plan=None,
 ):
     """
     Core logic to convert horizontal video to vertical using scene detection and Active Speaker Tracking (MediaPipe).
@@ -3355,16 +3820,22 @@ def process_video_to_vertical(
         # Global tracker for single-person shots
         speaker_tracker = SpeakerTracker(cooldown_frames=30)
 
+    encoder_name, encoder_args = selected_h264_encoding_args(
+        cpu_preset=encode_preset,
+        crf=encode_crf,
+        maxrate=encode_maxrate,
+        bufsize=encode_bufsize,
+        profile="high",
+        level="4.1",
+        pixel_format="yuv420p",
+    )
+    print(f"   Video encoder: {encoder_name}")
     command = [
         'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
         '-s', f'{OUTPUT_WIDTH}x{OUTPUT_HEIGHT}', '-pix_fmt', 'bgr24',
         '-r', str(fps), '-i', '-',
         *ffmpeg_thread_args(),
-        '-c:v', 'libx264',
-        '-preset', encode_preset, '-crf', encode_crf,
-        '-maxrate', encode_maxrate, '-bufsize', encode_bufsize,
-        '-profile:v', 'high', '-level', '4.1',
-        '-pix_fmt', 'yuv420p',
+        *encoder_args,
         '-movflags', '+faststart',
         '-an', temp_video_output
     ]
@@ -3378,6 +3849,7 @@ def process_video_to_vertical(
     )
     
     frame_number = 0
+    detection_stride = max(1, int(round(float(fps) / TRACKING_DETECTION_FPS)))
 
     with tqdm(total=total_frames, desc="   Processing", file=sys.stdout) as pbar:
         while cap.isOpened():
@@ -3386,7 +3858,8 @@ def process_video_to_vertical(
                 break
 
             if interview_mode:
-                interview_tracker.update(detect_face_candidates(frame), original_width)
+                if frame_number % detection_stride == 0:
+                    interview_tracker.update(detect_face_candidates(frame), original_width)
                 output_frame = create_interview_frame(frame, OUTPUT_WIDTH, OUTPUT_HEIGHT, interview_tracker.get_boxes())
             else:
                 # Update Scene Index
@@ -3410,17 +3883,17 @@ def process_video_to_vertical(
                 else:
                     # "Single Speaker" -> Track & Crop
                     
-                    candidates = detect_face_candidates(frame)
-                    target_box = speaker_tracker.get_target(candidates, frame_number, original_width)
-                    if target_box:
-                        cameraman.update_target(target_box)
-                    else:
-                        person_box = detect_person_yolo(frame)
-                        if person_box:
-                            cameraman.update_target(person_box)
-
                     # Snap camera on scene change to avoid panning from previous scene position
                     is_scene_start = (frame_number == scene_boundaries[current_scene_index][0])
+                    if frame_number % detection_stride == 0 or is_scene_start:
+                        candidates = detect_face_candidates(frame)
+                        target_box = speaker_tracker.get_target(candidates, frame_number, original_width)
+                        if target_box:
+                            cameraman.update_target(target_box)
+                        else:
+                            person_box = detect_person_yolo(frame)
+                            if person_box:
+                                cameraman.update_target(person_box)
                     
                     x1, y1, x2, y2 = cameraman.get_crop_box(force_snap=is_scene_start)
                     
@@ -3431,6 +3904,12 @@ def process_video_to_vertical(
                     else:
                         output_frame = cv2.resize(frame, (OUTPUT_WIDTH, OUTPUT_HEIGHT), interpolation=cv2.INTER_CUBIC)
 
+            output_frame = apply_pattern_interrupts_to_frame(
+                output_frame,
+                frame_number / max(float(fps), 1.0),
+                pattern_plan,
+                interview_mode=bool(interview_mode),
+            )
             ffmpeg_process.stdin.write(output_frame.tobytes())
             frame_number += 1
             pbar.update(1)

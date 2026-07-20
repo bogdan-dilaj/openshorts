@@ -1652,12 +1652,13 @@ function App() {
     setOllamaModelState(normalizeOllamaModelName(value));
   };
 
-  const resolveCurrentProviderStatus = () => {
-    if (llmProvider === 'gemini') return { ready: !!apiKey, label: 'Gemini-Key fehlt' };
-    if (llmProvider === 'openai') return { ready: !!openaiKey, label: 'OpenAI-Key fehlt' };
-    if (llmProvider === 'claude') return { ready: !!claudeKey, label: 'Claude-Key fehlt' };
-    if (llmProvider === 'minimax') return { ready: !!minimaxKey, label: 'MiniMax-Key fehlt' };
-    if (llmProvider === 'ollama') return { ready: !!ollamaBaseUrl && !!ollamaModel, label: 'Ollama-Konfiguration fehlt' };
+  const resolveCurrentProviderStatus = (providerOverride = null) => {
+    const resolvedProvider = normalizeShortformProvider(providerOverride || llmProvider);
+    if (resolvedProvider === 'gemini') return { ready: !!apiKey.trim(), label: 'Gemini-Key fehlt' };
+    if (resolvedProvider === 'openai') return { ready: !!openaiKey.trim(), label: 'OpenAI-Key fehlt' };
+    if (resolvedProvider === 'claude') return { ready: !!claudeKey.trim(), label: 'Claude-Key fehlt' };
+    if (resolvedProvider === 'minimax') return { ready: !!minimaxKey.trim(), label: 'MiniMax-Key fehlt' };
+    if (resolvedProvider === 'ollama') return { ready: !!ollamaBaseUrl.trim() && !!ollamaModel.trim(), label: 'Ollama-Konfiguration fehlt' };
     return { ready: true, label: '' };
   };
 
@@ -2532,27 +2533,31 @@ function App() {
 
   const buildProviderHeaders = (includeJson = false, providerOverride = null) => {
     const resolvedProvider = normalizeShortformProvider(providerOverride || llmProvider);
+    const providerStatus = resolveCurrentProviderStatus(resolvedProvider);
+    if (!providerStatus.ready) {
+      throw new Error(`${providerStatus.label}. Bitte zuerst unter Einstellungen hinterlegen oder die Settings erneut importieren.`);
+    }
     const headers = {
       'X-LLM-Provider': resolvedProvider
     };
 
-    if (resolvedProvider === 'gemini' && apiKey) {
-      headers['X-Gemini-Key'] = apiKey;
+    if (resolvedProvider === 'gemini') {
+      headers['X-Gemini-Key'] = apiKey.trim();
       if (geminiModel) headers['X-Gemini-Model'] = geminiModel;
     }
 
-    if (resolvedProvider === 'openai' && openaiKey) {
-      headers['X-OpenAI-Key'] = openaiKey;
+    if (resolvedProvider === 'openai') {
+      headers['X-OpenAI-Key'] = openaiKey.trim();
       if (openaiModel) headers['X-OpenAI-Model'] = openaiModel;
     }
 
-    if (resolvedProvider === 'claude' && claudeKey) {
-      headers['X-Claude-Key'] = claudeKey;
+    if (resolvedProvider === 'claude') {
+      headers['X-Claude-Key'] = claudeKey.trim();
       if (claudeModel) headers['X-Claude-Model'] = claudeModel;
     }
 
-    if (resolvedProvider === 'minimax' && minimaxKey) {
-      headers['X-Minimax-Key'] = minimaxKey;
+    if (resolvedProvider === 'minimax') {
+      headers['X-Minimax-Key'] = minimaxKey.trim();
       headers['X-Minimax-Auth-Mode'] = minimaxAuthMode;
       if (minimaxModel) headers['X-Minimax-Model'] = minimaxModel;
     }
@@ -2710,21 +2715,37 @@ function App() {
   const applySyncedSettings = (payload) => {
     if (!payload || typeof payload !== 'object') return;
 
-    if (typeof payload.apiKey === 'string') setApiKey(payload.apiKey);
-    if (typeof payload.huggingFaceKey === 'string') setHuggingFaceKey(payload.huggingFaceKey);
-    if (typeof payload.openaiKey === 'string') setOpenaiKey(payload.openaiKey);
-    if (typeof payload.claudeKey === 'string') setClaudeKey(payload.claudeKey);
-    if (typeof payload.minimaxKey === 'string') setMinimaxKey(payload.minimaxKey);
-    if (payload.minimaxAuthMode === 'token_plan' || payload.minimaxAuthMode === 'payg') setMinimaxAuthMode(payload.minimaxAuthMode);
-    if (typeof payload.midjourneyKey === 'string') setMidjourneyKey(payload.midjourneyKey);
-    if (typeof payload.midjourneyBaseUrl === 'string') setMidjourneyBaseUrl(payload.midjourneyBaseUrl);
-    if (payload.llmProvider) setLlmProvider(normalizeShortformProvider(payload.llmProvider));
-    if (typeof payload.geminiModel === 'string') setGeminiModel(normalizeShortformModel('gemini', payload.geminiModel));
-    if (typeof payload.openaiModel === 'string') setOpenaiModel(normalizeShortformModel('openai', payload.openaiModel));
-    if (typeof payload.claudeModel === 'string') setClaudeModel(normalizeShortformModel('claude', payload.claudeModel));
-    if (typeof payload.minimaxModel === 'string') setMinimaxModel(normalizeShortformModel('minimax', payload.minimaxModel));
-    if (typeof payload.ollamaBaseUrl === 'string' && payload.ollamaBaseUrl.trim()) setOllamaBaseUrl(payload.ollamaBaseUrl);
-    if (typeof payload.ollamaModel === 'string' && payload.ollamaModel.trim()) setOllamaModel(payload.ollamaModel);
+    const importedApiKey = typeof payload.apiKey === 'string' ? payload.apiKey : payload.gemini_api_key;
+    const importedHuggingFaceKey = typeof payload.huggingFaceKey === 'string' ? payload.huggingFaceKey : payload.huggingface_token;
+    const importedOpenaiKey = typeof payload.openaiKey === 'string' ? payload.openaiKey : payload.openai_api_key;
+    const importedClaudeKey = typeof payload.claudeKey === 'string' ? payload.claudeKey : payload.claude_api_key;
+    const importedMinimaxKey = typeof payload.minimaxKey === 'string' ? payload.minimaxKey : payload.minimax_api_key;
+    const importedMinimaxAuthMode = payload.minimaxAuthMode || payload.minimax_auth_mode;
+    const importedMidjourneyKey = typeof payload.midjourneyKey === 'string' ? payload.midjourneyKey : payload.midjourney_api_key;
+    const importedMidjourneyBaseUrl = typeof payload.midjourneyBaseUrl === 'string' ? payload.midjourneyBaseUrl : payload.midjourney_base_url;
+    const importedProvider = payload.llmProvider || payload.llm_provider || payload.provider;
+    const importedGeminiModel = typeof payload.geminiModel === 'string' ? payload.geminiModel : payload.gemini_model;
+    const importedOpenaiModel = typeof payload.openaiModel === 'string' ? payload.openaiModel : payload.openai_model;
+    const importedClaudeModel = typeof payload.claudeModel === 'string' ? payload.claudeModel : payload.claude_model;
+    const importedMinimaxModel = typeof payload.minimaxModel === 'string' ? payload.minimaxModel : payload.minimax_model;
+    const importedOllamaBaseUrl = typeof payload.ollamaBaseUrl === 'string' ? payload.ollamaBaseUrl : payload.ollama_base_url;
+    const importedOllamaModel = typeof payload.ollamaModel === 'string' ? payload.ollamaModel : payload.ollama_model;
+
+    if (typeof importedApiKey === 'string') setApiKey(importedApiKey.trim());
+    if (typeof importedHuggingFaceKey === 'string') setHuggingFaceKey(importedHuggingFaceKey.trim());
+    if (typeof importedOpenaiKey === 'string') setOpenaiKey(importedOpenaiKey.trim());
+    if (typeof importedClaudeKey === 'string') setClaudeKey(importedClaudeKey.trim());
+    if (typeof importedMinimaxKey === 'string') setMinimaxKey(importedMinimaxKey.trim());
+    if (importedMinimaxAuthMode === 'token_plan' || importedMinimaxAuthMode === 'payg') setMinimaxAuthMode(importedMinimaxAuthMode);
+    if (typeof importedMidjourneyKey === 'string') setMidjourneyKey(importedMidjourneyKey.trim());
+    if (typeof importedMidjourneyBaseUrl === 'string') setMidjourneyBaseUrl(importedMidjourneyBaseUrl.trim());
+    if (importedProvider) setLlmProvider(normalizeShortformProvider(importedProvider));
+    if (typeof importedGeminiModel === 'string') setGeminiModel(normalizeShortformModel('gemini', importedGeminiModel));
+    if (typeof importedOpenaiModel === 'string') setOpenaiModel(normalizeShortformModel('openai', importedOpenaiModel));
+    if (typeof importedClaudeModel === 'string') setClaudeModel(normalizeShortformModel('claude', importedClaudeModel));
+    if (typeof importedMinimaxModel === 'string') setMinimaxModel(normalizeShortformModel('minimax', importedMinimaxModel));
+    if (typeof importedOllamaBaseUrl === 'string' && importedOllamaBaseUrl.trim()) setOllamaBaseUrl(importedOllamaBaseUrl.trim());
+    if (typeof importedOllamaModel === 'string' && importedOllamaModel.trim()) setOllamaModel(importedOllamaModel);
     if (typeof payload.uploadPostKey === 'string') setUploadPostKey(payload.uploadPostKey);
     if (typeof payload.uploadUserId === 'string') setUploadUserId(payload.uploadUserId);
     if (typeof payload.elevenLabsKey === 'string') setElevenLabsKey(payload.elevenLabsKey);
@@ -2985,6 +3006,7 @@ function App() {
     // Encrypt Gemini Key too for consistency if desired, but user asked specifically about Social integration not saving well.
     // For now keeping gemini plain for compatibility unless requested.
     if (apiKey) localStorage.setItem('gemini_key', apiKey);
+    else localStorage.removeItem('gemini_key');
   }, [apiKey]);
 
   useEffect(() => {
@@ -3104,7 +3126,22 @@ function App() {
   useEffect(() => {
     if (status === 'processing') setIsDesktopLiveAnalysisOpen(true);
     if (status === 'complete') setIsDesktopLiveAnalysisOpen(false);
-  }, [status]);
+
+    const lastLog = String(logs[logs.length - 1] || '');
+    const canRecoverWithMinimax = resolveCurrentProviderStatus('minimax').ready;
+    if (
+      status === 'error'
+      && !jobId
+      && processingMedia
+      && canRecoverWithMinimax
+      && lastLog.includes('Missing X-Gemini-Key header')
+    ) {
+      const retryTimer = window.setTimeout(() => handleProcess(processingMedia, 'minimax'), 0);
+      return () => window.clearTimeout(retryTimer);
+    }
+
+    return undefined;
+  }, [status, jobId, logs, processingMedia, minimaxKey]);
 
   useEffect(() => {
     if (uploadPostKey && userProfiles.length === 0) {
@@ -3113,9 +3150,57 @@ function App() {
   }, [uploadPostKey]);
 
   useEffect(() => {
+    let cancelled = false;
+    const handleProviderStorageUpdate = (event) => {
+      const value = String(event.newValue || '').trim();
+      if (event.key === 'llm_provider' && value) setLlmProvider(normalizeShortformProvider(value));
+      if (event.key === 'gemini_key') setApiKey(value);
+      if (event.key === 'minimax_key') setMinimaxKey(value);
+      if (event.key === 'minimax_auth_mode' && (value === 'token_plan' || value === 'payg')) setMinimaxAuthMode(value);
+      if (event.key === 'minimax_model' && value) setMinimaxModel(normalizeShortformModel('minimax', value));
+    };
+
+    window.addEventListener('storage', handleProviderStorageUpdate);
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const startupSyncCode = String(urlParams.get('settings_sync_code') || '').trim();
+    if (startupSyncCode) {
+      fetchWithTimeout(getApiUrl('/api/settings/sync/load'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sync_code: startupSyncCode, apply_youtube_cookies: false }),
+      }, 12000)
+        .then(async (res) => {
+          if (!res.ok) throw new Error(await readErrorMessage(res));
+          return res.json();
+        })
+        .then((data) => {
+          if (cancelled) return;
+          applySyncedSettings(data.settings || {});
+          urlParams.delete('settings_sync_code');
+          const nextSearch = urlParams.toString();
+          window.history.replaceState(
+            {},
+            '',
+            `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`
+          );
+          setSettingsSyncStatus({ type: 'success', message: 'MiniMax-Einstellungen wurden übernommen.' });
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            setSettingsSyncStatus({ type: 'error', message: error.message || 'Settings-Sync fehlgeschlagen.' });
+          }
+        });
+    }
+
     if (activeTab === 'settings') {
       refreshYoutubeAuthStatus();
     }
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener('storage', handleProviderStorageUpdate);
+    };
   }, [activeTab]);
 
   useEffect(() => {
@@ -3858,8 +3943,23 @@ function App() {
     }
   };
 
-  const handleProcess = async (data) => {
+  const handleProcess = async (data, providerOverride = null) => {
     if (isQueueSubmitting) return;
+    const requestedProvider = normalizeShortformProvider(providerOverride || llmProvider);
+    const resolvedProvider = resolveCurrentProviderStatus(requestedProvider).ready
+      ? requestedProvider
+      : (resolveCurrentProviderStatus('minimax').ready ? 'minimax' : requestedProvider);
+    const providerStatus = resolveCurrentProviderStatus(resolvedProvider);
+    if (!providerStatus.ready) {
+      setQueueSubmitStatus({
+        type: 'error',
+        message: `${providerStatus.label}. Bitte zuerst unter Einstellungen hinterlegen oder die Settings erneut importieren.`,
+      });
+      return;
+    }
+    if (resolvedProvider !== llmProvider) {
+      setLlmProvider(resolvedProvider);
+    }
     const requestedProfileId = resolveProfileIdForJobRequest(!!data.options?.interviewMode);
     const activeUploadProfile = String(uploadUserId || '').trim();
     const activeProfileContext = String(uploadProfileContexts[activeUploadProfile] || '').trim();
@@ -3877,7 +3977,7 @@ function App() {
 
     try {
       let body;
-      const headers = buildProviderHeaders(data.type === 'url');
+      const headers = buildProviderHeaders(data.type === 'url', resolvedProvider);
 
       if (data.type === 'url') {
         body = JSON.stringify({
@@ -5968,6 +6068,33 @@ function App() {
                 )}
 
                 <div className={`${isMobileLiveAnalysisOpen ? 'flex' : 'hidden'} ${status === 'complete' && !isDesktopLiveAnalysisOpen ? 'md:hidden' : 'md:flex'} flex-1 min-h-0 flex-col gap-4`}>
+                  {status === 'error' && !jobId && processingMedia && (
+                    <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-4">
+                      <p className="text-sm text-red-100">
+                        Der Auftrag wurde noch nicht angelegt. Die Quelle ist erhalten und kann mit dem aktiven KI-Provider erneut gestartet werden.
+                      </p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleProcess(processingMedia)}
+                          disabled={isQueueSubmitting}
+                          className="inline-flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-black hover:bg-primary/90 disabled:opacity-50"
+                        >
+                          <RotateCcw size={15} />
+                          Erneut starten
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab('settings')}
+                          className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-zinc-200 hover:bg-white/10"
+                        >
+                          <Settings size={15} />
+                          Einstellungen
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Video Preview */}
                   {processingMedia && (
                     <ProcessingAnimation

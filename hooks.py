@@ -14,6 +14,7 @@ from overlay_styles import (
     get_font_path,
 )
 from runtime_limits import FFMPEG_PRESET, ffmpeg_thread_args, subprocess_priority_kwargs
+from video_encoding import run_h264_ffmpeg
 
 OVERLAY_FFMPEG_PRESET = (os.environ.get("OVERLAY_FFMPEG_PRESET") or "veryfast").strip() or FFMPEG_PRESET
 DEFAULT_HOOK_VISIBLE_SECONDS = max(0.0, float(os.environ.get("HOOK_VISIBLE_SECONDS", "4.0") or "4.0"))
@@ -618,29 +619,34 @@ def add_hook_to_video(
         else:
             filter_complex = "[0:v][1:v]overlay=0:0[vout]"
 
-        ffmpeg_cmd = [
-            'ffmpeg', '-y',
-            '-loglevel', 'error',
-            '-i', video_path,
-            '-loop', '1',
-            '-i', img_path,
-            *ffmpeg_thread_args(include_filter_threads=True),
-            '-filter_complex', filter_complex,
-            '-map', '[vout]',
-            '-map', '0:a?',
-            '-shortest',
-            '-c:a', 'copy',
-            '-c:v', 'libx264', '-preset', OVERLAY_FFMPEG_PRESET, '-crf', '18',
-            '-movflags', '+faststart',
-            output_path
-        ]
-        
-        subprocess.run(
-            ffmpeg_cmd,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            **subprocess_priority_kwargs(),
+        def build_command(encoder_args, _encoder):
+            return [
+                'ffmpeg', '-y',
+                '-loglevel', 'error',
+                '-i', video_path,
+                '-loop', '1',
+                '-i', img_path,
+                *ffmpeg_thread_args(include_filter_threads=True),
+                '-filter_complex', filter_complex,
+                '-map', '[vout]',
+                '-map', '0:a?',
+                '-shortest',
+                '-c:a', 'copy',
+                *encoder_args,
+                '-movflags', '+faststart',
+                output_path
+            ]
+
+        run_h264_ffmpeg(
+            build_command,
+            cpu_preset=OVERLAY_FFMPEG_PRESET,
+            crf='18',
+            run_kwargs={
+                'stdout': subprocess.PIPE,
+                'stderr': subprocess.PIPE,
+                **subprocess_priority_kwargs(),
+            },
+            label='hook',
         )
         print(f"✅ Hook added to {output_path}")
         return True

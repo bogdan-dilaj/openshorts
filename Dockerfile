@@ -65,9 +65,9 @@ COPY . .
 RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /usr/sbin/nologin appuser
 
 # Create writable runtime/cache directories outside the bind mount
-RUN mkdir -p /app/uploads /app/output/.cache/huggingface /app/output/.cache/whisper_ct2 /tmp/Ultralytics /tmp/matplotlib /tmp/.config /tmp/.cache/numba
+RUN mkdir -p /app/uploads /app/output/.cache/huggingface /app/output/.cache/whisper_ct2 /tmp/Ultralytics /tmp/matplotlib /tmp/.config /tmp/.cache/numba /var/cache/openshorts
 # Fix permissions for app data and all runtime caches
-RUN chown -R appuser:appuser /app /tmp/Ultralytics /tmp/matplotlib /tmp/.config /tmp/.cache
+RUN chown -R appuser:appuser /app /tmp/Ultralytics /tmp/matplotlib /tmp/.config /tmp/.cache /var/cache/openshorts
 
 # Switch to non-root user
 USER appuser

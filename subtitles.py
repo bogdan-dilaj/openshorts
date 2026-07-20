@@ -13,6 +13,7 @@ from overlay_styles import (
     get_font_path,
 )
 from runtime_limits import FFMPEG_PRESET, ffmpeg_thread_args, subprocess_priority_kwargs
+from video_encoding import run_h264_ffmpeg
 from whisper_runtime import transcribe_with_runtime
 
 OVERLAY_FFMPEG_PRESET = (os.environ.get("OVERLAY_FFMPEG_PRESET") or "veryfast").strip() or FFMPEG_PRESET
@@ -498,33 +499,179 @@ def burn_subtitles(
         temp_handle.close()
 
         filter_expr = f"ass={ass_path}:fontsdir={FONT_DIR}"
-        cmd = [
-            "ffmpeg", "-y",
-            "-loglevel", "error",
-            "-i", video_path,
-            *ffmpeg_thread_args(include_filter_threads=True),
-            "-vf", filter_expr,
-            "-map", "0:v:0",
-            "-map", "0:a?",
-            "-c:v", "libx264", "-preset", OVERLAY_FFMPEG_PRESET, "-crf", "18",
-            "-c:a", "copy",
-            "-movflags", "+faststart",
-            output_path,
-        ]
+        def build_command(encoder_args, _encoder):
+            return [
+                "ffmpeg", "-y",
+                "-loglevel", "error",
+                "-i", video_path,
+                *ffmpeg_thread_args(include_filter_threads=True),
+                "-vf", filter_expr,
+                "-map", "0:v:0",
+                "-map", "0:a?",
+                *encoder_args,
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                output_path,
+            ]
 
-        print(f"🎬 Burning subtitles with ASS pipeline: {' '.join(cmd[:12])} ...")
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            **subprocess_priority_kwargs(),
+        print("Burning subtitles with ASS pipeline")
+        run_h264_ffmpeg(
+            build_command,
+            cpu_preset=OVERLAY_FFMPEG_PRESET,
+            crf="18",
+            run_kwargs={
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.PIPE,
+                **subprocess_priority_kwargs(),
+            },
+            label="subtitles",
         )
-        if result.returncode != 0:
-            error_text = result.stderr.decode()
-            print(f"❌ FFmpeg Subtitle Error: {error_text}")
-            raise Exception(f"FFmpeg failed: {error_text}")
 
         return True
     finally:
         if os.path.exists(ass_path):
             os.remove(ass_path)
+
+
+def burn_subtitles_and_hook(
+    video_path,
+    transcript,
+    clip_start,
+    clip_end,
+    output_path,
+    *,
+    subtitle_alignment="bottom",
+    subtitle_y_position=None,
+    subtitle_fontsize=24,
+    subtitle_font_family=DEFAULT_SUBTITLE_FONT,
+    subtitle_background_style=DEFAULT_BACKGROUND_STYLE,
+    subtitle_max_chars=20,
+    subtitle_max_duration=2.0,
+    hook_text,
+    hook_position="top",
+    hook_horizontal_position="center",
+    hook_x_position=None,
+    hook_y_position=None,
+    hook_text_align="center",
+    hook_font_scale=1.0,
+    hook_width_preset="wide",
+    hook_font_name=None,
+    hook_background_style=DEFAULT_BACKGROUND_STYLE,
+    hook_visible_seconds=4.0,
+    hook_fade_out_seconds=0.45,
+    temp_dir="/tmp",
+):
+    """Burn ASS subtitles and a rendered hook image in one video encode."""
+    from hooks import create_hook_image
+
+    blocks = build_subtitle_blocks(
+        transcript,
+        clip_start,
+        clip_end,
+        max_chars=subtitle_max_chars,
+        max_duration=subtitle_max_duration,
+    )
+    if not blocks:
+        return False
+
+    video_width, video_height = _probe_video_dimensions(video_path)
+    get_font_path(subtitle_font_family)
+    working_dir = temp_dir if os.path.isdir(temp_dir) else "/tmp"
+    ass_handle = tempfile.NamedTemporaryFile(
+        prefix="openshorts_subtitles_hook_",
+        suffix=".ass",
+        dir=working_dir,
+        delete=False,
+        mode="w",
+        encoding="utf-8",
+    )
+    ass_path = ass_handle.name
+    hook_fd, hook_path = tempfile.mkstemp(
+        prefix="openshorts_hook_",
+        suffix=".png",
+        dir=working_dir,
+    )
+    os.close(hook_fd)
+
+    try:
+        ass_handle.write(
+            _build_ass_content(
+                blocks,
+                video_width,
+                video_height,
+                alignment=subtitle_alignment,
+                y_position=subtitle_y_position,
+                fontsize=subtitle_fontsize,
+                font_family=subtitle_font_family,
+                background_style=subtitle_background_style,
+            )
+        )
+        ass_handle.close()
+        create_hook_image(
+            hook_text,
+            video_width,
+            video_height,
+            hook_path,
+            position=hook_position,
+            horizontal_position=hook_horizontal_position,
+            x_position=hook_x_position,
+            y_position=hook_y_position,
+            text_align=hook_text_align,
+            font_scale=hook_font_scale,
+            width_preset=hook_width_preset,
+            font_name=hook_font_name,
+            background_style=hook_background_style,
+        )
+
+        visible_seconds = max(0.0, float(hook_visible_seconds or 0.0))
+        fade_out_seconds = max(0.0, float(hook_fade_out_seconds or 0.0))
+        if visible_seconds > 0.0 and fade_out_seconds > 0.0:
+            fade_start = max(0.0, visible_seconds - fade_out_seconds)
+            hook_filter = (
+                f"[1:v]format=rgba,fade=t=out:st={fade_start:.3f}:"
+                f"d={fade_out_seconds:.3f}:alpha=1[hook]"
+            )
+        else:
+            hook_filter = "[1:v]format=rgba[hook]"
+        filter_complex = (
+            f"[0:v]ass={ass_path}:fontsdir={FONT_DIR}[subtitled];"
+            f"{hook_filter};[subtitled][hook]overlay=0:0[vout]"
+        )
+
+        def build_command(encoder_args, _encoder):
+            return [
+                "ffmpeg", "-y",
+                "-loglevel", "error",
+                "-i", video_path,
+                "-loop", "1",
+                "-i", hook_path,
+                *ffmpeg_thread_args(include_filter_threads=True),
+                "-filter_complex", filter_complex,
+                "-map", "[vout]",
+                "-map", "0:a?",
+                "-shortest",
+                *encoder_args,
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                output_path,
+            ]
+
+        print("Burning subtitles and hook in one FFmpeg pass")
+        run_h264_ffmpeg(
+            build_command,
+            cpu_preset=OVERLAY_FFMPEG_PRESET,
+            crf="18",
+            run_kwargs={
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.PIPE,
+                **subprocess_priority_kwargs(),
+            },
+            label="subtitles + hook",
+        )
+        return True
+    finally:
+        if not ass_handle.closed:
+            ass_handle.close()
+        for temp_path in (ass_path, hook_path):
+            if os.path.exists(temp_path):
+                os.remove(temp_path)

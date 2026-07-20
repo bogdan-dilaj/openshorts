@@ -4,7 +4,7 @@ OpenShorts is a local-first pipeline for turning long videos into vertical short
 
 It supports:
 - YouTube URLs and local uploads
-- Gemini or local Ollama models for clip selection and AI edit flows
+- MiniMax, Gemini, or local Ollama models for clip selection and AI edit flows
 - Vertical reframing for single-speaker, group, and interview footage
 - Subtitle, hook, dub, trim, and auto-edit post-processing
 - Job history, resume, cancel, and partial recovery
@@ -54,6 +54,7 @@ It supports:
 ## Requirements
 
 - Docker and Docker Compose
+- For MiniMax mode: a MiniMax Token Plan or Pay-as-you-go key
 - For Gemini mode: a Gemini API key
 - For Ollama mode: a local Ollama instance and at least one pulled model
 - Optional: Upload-Post API key for posting
@@ -63,7 +64,7 @@ It supports:
 
 ### 1. Clone
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/bogdan-dilaj/openshorts.git
 cd openshorts
 ```
 
@@ -98,11 +99,12 @@ docker compose -f docker-compose.cpu.yml up --build -d
 Windows uses a dedicated bridge-network Compose file instead of Linux host networking:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\setup_windows.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1 -Gpu
 ```
 
-Use `.\scripts\setup_windows.ps1 -Gpu` for optional NVIDIA GPU passthrough. Full Codex migration instructions are in [`docs/WINDOWS_CODEX_SETUP.md`](docs/WINDOWS_CODEX_SETUP.md).
+Omit `-Gpu` on a system without a compatible NVIDIA GPU. The installer supports Docker Desktop and native Docker inside WSL, verifies both services, and creates `OpenShorts` shortcuts on the desktop and in the Start menu. After setup, no visible PowerShell window is needed for normal starts.
+
+The complete new-PC and settings migration guide is in [`docs/NEW_PC_SETUP.md`](docs/NEW_PC_SETUP.md). Additional Codex handoff instructions are in [`docs/WINDOWS_CODEX_SETUP.md`](docs/WINDOWS_CODEX_SETUP.md).
 
 ### 5. Optional: access from other devices in the same WLAN
 OpenShorts uses same-origin API proxying in the frontend, so LAN clients only need frontend port `5175`.
@@ -119,7 +121,7 @@ If access fails, check local firewall rules for port `5175`.
 ## First use
 
 1. Open `Settings`.
-2. Choose `Gemini` or `Ollama`.
+2. Choose `MiniMax`, `Gemini`, or `Ollama`.
 3. If using Ollama, set:
    - Base URL: `http://127.0.0.1:11434`
    - Model: for example `gemma3:12b`
@@ -322,6 +324,9 @@ The main form supports:
 Short suggestion behavior:
 - Suggested shorts default to coherent value clips between 60 and 180 seconds
 - The AI may return fewer clips than requested when the transcript has fewer strong standalone moments
+- Chunked providers receive transcript context before and after each focus window so setup and payoff are visible
+- Proposed timestamps are aligned to word-level sentence/pause boundaries with a small silence-only pad
+- Candidates are discarded when a contextless opening or complete ending cannot fit inside the configured duration
 
 Global settings also control:
 - automatic pause/filler-word removal preset for newly generated shorts
@@ -579,9 +584,15 @@ Notable runtime controls:
 - `FFMPEG_FILTER_THREADS`
 - `FFMPEG_PRESET`
 - `OVERLAY_FFMPEG_PRESET`
+- `SHORTFORM_VIDEO_ENCODER` (`auto`, `h264_nvenc`, or `libx264`)
+- `NVENC_PRESET` and `NVENC_CQ`
+- `TRACKING_DETECTION_FPS`
+- `RENDER_SCRATCH_DIR` and `RENDER_CACHE_DIR`
 - `WHISPER_CPU_THREADS`
 
-Current defaults are tuned for desktop responsiveness rather than maximum throughput.
+`auto` performs a real NVENC preflight and falls back to `libx264` when NVIDIA encoding is unavailable. Short renders fuse pattern effects into vertical reframing and combine subtitles plus hook into one FFmpeg pass. Repeated structural and identical final renders reuse the persistent render cache.
+
+Current defaults are tuned for desktop responsiveness and GPU throughput.
 
 ## Security and execution model
 
@@ -589,6 +600,7 @@ Current defaults are tuned for desktop responsiveness rather than maximum throug
 - Writable caches are redirected away from `/app`
 - Job data is stored under `output/<job_id>/`
 - Large temporary processing artifacts are created under `/tmp`
+- Reusable vertical render bases are stored in the `openshorts-render-cache` Docker volume
 
 ## Output structure
 

@@ -14,6 +14,12 @@ services:
       FFMPEG_THREADS: "${FFMPEG_THREADS:-16}"
       FFMPEG_FILTER_THREADS: "${FFMPEG_FILTER_THREADS:-8}"
       FFMPEG_PRESET: "${FFMPEG_PRESET:-fast}"
+      SHORTFORM_VIDEO_ENCODER: "${SHORTFORM_VIDEO_ENCODER:-auto}"
+      NVENC_PRESET: "${NVENC_PRESET:-p4}"
+      NVENC_CQ: "${NVENC_CQ:-18}"
+      TRACKING_DETECTION_FPS: "${TRACKING_DETECTION_FPS:-10}"
+      RENDER_SCRATCH_DIR: "${RENDER_SCRATCH_DIR:-/tmp/openshorts-render}"
+      RENDER_CACHE_DIR: "${RENDER_CACHE_DIR:-/var/cache/openshorts/render}"
       BROWSER_PREVIEW_CONCURRENCY: "${BROWSER_PREVIEW_CONCURRENCY:-1}"
       BROWSER_PREVIEW_THREADS: "${BROWSER_PREVIEW_THREADS:-2}"
       BROWSER_PREVIEW_WIDTH: "${BROWSER_PREVIEW_WIDTH:-360}"
@@ -81,6 +87,7 @@ services:
         source: .
         target: /app
       - /app/__pycache__
+      - openshorts-render-cache:/var/cache/openshorts
       - type: bind
         source: ${LONGFORM_SOURCE_HOST_DIR:-./output/longform_source_mount}
         target: ${LONGFORM_SOURCE_MOUNT_ROOT:-/mnt/longform-source}
@@ -103,3 +110,6 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+
+volumes:
+  openshorts-render-cache:

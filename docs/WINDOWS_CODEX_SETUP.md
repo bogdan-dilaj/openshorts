@@ -1,6 +1,8 @@
 # Windows Setup fuer eine neue Codex-Session
 
-Ziel: OpenShorts auf Windows funktional identisch starten und nur Einstellungen importieren. Bestehende Projekte, Jobs, Videos und Renderdaten werden nicht migriert.
+Ziel: OpenShorts auf Windows funktional identisch starten und nur Einstellungen importieren. Bestehende Projekte, Jobs, Videos, Verlauf und Renderdaten werden ausdruecklich nicht migriert; `output/` wird nicht kopiert.
+
+Die vollstaendige Endnutzer-Anleitung fuer einen neuen PC steht in [`NEW_PC_SETUP.md`](NEW_PC_SETUP.md). Dieses Dokument ergaenzt sie um Hinweise fuer eine Codex-Session.
 
 ## Auftrag an Codex auf Windows
 
@@ -44,18 +46,16 @@ Keine alten `output`, Projekt- oder Mediendateien kopieren.
 
 ## Automatischer Start
 
-CPU, funktioniert auf jedem Docker-Desktop-System:
+CPU, funktioniert auf jedem Docker-Desktop- oder WSL-Docker-System:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\setup_windows.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1
 ```
 
 NVIDIA-GPU, nur wenn `nvidia-smi` auf Windows funktioniert und Docker Desktop GPU-Zugriff hat:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\setup_windows.ps1 -Gpu
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1 -Gpu
 ```
 
 Das Skript:
@@ -66,9 +66,13 @@ Das Skript:
 4. validiert die Compose-Konfiguration,
 5. baut und startet Backend und Frontend,
 6. wartet auf `http://localhost:8000/openapi.json` und `http://localhost:5175`,
-7. oeffnet das Dashboard.
+7. prueft bei `-Gpu` NVIDIA-Zugriff und `h264_nvenc`,
+8. erzeugt eine Desktop- und eine Startmenue-Verknuepfung,
+9. oeffnet das Dashboard.
 
 Das Windows-Compose verwendet Bridge-Networking und explizite Ports. Das vermeidet die Linux-Abhaengigkeit von `network_mode: host`.
+
+Der erzeugte Launcher startet OpenShorts spaeter unsichtbar und funktioniert sowohl mit Docker Desktop als auch mit einer erkannten nativen WSL-Docker-Installation. Sein Protokoll liegt unter `%LOCALAPPDATA%\OpenShorts\launcher.log`.
 
 ## Einstellungen auf dem alten Rechner exportieren
 
@@ -153,8 +157,10 @@ Aktualisieren:
 
 ```powershell
 git pull --ff-only
-.\scripts\setup_windows.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup_windows.ps1 -Gpu
 ```
+
+Auf einem CPU-Rechner `-Gpu` weglassen.
 
 Keine Befehle wie `docker compose down -v`, `git reset --hard` oder das Loeschen von `output` verwenden, ausser der Benutzer verlangt es ausdruecklich.
 

@@ -1,6 +1,6 @@
 # OpenShorts Codex Handoff
 
-Stand: 2026-07-19
+Stand: 2026-07-20
 
 Dieses Dokument ist der technische Kontext fuer eine neue Codex-Session. Keine geheimen Werte sind hier enthalten.
 
@@ -130,9 +130,11 @@ Die JSON-Datei enthaelt Geheimnisse im Klartext. Sie darf nicht committed, getei
 
 ## Windows
 
-Siehe `docs/WINDOWS_CODEX_SETUP.md` und `scripts/setup_windows.ps1`.
+Siehe `docs/NEW_PC_SETUP.md`, `docs/WINDOWS_CODEX_SETUP.md` und `scripts/setup_windows.ps1`.
 
 Windows verwendet `docker-compose.windows.yml` im Bridge-Netz. `dashboard/vite.config.js` liest dafuer `VITE_PROXY_TARGET=http://backend:8000`. Optional aktiviert `docker-compose.windows.gpu.yml` NVIDIA-GPU-Passthrough.
+
+`scripts/windows_docker.ps1` erkennt Docker Desktop oder natives Docker in WSL. `scripts/setup_windows.ps1` baut und prueft die Installation und erzeugt Desktop-/Startmenue-Verknuepfungen. Diese starten `scripts/start_windows.ps1` unsichtbar; das Protokoll liegt unter `%LOCALAPPDATA%\OpenShorts\launcher.log`.
 
 ## Verifikation
 

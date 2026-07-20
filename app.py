@@ -66,6 +66,7 @@ from job_store import (
     update_job_manifest,
 )
 from runtime_limits import MAX_CONCURRENT_JOBS, ffmpeg_thread_args, subprocess_priority_kwargs
+from video_encoding import selected_h264_encoding_args
 from tight_edit import (
     DEFAULT_TIGHT_EDIT_PRESET,
     build_tight_edit_plan,
@@ -82,6 +83,32 @@ UPLOAD_DIR = "uploads"
 OUTPUT_DIR = "output"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+def _writable_runtime_dir(configured_path: str, fallback_path: str) -> str:
+    target = os.path.abspath(configured_path)
+    try:
+        os.makedirs(target, exist_ok=True)
+        probe_path = os.path.join(target, f".write-probe-{os.getpid()}")
+        with open(probe_path, "w", encoding="ascii") as handle:
+            handle.write("ok")
+        os.remove(probe_path)
+        return target
+    except OSError as exc:
+        fallback = os.path.abspath(fallback_path)
+        os.makedirs(fallback, exist_ok=True)
+        print(f"Render directory unavailable ({target}: {exc}); using {fallback}")
+        return fallback
+
+
+RENDER_SCRATCH_ROOT = _writable_runtime_dir(
+    os.environ.get("RENDER_SCRATCH_DIR", "/tmp/openshorts-render"),
+    "/tmp/openshorts-render",
+)
+RENDER_CACHE_ROOT = _writable_runtime_dir(
+    os.environ.get("RENDER_CACHE_DIR", "/var/cache/openshorts/render"),
+    "/tmp/openshorts-render-cache",
+)
 TRANSCRIPTION_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "transcriptions")
 os.makedirs(TRANSCRIPTION_OUTPUT_DIR, exist_ok=True)
 
@@ -3404,6 +3431,12 @@ def _apply_pexels_overlay_to_video(
         f"[0:v][img]overlay=x={x_expr}:y={y_expr}:format=auto:enable='between(t,{overlay_time},{overlay_time + overlay_duration})'"
     )
 
+    encoder_name, encoder_args = selected_h264_encoding_args(
+        cpu_preset=os.environ.get("OVERLAY_FFMPEG_PRESET", "veryfast").strip() or "veryfast",
+        crf="18",
+        pixel_format="yuv420p",
+    )
+    print(f"Video encoder (stock overlay): {encoder_name}")
     command = [
         "ffmpeg",
         "-y",
@@ -3416,14 +3449,7 @@ def _apply_pexels_overlay_to_video(
         image_path,
         "-filter_complex",
         filter_complex,
-        "-c:v",
-        "libx264",
-        "-preset",
-        os.environ.get("OVERLAY_FFMPEG_PRESET", "veryfast").strip() or "veryfast",
-        "-crf",
-        "18",
-        "-pix_fmt",
-        "yuv420p",
+        *encoder_args,
         "-movflags",
         "+faststart",
     ]
@@ -3499,7 +3525,7 @@ def _build_viral_effect_style_context(
 
 def _strip_overlay_prefixes(filename: Optional[str]) -> Optional[str]:
     current = os.path.basename(filename or "")
-    pattern = re.compile(r"^(?:hook|subtitled|edited|translated|trimmed)_\d+_(.+)$")
+    pattern = re.compile(r"^(?:hook|subtitled|styled|edited|translated|trimmed)_\d+_(.+)$")
     seen = set()
 
     while current and current not in seen:
@@ -3520,6 +3546,8 @@ def _infer_version_operation(filename: Optional[str]) -> str:
         return "render"
     if name.startswith("subtitled_"):
         return "subtitle"
+    if name.startswith("styled_"):
+        return "subtitle_hook"
     if name.startswith("hook_"):
         return "hook"
     if name.startswith("edited_"):
@@ -3537,6 +3565,7 @@ def _operation_label(operation: str) -> str:
         "viral_render": "Viral Render",
         "render": "Rendered",
         "subtitle": "Subtitles",
+        "subtitle_hook": "Subtitles + Hook",
         "hook": "Hook",
         "edit": "Auto Edit",
         "translate": "Dub",
@@ -3927,6 +3956,12 @@ def _ensure_mp4_h264_source(video_path: str, output_dir: str) -> str:
         f"Converting to H.264 MP4 ({os.path.basename(video_path)})..."
     )
     temp_working_path = f"{working_path}.tmp_{os.getpid()}_{int(time.time() * 1000)}.mp4"
+    conversion_encoder, conversion_encoder_args = selected_h264_encoding_args(
+        cpu_preset="veryfast",
+        crf="18",
+        pixel_format="yuv420p",
+    )
+    print(f"Video encoder (preview working copy): {conversion_encoder}")
     convert_cmd = [
         "ffmpeg",
         "-y",
@@ -3937,14 +3972,7 @@ def _ensure_mp4_h264_source(video_path: str, output_dir: str) -> str:
         "-map",
         "0:a?",
         *ffmpeg_thread_args(),
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "18",
-        "-pix_fmt",
-        "yuv420p",
+        *conversion_encoder_args,
         "-c:a",
         "aac",
         "-b:a",
@@ -7338,7 +7366,7 @@ async def resume_job(
     return _attach_queue_metadata({"job_id": job_id, "status": "queued"}, overview)
 
 from editor import VideoEditor
-from subtitles import burn_subtitles, transcribe_audio
+from subtitles import burn_subtitles, burn_subtitles_and_hook, transcribe_audio
 from hooks import add_hook_to_video
 from translate import translate_video, get_supported_languages
 from thumbnail import (
@@ -7986,6 +8014,12 @@ def _apply_face_aware_pattern_interrupts_to_clip(
     max_target_delta = 0.055 if interview_mode else 0.075
     detected_samples = 0
 
+    encoder_name, encoder_args = selected_h264_encoding_args(
+        cpu_preset=os.environ.get("OVERLAY_FFMPEG_PRESET", "veryfast").strip() or "veryfast",
+        crf="18",
+        pixel_format="yuv420p",
+    )
+    print(f"Video encoder (pattern interrupts): {encoder_name}")
     command = [
         "ffmpeg",
         "-y",
@@ -8014,14 +8048,7 @@ def _apply_face_aware_pattern_interrupts_to_clip(
     else:
         command.append("-an")
     command.extend([
-        "-c:v",
-        "libx264",
-        "-preset",
-        os.environ.get("OVERLAY_FFMPEG_PRESET", "veryfast").strip() or "veryfast",
-        "-crf",
-        "18",
-        "-pix_fmt",
-        "yuv420p",
+        *encoder_args,
         "-movflags",
         "+faststart",
         "-shortest",
@@ -9010,6 +9037,14 @@ async def render_browser_clip_preview(req: BrowserClipPreviewRequest):
         temp_preview_path = f"{preview_path}.tmp_{os.getpid()}_{int(time.time() * 1000)}.mp4"
 
         def run_browser_preview_render():
+            preview_encoder, preview_encoder_args = selected_h264_encoding_args(
+                cpu_preset=preview_preset,
+                crf=preview_crf,
+                maxrate=preview_maxrate,
+                bufsize=preview_bufsize,
+                pixel_format="yuv420p",
+            )
+            print(f"Video encoder (browser preview): {preview_encoder}")
             cmd = [
                 "ffmpeg",
                 "-y",
@@ -9027,18 +9062,7 @@ async def render_browser_clip_preview(req: BrowserClipPreviewRequest):
                 "0:a:0?",
                 "-vf",
                 filter_chain,
-                "-c:v",
-                "libx264",
-                "-preset",
-                preview_preset,
-                "-crf",
-                preview_crf,
-                "-maxrate",
-                preview_maxrate,
-                "-bufsize",
-                preview_bufsize,
-                "-pix_fmt",
-                "yuv420p",
+                *preview_encoder_args,
                 "-movflags",
                 "+faststart",
                 "-c:a",
@@ -9571,14 +9595,14 @@ async def render_clip(req: RenderClipRequest):
     audio_normalized = False
     social_audio_warning = ""
     if os.path.exists(current_path) and _video_has_audio(current_path):
-        normalized_temp_path = os.path.join(output_dir, f"normalized_audio_{int(time.time() * 1000)}_{os.path.basename(current_path)}")
+        normalized_temp_path = os.path.join(scratch_dir, f"normalized_audio_{int(time.time() * 1000)}_{os.path.basename(current_path)}")
         try:
             await loop.run_in_executor(
                 None,
                 lambda: _normalize_social_audio_loudness(current_path, normalized_temp_path, audio_bitrate="192k"),
             )
             if os.path.exists(normalized_temp_path) and os.path.getsize(normalized_temp_path) > 0:
-                os.replace(normalized_temp_path, current_path)
+                _publish_render_file(normalized_temp_path, current_path)
                 audio_normalized = True
         except Exception as exc:
             social_audio_warning = f"Lautheits-Normalisierung fehlgeschlagen: {exc}"
@@ -9601,6 +9625,63 @@ async def render_clip(req: RenderClipRequest):
         "audio_normalized": audio_normalized,
         "warning": social_audio_warning,
     }
+
+
+def _shortform_render_fingerprint(payload: Dict[str, Any]) -> str:
+    serialized = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:24]
+
+
+def _shortform_source_identity(path: str) -> Dict[str, Any]:
+    stat = os.stat(path)
+    return {
+        "name": os.path.basename(path),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def _find_cached_viral_render(
+    clip: Dict[str, Any],
+    output_dir: str,
+    render_fingerprint: str,
+) -> Optional[Tuple[str, str, Dict[str, Any]]]:
+    for version in reversed(clip.get("versions") or []):
+        if version.get("operation") != "viral_render":
+            continue
+        if version.get("render_fingerprint") != render_fingerprint:
+            continue
+        filename = os.path.basename(version.get("filename") or "")
+        path = os.path.join(output_dir, filename)
+        if filename and _is_valid_video_source(path, expected_codec="h264"):
+            return path, filename, version
+    return None
+
+
+def _find_cached_finished_render(
+    clip: Dict[str, Any],
+    output_dir: str,
+    output_fingerprint: str,
+) -> Optional[Tuple[str, str, Dict[str, Any]]]:
+    for version in reversed(clip.get("versions") or []):
+        if version.get("output_fingerprint") != output_fingerprint:
+            continue
+        filename = os.path.basename(version.get("filename") or "")
+        path = os.path.join(output_dir, filename)
+        if filename and _is_valid_video_source(path, expected_codec="h264"):
+            return path, filename, version
+    return None
+
+
+def _publish_render_file(source_path: str, destination_path: str) -> None:
+    os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+    temp_path = f"{destination_path}.publishing-{os.getpid()}-{threading.get_ident()}"
+    try:
+        shutil.copyfile(source_path, temp_path)
+        os.replace(temp_path, destination_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 @app.post("/api/clip/render/viral-original")
@@ -9668,101 +9749,142 @@ async def render_clip_viral_original(request: Request, req: RenderClipRequest):
         flash_mode=pattern_flash_mode,
     )
     request_token = int(time.time() * 1000)
+    loop = asyncio.get_event_loop()
+    scratch_context = tempfile.TemporaryDirectory(
+        prefix=f"{req.job_id[:8]}-{req.clip_index + 1}-",
+        dir=RENDER_SCRATCH_ROOT,
+    )
+    scratch_dir = scratch_context.name
     temp_source_filename = f"temp_viral_source_{request_token}_{req.clip_index + 1}.mp4"
     temp_vertical_filename = f"temp_viral_vertical_{request_token}_{req.clip_index + 1}.mp4"
     viral_render_filename = f"viral_rendered_{request_token}_clip_{req.clip_index + 1}.mp4"
-    temp_source_path = os.path.join(output_dir, temp_source_filename)
-    temp_vertical_path = os.path.join(output_dir, temp_vertical_filename)
+    temp_source_path = os.path.join(scratch_dir, temp_source_filename)
+    temp_vertical_path = os.path.join(scratch_dir, temp_vertical_filename)
     viral_render_path = os.path.join(output_dir, viral_render_filename)
-
-    def run_render_pipeline():
-        render_keep_segments(
-            source_input_path,
-            final_keep_segments,
-            temp_source_path,
-            ffmpeg_preset=os.environ.get("OVERLAY_FFMPEG_PRESET", "veryfast").strip() or "veryfast",
-            crf="18",
-            audio_bitrate="192k",
-            thread_args=ffmpeg_thread_args(),
-            subprocess_kwargs=subprocess_priority_kwargs(),
-        )
-        from main import process_video_to_vertical
-        return process_video_to_vertical(
-            temp_source_path,
-            temp_vertical_path,
-            interview_mode=bool(interview_mode),
-        )
-
-    loop = asyncio.get_event_loop()
-    try:
-        render_success = await loop.run_in_executor(None, run_render_pipeline)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-    finally:
-        if os.path.exists(temp_source_path):
-            os.remove(temp_source_path)
-
-    if not render_success or not os.path.exists(temp_vertical_path):
-        raise HTTPException(status_code=500, detail="Viral render failed")
-
-    ai_visuals_applied, ai_visuals_result = await loop.run_in_executor(
-        None,
-        lambda: _apply_face_aware_pattern_interrupts_to_clip(
-            input_path=temp_vertical_path,
-            output_path=viral_render_path,
-            transcript=final_remapped_transcript,
-            pattern_plan=pattern_plan,
-            ai_runtime=ai_runtime,
-            interview_mode=bool(interview_mode),
-        ),
-    )
-
-    if not ai_visuals_applied:
-        if os.path.exists(viral_render_path):
-            os.remove(viral_render_path)
-        shutil.move(temp_vertical_path, viral_render_path)
-    elif os.path.exists(temp_vertical_path):
-        os.remove(temp_vertical_path)
-
     pexels_key = _resolve_pexels_api_key(request)
-    if pexels_key and ai_runtime.get("enabled") and req.apply_stock_overlay:
-        from main import describe_output_language
+    stock_overlay_enabled = bool(pexels_key and ai_runtime.get("enabled") and req.apply_stock_overlay)
+    render_fingerprint = _shortform_render_fingerprint({
+        "cache_version": 3,
+        "source": _shortform_source_identity(source_input_path),
+        "keep_segments": [[round(float(start), 3), round(float(end), 3)] for start, end in final_keep_segments],
+        "interview_mode": bool(interview_mode),
+        "tight_edit_preset": tight_edit_preset if apply_tight_edit else "off",
+        "pattern_plan": pattern_plan,
+        "target_size": [
+            int(os.environ.get("TARGET_VERTICAL_WIDTH", "1080")),
+            int(os.environ.get("TARGET_VERTICAL_HEIGHT", "1920")),
+        ],
+        "tracking_detection_fps": float(os.environ.get("TRACKING_DETECTION_FPS", "10")),
+        "encoder": os.environ.get("SHORTFORM_VIDEO_ENCODER", "auto"),
+        "nvenc_cq": os.environ.get("NVENC_CQ", "18"),
+        "stock_overlay": stock_overlay_enabled,
+        "stock_hook": str(clip_data.get("viral_hook_text") or "").strip() if stock_overlay_enabled else "",
+        "ai_provider": ai_runtime.get("provider") if stock_overlay_enabled else "",
+        "ai_model": ai_runtime.get("model") if stock_overlay_enabled else "",
+    })
+    cached_render = _find_cached_viral_render(clip_data, output_dir, render_fingerprint)
+    pattern_applied = bool((pattern_plan or {}).get("zoom_cycles") or (pattern_plan or {}).get("flash_events"))
+    ai_visuals_result = {
+        "applied": pattern_applied,
+        "fused_with_vertical_render": True,
+        "cache_hit": bool(cached_render),
+        "warning": ai_runtime.get("warning") or "",
+        "pattern_plan": pattern_plan,
+    }
 
-        language_code = "en"
-        language_name = "English"
-        if isinstance(final_remapped_transcript, dict):
-            language_code = str(final_remapped_transcript.get("language") or "en").strip().lower()
-            language_name = describe_output_language(language_code)[1]
-        elif isinstance(data.get("transcript"), dict):
-            language_code = str(data.get("transcript").get("language") or "en").strip().lower()
-            language_name = describe_output_language(language_code)[1]
+    if cached_render:
+        viral_render_path, viral_render_filename, cached_version = cached_render
+        clip_data["active_version_id"] = cached_version.get("id")
+        _sync_clip_variant_fields(req.job_id, clip_data)
+        print(f"Render cache hit: {viral_render_filename}")
+    else:
+        vertical_fingerprint = _shortform_render_fingerprint({
+            "cache_version": 3,
+            "source": _shortform_source_identity(source_input_path),
+            "keep_segments": [[round(float(start), 3), round(float(end), 3)] for start, end in final_keep_segments],
+            "interview_mode": bool(interview_mode),
+            "pattern_plan": pattern_plan,
+            "target_size": [
+                int(os.environ.get("TARGET_VERTICAL_WIDTH", "1080")),
+                int(os.environ.get("TARGET_VERTICAL_HEIGHT", "1920")),
+            ],
+            "tracking_detection_fps": float(os.environ.get("TRACKING_DETECTION_FPS", "10")),
+            "encoder": os.environ.get("SHORTFORM_VIDEO_ENCODER", "auto"),
+            "nvenc_cq": os.environ.get("NVENC_CQ", "18"),
+        })
+        vertical_cache_dir = os.path.join(RENDER_CACHE_ROOT, os.path.basename(req.job_id))
+        os.makedirs(vertical_cache_dir, exist_ok=True)
+        vertical_cache_path = os.path.join(vertical_cache_dir, f"vertical_{vertical_fingerprint}.mp4")
 
-        prompt = _build_stock_overlay_prompt(
-            base_output_duration,
-            final_remapped_transcript,
-            language_name,
-            hook_text=str(clip_data.get("viral_hook_text") or "").strip() or None,
-        )
-        llm_payload = _call_stock_overlay_llm(ai_runtime, prompt)
-        stock_overlay_plan = _sanitize_stock_overlay_plan(llm_payload, base_output_duration)
-        if stock_overlay_plan:
-            search_query = " ".join(stock_overlay_plan["search_keywords"][:3])
-            image_info = _search_pexels_image(search_query, pexels_key)
-            if image_info and image_info.get("photo_url"):
-                image_path = os.path.join(output_dir, f"temp_pexels_{request_token}.jpg")
-                overlay_temp_path = f"{viral_render_path}.pexels.mp4"
-                try:
+        if _is_valid_video_source(vertical_cache_path, expected_codec="h264"):
+            print(f"Vertical render cache hit: {os.path.basename(vertical_cache_path)}")
+            ai_visuals_result["vertical_cache_hit"] = True
+        else:
+            def run_render_pipeline():
+                render_keep_segments(
+                    source_input_path,
+                    final_keep_segments,
+                    temp_source_path,
+                    ffmpeg_preset=os.environ.get("OVERLAY_FFMPEG_PRESET", "veryfast").strip() or "veryfast",
+                    crf="18",
+                    audio_bitrate="192k",
+                    thread_args=ffmpeg_thread_args(),
+                    subprocess_kwargs=subprocess_priority_kwargs(),
+                )
+                from main import process_video_to_vertical
+                return process_video_to_vertical(
+                    temp_source_path,
+                    temp_vertical_path,
+                    interview_mode=bool(interview_mode),
+                    pattern_plan=pattern_plan,
+                )
+
+            try:
+                render_success = await loop.run_in_executor(None, run_render_pipeline)
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=str(exc))
+            if not render_success or not _is_valid_video_source(temp_vertical_path, expected_codec="h264"):
+                raise HTTPException(status_code=500, detail="Viral render failed")
+            _publish_render_file(temp_vertical_path, vertical_cache_path)
+            ai_visuals_result["vertical_cache_hit"] = False
+
+        working_base_path = vertical_cache_path
+        if stock_overlay_enabled:
+            from main import describe_output_language
+
+            language_code = "en"
+            language_name = "English"
+            if isinstance(final_remapped_transcript, dict):
+                language_code = str(final_remapped_transcript.get("language") or "en").strip().lower()
+                language_name = describe_output_language(language_code)[1]
+            elif isinstance(data.get("transcript"), dict):
+                language_code = str(data.get("transcript").get("language") or "en").strip().lower()
+                language_name = describe_output_language(language_code)[1]
+
+            prompt = _build_stock_overlay_prompt(
+                base_output_duration,
+                final_remapped_transcript,
+                language_name,
+                hook_text=str(clip_data.get("viral_hook_text") or "").strip() or None,
+            )
+            llm_payload = _call_stock_overlay_llm(ai_runtime, prompt)
+            stock_overlay_plan = _sanitize_stock_overlay_plan(llm_payload, base_output_duration)
+            if stock_overlay_plan:
+                search_query = " ".join(stock_overlay_plan["search_keywords"][:3])
+                image_info = _search_pexels_image(search_query, pexels_key)
+                if image_info and image_info.get("photo_url"):
+                    image_path = os.path.join(scratch_dir, f"temp_pexels_{request_token}.jpg")
+                    overlay_temp_path = os.path.join(scratch_dir, f"stock_{viral_render_filename}")
                     if _download_stock_image(image_info["photo_url"], image_path):
                         overlay_success = _apply_pexels_overlay_to_video(
-                            viral_render_path,
+                            working_base_path,
                             overlay_temp_path,
                             image_path,
                             stock_overlay_plan["overlay_time"],
                             stock_overlay_plan["overlay_duration"],
                         )
                         if overlay_success and os.path.exists(overlay_temp_path):
-                            os.remove(viral_render_path)
-                            shutil.move(overlay_temp_path, viral_render_path)
+                            working_base_path = overlay_temp_path
                             clip_data["stock_overlay"] = {
                                 "search_keywords": stock_overlay_plan["search_keywords"],
                                 "overlay_time": stock_overlay_plan["overlay_time"],
@@ -9770,9 +9892,22 @@ async def render_clip_viral_original(request: Request, req: RenderClipRequest):
                                 "photo_url": image_info.get("photo_url"),
                                 "photographer": image_info.get("photographer"),
                             }
-                finally:
-                    if os.path.exists(image_path):
-                        os.remove(image_path)
+
+        _publish_render_file(working_base_path, viral_render_path)
+        base_version = _append_clip_version(
+            req.job_id,
+            output_dir,
+            clip_data,
+            output_filename=viral_render_filename,
+            operation="viral_render",
+            label="Viral Render",
+            transcript_source="audio",
+            transcript_start=None,
+            transcript_end=None,
+            subtitle_settings=subtitle_settings if subtitle_settings else _METADATA_UNSET,
+            hook_settings=hook_settings if hook_settings else _METADATA_UNSET,
+        )
+        base_version["render_fingerprint"] = render_fingerprint
 
     current_path = viral_render_path
     current_filename = viral_render_filename
@@ -9804,25 +9939,36 @@ async def render_clip_viral_original(request: Request, req: RenderClipRequest):
     if hook_settings:
         clip_data["hook_settings"] = hook_settings
 
-    _append_clip_version(
-        req.job_id,
-        output_dir,
-        clip_data,
-        output_filename=viral_render_filename,
-        operation="viral_render",
-        label="Viral Render",
-        transcript_source="audio",
-        transcript_start=None,
-        transcript_end=None,
-        subtitle_settings=subtitle_settings if subtitle_settings else _METADATA_UNSET,
-        hook_settings=hook_settings if hook_settings else _METADATA_UNSET,
+    output_fingerprint = _shortform_render_fingerprint({
+        "cache_version": 1,
+        "base_render": render_fingerprint,
+        "apply_subtitles": apply_subtitles,
+        "subtitle_settings": subtitle_settings if apply_subtitles else None,
+        "subtitle_transcript": _shortform_render_fingerprint(final_remapped_transcript or {}) if apply_subtitles else "",
+        "apply_hook": apply_hook,
+        "hook_settings": hook_settings if apply_hook else None,
+        "audio_normalization": "ebu_r128_v1",
+    })
+    cached_finished_render = (
+        _find_cached_finished_render(clip_data, output_dir, output_fingerprint)
+        if apply_subtitles or apply_hook
+        else None
     )
+    final_cache_hit = bool(cached_finished_render)
+    if cached_finished_render:
+        current_path, current_filename, cached_finished_version = cached_finished_render
+        clip_data["active_version_id"] = cached_finished_version.get("id")
+        _sync_clip_variant_fields(req.job_id, clip_data)
+        ai_visuals_result["final_cache_hit"] = True
+        print(f"Finished render cache hit: {current_filename}")
 
+    render_subtitles = apply_subtitles and not final_cache_hit
+    render_hook = apply_hook and not final_cache_hit
     subtitle_transcript_for_render = final_remapped_transcript
     subtitle_clip_start = 0.0
     subtitle_clip_end = rendered_duration
 
-    if apply_subtitles:
+    if render_subtitles:
         preferred_language = _resolve_subtitle_language_hint(
             metadata_data=data,
             clip_data=clip_data,
@@ -9835,8 +9981,63 @@ async def render_clip_viral_original(request: Request, req: RenderClipRequest):
             )
             subtitle_clip_end = _probe_video_duration(current_path)
 
+    size_map = {"S": 0.8, "M": 1.0, "L": 1.3}
+    if render_subtitles and render_hook:
+        styled_filename = f"styled_{int(time.time() * 1000)}_{current_filename}"
+        styled_path = os.path.join(output_dir, styled_filename)
+        scratch_styled_path = os.path.join(scratch_dir, styled_filename)
+
+        def run_combined_overlays():
+            return burn_subtitles_and_hook(
+                current_path,
+                subtitle_transcript_for_render,
+                subtitle_clip_start,
+                subtitle_clip_end,
+                scratch_styled_path,
+                subtitle_alignment=subtitle_settings.get("position", "bottom"),
+                subtitle_y_position=subtitle_settings.get("y_position"),
+                subtitle_fontsize=subtitle_settings.get("font_size", 16),
+                subtitle_font_family=subtitle_settings.get("font_family"),
+                subtitle_background_style=subtitle_settings.get("background_style"),
+                hook_text=hook_settings["text"],
+                hook_position=hook_settings.get("position", "top"),
+                hook_horizontal_position=hook_settings.get("horizontal_position", "center"),
+                hook_x_position=hook_settings.get("x_position"),
+                hook_y_position=hook_settings.get("y_position"),
+                hook_text_align=hook_settings.get("text_align", "center"),
+                hook_font_scale=size_map.get(hook_settings.get("size"), 1.0),
+                hook_width_preset=hook_settings.get("width_preset", "wide"),
+                hook_font_name=hook_settings.get("font_family"),
+                hook_background_style=hook_settings.get("background_style"),
+                hook_visible_seconds=hook_settings.get("visible_seconds", 4.0),
+                hook_fade_out_seconds=hook_settings.get("fade_out_seconds", 0.45),
+                temp_dir=scratch_dir,
+            )
+
+        combined_success = await loop.run_in_executor(None, run_combined_overlays)
+        if not combined_success:
+            raise HTTPException(status_code=400, detail="No words found for this clip range.")
+        _publish_render_file(scratch_styled_path, styled_path)
+        styled_version = _append_clip_version(
+            req.job_id,
+            output_dir,
+            clip_data,
+            output_filename=styled_filename,
+            operation="subtitle_hook",
+            label="Subtitles + Hook",
+            transcript_source="audio",
+            transcript_start=None,
+            transcript_end=None,
+            subtitle_settings=subtitle_settings,
+            hook_settings=hook_settings,
+        )
+        styled_version["output_fingerprint"] = output_fingerprint
+        current_path = styled_path
+        current_filename = styled_filename
+    elif render_subtitles:
         subtitle_filename = f"subtitled_{int(time.time() * 1000)}_{current_filename}"
         subtitle_path = os.path.join(output_dir, subtitle_filename)
+        scratch_subtitle_path = os.path.join(scratch_dir, subtitle_filename)
 
         def run_subtitles():
             return burn_subtitles(
@@ -9844,7 +10045,7 @@ async def render_clip_viral_original(request: Request, req: RenderClipRequest):
                 subtitle_transcript_for_render,
                 subtitle_clip_start,
                 subtitle_clip_end,
-                subtitle_path,
+                scratch_subtitle_path,
                 alignment=subtitle_settings.get("position", "bottom"),
                 y_position=subtitle_settings.get("y_position"),
                 fontsize=subtitle_settings.get("font_size", 16),
@@ -9855,8 +10056,9 @@ async def render_clip_viral_original(request: Request, req: RenderClipRequest):
         subtitle_success = await loop.run_in_executor(None, run_subtitles)
         if not subtitle_success:
             raise HTTPException(status_code=400, detail="No words found for this clip range.")
+        _publish_render_file(scratch_subtitle_path, subtitle_path)
 
-        _append_clip_version(
+        subtitle_version = _append_clip_version(
             req.job_id,
             output_dir,
             clip_data,
@@ -9868,19 +10070,20 @@ async def render_clip_viral_original(request: Request, req: RenderClipRequest):
             transcript_end=None,
             subtitle_settings=subtitle_settings,
         )
+        subtitle_version["output_fingerprint"] = output_fingerprint
         current_path = subtitle_path
         current_filename = subtitle_filename
 
-    if apply_hook:
+    elif render_hook:
         hook_filename = f"hook_{int(time.time() * 1000)}_{current_filename}"
         hook_path = os.path.join(output_dir, hook_filename)
-        size_map = {"S": 0.8, "M": 1.0, "L": 1.3}
+        scratch_hook_path = os.path.join(scratch_dir, hook_filename)
 
         def run_hook():
             return add_hook_to_video(
                 current_path,
                 hook_settings["text"],
-                hook_path,
+                scratch_hook_path,
                 position=hook_settings.get("position", "top"),
                 horizontal_position=hook_settings.get("horizontal_position", "center"),
                 x_position=hook_settings.get("x_position"),
@@ -9893,7 +10096,8 @@ async def render_clip_viral_original(request: Request, req: RenderClipRequest):
             )
 
         await loop.run_in_executor(None, run_hook)
-        _append_clip_version(
+        _publish_render_file(scratch_hook_path, hook_path)
+        hook_version = _append_clip_version(
             req.job_id,
             output_dir,
             clip_data,
@@ -9905,12 +10109,13 @@ async def render_clip_viral_original(request: Request, req: RenderClipRequest):
             transcript_end=None,
             hook_settings=hook_settings,
         )
+        hook_version["output_fingerprint"] = output_fingerprint
         current_path = hook_path
         current_filename = hook_filename
 
     audio_normalized = False
     social_audio_warning = ""
-    if os.path.exists(current_path) and _video_has_audio(current_path):
+    if not final_cache_hit and os.path.exists(current_path) and _video_has_audio(current_path):
         normalized_temp_path = os.path.join(output_dir, f"normalized_audio_{int(time.time() * 1000)}_{os.path.basename(current_path)}")
         try:
             await loop.run_in_executor(
@@ -9945,6 +10150,7 @@ async def render_clip_viral_original(request: Request, req: RenderClipRequest):
     warning_parts = [part for part in [ai_visuals_result.get("warning"), social_audio_warning] if part]
     if warning_parts:
         response_payload["warning"] = " | ".join(warning_parts)
+    scratch_context.cleanup()
     return response_payload
 
 class TranslateRequest(BaseModel):

@@ -7,6 +7,7 @@ import urllib.request
 import urllib.error
 from google import genai
 from google.genai import types
+from video_encoding import selected_h264_encoding_args
 
 class VideoEditor:
     def __init__(self, provider="gemini", api_key=None, base_url=None, model_name=None):
@@ -346,11 +347,17 @@ class VideoEditor:
 
         print(f"🎬 Executing AI Filter: {filter_string}")
         
+        encoder_name, encoder_args = selected_h264_encoding_args(
+            cpu_preset="fast",
+            crf="22",
+            pixel_format="yuv420p",
+        )
+        print(f"Video encoder (AI filter): {encoder_name}")
         cmd = [
             'ffmpeg', '-y',
             '-i', input_path,
             '-vf', filter_string,
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
+            *encoder_args,
             '-c:a', 'copy',
             output_path
         ]

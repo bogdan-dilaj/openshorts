@@ -2,6 +2,7 @@ import hashlib
 import glob
 import os
 import re
+import shutil
 import threading
 import time
 import ctypes
@@ -31,6 +32,17 @@ _CUDA_RUNTIME_LOCK = threading.Lock()
 _LEGACY_MODEL_MAPPINGS = {
     "primeline/distil-whisper-large-v3-german": "primeline/whisper-large-v3-german",
 }
+_MODEL_SUPPORT_FILES = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "preprocessor_config.json",
+    "generation_config.json",
+    "special_tokens_map.json",
+    "added_tokens.json",
+    "normalizer.json",
+    "vocab.json",
+    "merges.txt",
+)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -482,6 +494,36 @@ def _hf_convert_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+def _sync_model_support_files(source_dir: str, target_dir: str) -> List[str]:
+    """Copy feature-extractor/tokenizer metadata missing from some CT2 conversions."""
+    copied: List[str] = []
+    os.makedirs(target_dir, exist_ok=True)
+    for file_name in _MODEL_SUPPORT_FILES:
+        source_path = os.path.join(source_dir, file_name)
+        if not os.path.isfile(source_path):
+            continue
+
+        target_path = os.path.join(target_dir, file_name)
+        try:
+            if os.path.isfile(target_path) and os.path.getsize(target_path) == os.path.getsize(source_path):
+                continue
+        except OSError:
+            pass
+
+        temp_path = f"{target_path}.tmp-{os.getpid()}-{threading.get_ident()}"
+        try:
+            shutil.copyfile(source_path, temp_path)
+            os.replace(temp_path, target_path)
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+        copied.append(file_name)
+    return copied
+
+
 def _resolve_model_reference(model_name: str) -> str:
     normalized = (model_name or "").strip()
     if not normalized:
@@ -529,24 +571,19 @@ def _resolve_model_reference(model_name: str) -> str:
     target_dir = os.path.join(cache_root, f"{_slugify_model_name(normalized)}-{digest}")
 
     if os.path.isfile(os.path.join(target_dir, "model.bin")):
+        copied_files = _sync_model_support_files(snapshot_dir, target_dir)
+        if copied_files:
+            print(
+                "Whisper converted-model metadata repaired: "
+                + ", ".join(copied_files)
+            )
         with _MODEL_RESOLUTION_LOCK:
             _MODEL_RESOLUTION_CACHE[normalized] = target_dir
         return target_dir
 
-    copy_candidates = [
-        "tokenizer.json",
-        "tokenizer_config.json",
-        "preprocessor_config.json",
-        "generation_config.json",
-        "special_tokens_map.json",
-        "added_tokens.json",
-        "normalizer.json",
-        "vocab.json",
-        "merges.txt",
-    ]
     copy_files = [
         file_name
-        for file_name in copy_candidates
+        for file_name in _MODEL_SUPPORT_FILES
         if os.path.isfile(os.path.join(snapshot_dir, file_name))
     ]
 
@@ -578,6 +615,13 @@ def _resolve_model_reference(model_name: str) -> str:
     if not os.path.isfile(os.path.join(target_dir, "model.bin")):
         raise RuntimeError(
             f"conversion finished but model.bin missing for '{normalized}' at {target_dir}"
+        )
+
+    copied_files = _sync_model_support_files(snapshot_dir, target_dir)
+    if copied_files:
+        print(
+            "Whisper converted-model metadata copied: "
+            + ", ".join(copied_files)
         )
 
     with _MODEL_RESOLUTION_LOCK:

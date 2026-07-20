@@ -3,6 +3,8 @@ import re
 import subprocess
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from video_encoding import run_h264_ffmpeg
+
 
 RangeTuple = Tuple[float, float]
 
@@ -473,9 +475,19 @@ def render_keep_segments(
     args = list(thread_args or [])
     run_kwargs = dict(subprocess_kwargs or {})
 
-    def run_ffmpeg(cmd: List[str]) -> None:
+    def run_ffmpeg(command_builder) -> None:
         try:
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **run_kwargs)
+            run_h264_ffmpeg(
+                command_builder,
+                cpu_preset=ffmpeg_preset,
+                crf=str(crf),
+                run_kwargs={
+                    "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.PIPE,
+                    **run_kwargs,
+                },
+                label="keep segments",
+            )
         except subprocess.CalledProcessError as exc:
             stderr_text = exc.stderr.decode("utf-8", errors="replace").strip() if exc.stderr else ""
             if len(stderr_text) > 2000:
@@ -486,7 +498,7 @@ def render_keep_segments(
     if len(safe_segments) == 1:
         start, end = safe_segments[0]
         duration = max(0.001, end - start)
-        cmd = [
+        run_ffmpeg(lambda encoder_args, _encoder: [
             "ffmpeg",
             "-y",
             "-loglevel",
@@ -498,12 +510,7 @@ def render_keep_segments(
             "-t",
             f"{duration:.3f}",
             *args,
-            "-c:v",
-            "libx264",
-            "-crf",
-            str(crf),
-            "-preset",
-            ffmpeg_preset,
+            *encoder_args,
             "-c:a",
             "aac",
             "-b:a",
@@ -511,19 +518,26 @@ def render_keep_segments(
             "-movflags",
             "+faststart",
             output_path,
-        ]
-        run_ffmpeg(cmd)
+        ])
         return
 
     has_audio = _has_audio_stream(input_video)
     filter_parts: List[str] = []
     concat_inputs: List[str] = []
+    source_seek = min(start for start, _end in safe_segments)
+    source_window_duration = max(end for _start, end in safe_segments) - source_seek
 
     for index, (start, end) in enumerate(safe_segments):
-        filter_parts.append(f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS[v{index}]")
+        relative_start = max(0.0, start - source_seek)
+        relative_end = max(relative_start, end - source_seek)
+        filter_parts.append(
+            f"[0:v]trim=start={relative_start:.3f}:end={relative_end:.3f},setpts=PTS-STARTPTS[v{index}]"
+        )
         concat_inputs.append(f"[v{index}]")
         if has_audio:
-            filter_parts.append(f"[0:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[a{index}]")
+            filter_parts.append(
+                f"[0:a]atrim=start={relative_start:.3f}:end={relative_end:.3f},asetpts=PTS-STARTPTS[a{index}]"
+            )
             concat_inputs.append(f"[a{index}]")
 
     if has_audio:
@@ -531,34 +545,30 @@ def render_keep_segments(
     else:
         filter_parts.append("".join(concat_inputs) + f"concat=n={len(safe_segments)}:v=1:a=0[vout]")
 
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-loglevel",
-        "error",
-        "-i",
-        input_video,
-        *args,
-        "-filter_complex",
-        ";".join(filter_parts),
-        "-map",
-        "[vout]",
-    ]
+    def build_concat_command(encoder_args, _encoder):
+        command = [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{source_seek:.3f}",
+            "-i",
+            input_video,
+            "-t",
+            f"{source_window_duration:.3f}",
+            *args,
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            "[vout]",
+        ]
+        if has_audio:
+            command.extend(["-map", "[aout]"])
+        command.extend(encoder_args)
+        if has_audio:
+            command.extend(["-c:a", "aac", "-b:a", audio_bitrate])
+        command.extend(["-movflags", "+faststart", output_path])
+        return command
 
-    if has_audio:
-        cmd.extend(["-map", "[aout]"])
-
-    cmd.extend([
-        "-c:v",
-        "libx264",
-        "-crf",
-        str(crf),
-        "-preset",
-        ffmpeg_preset,
-    ])
-
-    if has_audio:
-        cmd.extend(["-c:a", "aac", "-b:a", audio_bitrate])
-
-    cmd.extend(["-movflags", "+faststart", output_path])
-    run_ffmpeg(cmd)
+    run_ffmpeg(build_concat_command)
